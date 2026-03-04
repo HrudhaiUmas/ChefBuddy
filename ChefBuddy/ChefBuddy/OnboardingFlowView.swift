@@ -262,6 +262,7 @@ private struct AccountStep: View {
     @State private var showFeatures = false
     @State private var isFloating = false
     @State private var shimmerOffset: CGFloat = -1.0
+    @State private var showAuthSheet = false
     
     let features = [
         ("camera.viewfinder", "Smart Ingredient Scanning"),
@@ -329,11 +330,9 @@ private struct AccountStep: View {
             .padding(.top, 8)
             
             VStack(spacing: 15) {
-                AuthButton(icon: "envelope.fill", title: "Sign Up with Email", bg: .orange, fg: .white) {
-                    onFinish()
+                AuthButton(icon: "person.crop.circle.fill", title: "Sign Up / Log In", bg: .orange, fg: .white) {
+                    showAuthSheet = true
                 }
-                Button("Explore as Guest") { onFinish() }
-                    .font(.system(size: 16, weight: .bold)).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 24)
             .padding(.top, 4)
@@ -348,6 +347,13 @@ private struct AccountStep: View {
             withAnimation(.linear(duration: 3.0).repeatForever(autoreverses: false).delay(1.5)) {
                 shimmerOffset = 1.5
             }
+        }
+        .sheet(isPresented: $showAuthSheet) {
+            AuthView(onAuthSuccess: {
+                showAuthSheet = false
+                onFinish()
+            })
+            .presentationDetents([.fraction(0.85), .large])
         }
     }
 }

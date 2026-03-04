@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		6214F6A52F58249800488C57 /* FirebaseAnalytics in Frameworks */ = {isa = PBXBuildFile; productRef = 6214F6A42F58249800488C57 /* FirebaseAnalytics */; };
+		6214F6A72F58249800488C57 /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = 6214F6A62F58249800488C57 /* FirebaseAuth */; };
+		6214F6A92F58249800488C57 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 6214F6A82F58249800488C57 /* FirebaseCore */; };
+		6214F6AC2F58254A00488C57 /* GoogleSignIn in Frameworks */ = {isa = PBXBuildFile; productRef = 6214F6AB2F58254A00488C57 /* GoogleSignIn */; };
+		6214F6AE2F58254A00488C57 /* GoogleSignInSwift in Frameworks */ = {isa = PBXBuildFile; productRef = 6214F6AD2F58254A00488C57 /* GoogleSignInSwift */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		62DFC6412F580169003EC7D0 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -29,9 +37,22 @@
 		62DFC64A2F580169003EC7D0 /* ChefBuddyUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = ChefBuddyUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		6214F6B82F5831F200488C57 /* Exceptions for "ChefBuddy" folder in "ChefBuddy" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 62DFC6322F580165003EC7D0 /* ChefBuddy */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		62DFC6352F580165003EC7D0 /* ChefBuddy */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				6214F6B82F5831F200488C57 /* Exceptions for "ChefBuddy" folder in "ChefBuddy" target */,
+			);
 			path = ChefBuddy;
 			sourceTree = "<group>";
 		};
@@ -52,6 +73,11 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				6214F6AE2F58254A00488C57 /* GoogleSignInSwift in Frameworks */,
+				6214F6A52F58249800488C57 /* FirebaseAnalytics in Frameworks */,
+				6214F6AC2F58254A00488C57 /* GoogleSignIn in Frameworks */,
+				6214F6A92F58249800488C57 /* FirebaseCore in Frameworks */,
+				6214F6A72F58249800488C57 /* FirebaseAuth in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +138,11 @@
 			);
 			name = ChefBuddy;
 			packageProductDependencies = (
+				6214F6A42F58249800488C57 /* FirebaseAnalytics */,
+				6214F6A62F58249800488C57 /* FirebaseAuth */,
+				6214F6A82F58249800488C57 /* FirebaseCore */,
+				6214F6AB2F58254A00488C57 /* GoogleSignIn */,
+				6214F6AD2F58254A00488C57 /* GoogleSignInSwift */,
 			);
 			productName = ChefBuddy;
 			productReference = 62DFC6332F580165003EC7D0 /* ChefBuddy.app */;
@@ -195,6 +226,10 @@
 			);
 			mainGroup = 62DFC62A2F580165003EC7D0;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				6214F6A32F58249800488C57 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+				6214F6AA2F58254A00488C57 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 62DFC6342F580165003EC7D0 /* Products */;
 			projectDirPath = "";
@@ -400,6 +435,7 @@
 				DEVELOPMENT_TEAM = 8YVKKC8242;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ChefBuddy/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -432,6 +468,7 @@
 				DEVELOPMENT_TEAM = 8YVKKC8242;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = ChefBuddy/Info.plist;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -578,6 +615,53 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		6214F6A32F58249800488C57 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.10.0;
+			};
+		};
+		6214F6AA2F58254A00488C57 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/google/GoogleSignIn-iOS.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 9.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		6214F6A42F58249800488C57 /* FirebaseAnalytics */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6214F6A32F58249800488C57 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAnalytics;
+		};
+		6214F6A62F58249800488C57 /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6214F6A32F58249800488C57 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+		6214F6A82F58249800488C57 /* FirebaseCore */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6214F6A32F58249800488C57 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseCore;
+		};
+		6214F6AB2F58254A00488C57 /* GoogleSignIn */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6214F6AA2F58254A00488C57 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignIn;
+		};
+		6214F6AD2F58254A00488C57 /* GoogleSignInSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 6214F6AA2F58254A00488C57 /* XCRemoteSwiftPackageReference "GoogleSignIn-iOS" */;
+			productName = GoogleSignInSwift;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 62DFC62B2F580165003EC7D0 /* Project object */;
 }
