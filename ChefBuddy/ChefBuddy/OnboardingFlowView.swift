@@ -14,20 +14,12 @@ enum OnboardingStep: Int, CaseIterable {
     case welcome = 0
     case scanIngredients
     case aiAssistant
-    case preferences
     case account
 }
 
 struct OnboardingFlowView: View {
-    @Binding var hasOnboarded: Bool
-    @StateObject private var authVM = AuthViewModel()
+    @EnvironmentObject var authVM: AuthViewModel
     @State private var step: OnboardingStep = .welcome
-    
-    // Preference States to be saved to Firestore db
-    @State private var dietTags: Set<String> = []
-    @State private var allergies: Set<String> = []
-    @State private var macroTags: Set<String> = []
-    @State private var chefLevel: String = "🍳 Beginner"
 
     var body: some View {
         ZStack {
@@ -54,23 +46,9 @@ struct OnboardingFlowView: View {
                     )
                     .tag(OnboardingStep.aiAssistant)
                     
-                    PreferencesStep(
-                        dietTags: $dietTags,
-                        allergies: $allergies,
-                        macroTags: $macroTags,
-                        chefLevel: $chefLevel
-                    )
-                    .tag(OnboardingStep.preferences)
-                    
-                    AccountStep(
-                        dietTags: dietTags,
-                        allergies: allergies,
-                        macroTags: macroTags,
-                        chefLevel: chefLevel,
-                        onFinish: { hasOnboarded = true }
-                    )
-                    .environmentObject(authVM)
-                    .tag(OnboardingStep.account)
+                    AccountStep()
+                        .environmentObject(authVM)
+                        .tag(OnboardingStep.account)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
                 .animation(.spring(response: 0.5, dampingFraction: 0.8), value: step)
@@ -78,8 +56,7 @@ struct OnboardingFlowView: View {
                 BottomDock(
                     step: step,
                     onBack: goBack,
-                    onNext: goNext,
-                    onFinish: { hasOnboarded = true }
+                    onNext: goNext
                 )
             }
         }
@@ -190,90 +167,7 @@ private struct FeatureStep: View {
     }
 }
 
-private struct PreferencesStep: View {
-    @Binding var dietTags: Set<String>
-    @Binding var allergies: Set<String>
-    @Binding var macroTags: Set<String>
-    @Binding var chefLevel: String
-
-    private enum ActiveSheet: String, Identifiable {
-        case level, diet, allergy, macro
-        var id: String { self.rawValue }
-    }
-    
-    @State private var activeSheet: ActiveSheet? = nil
-
-    private let levels = ["🍳 Beginner", "👨‍🍳 Intermediate", "🔪 Advanced", "🌟 Masterchef"]
-    private let diets = ["🥗 Vegetarian", "🌿 Vegan", "🐟 Pescatarian", "🥩 Keto", "🍖 Paleo", "☪️ Halal", "✡️ Kosher"]
-    private let allergiesList = ["🥜 Peanuts", "🌳 Tree Nuts", "🥛 Dairy", "🥚 Eggs", "🦐 Shellfish", "🫘 Soy", "🌾 Gluten"]
-    private let macros = ["⚖️ Balanced", "💪 High Protein", "🔥 Low Calorie", "🍞 Low Carb"]
-
-    var body: some View {
-        ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 24) {
-                HStack {
-                    Spacer()
-                    SequentialIconView(icons: ["slider.horizontal.3", "heart.circle.fill", "checkmark.circle.fill"]).scaleEffect(0.6).frame(height: 100)
-                    Spacer()
-                }
-                .padding(.top, 30)
-                
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Personalize it").font(.system(size: 32, weight: .bold, design: .rounded))
-                    Text("We'll tailor every recipe to your lifestyle.").font(.system(size: 17)).foregroundStyle(.secondary)
-                    Text("You can change these in your profile later.").font(.system(size: 14, weight: .medium)).foregroundStyle(.tertiary)
-                }.padding(.horizontal, 24)
-
-                SinglePreferenceSection(title: "Experience Level", options: levels, selected: $chefLevel) {
-                    activeSheet = .level
-                }
-                
-                PreferenceSection(title: "Dietary Preferences", options: diets, selected: $dietTags) {
-                    activeSheet = .diet
-                }
-                
-                PreferenceSection(title: "Avoid (Allergies)", options: allergiesList, selected: $allergies) {
-                    activeSheet = .allergy
-                }
-                
-                PreferenceSection(title: "Macro Goals", options: macros, selected: $macroTags) {
-                    activeSheet = .macro
-                }
-                
-                Spacer(minLength: 120)
-            }
-        }
-        .sheet(item: $activeSheet) { sheetType in
-            switch sheetType {
-            case .level:
-                LevelInfoSheet()
-                    .presentationDetents([.fraction(0.45)])
-                    .presentationDragIndicator(.visible)
-            case .diet:
-                SimpleInfoSheet(title: "Dietary Preferences", message: "Select the diets that match your lifestyle. We will automatically filter out any recipe suggestions that don't fit these rules.")
-                    .presentationDetents([.fraction(0.3)])
-                    .presentationDragIndicator(.visible)
-            case .allergy:
-                SimpleInfoSheet(title: "Allergies", message: "Select ingredients you want to completely avoid. Your safety is our priority, and ChefBuddy will never suggest meals containing these items.")
-                    .presentationDetents([.fraction(0.3)])
-                    .presentationDragIndicator(.visible)
-            case .macro:
-                MacroInfoSheet()
-                    .presentationDetents([.fraction(0.5)])
-                    .presentationDragIndicator(.visible)
-            }
-        }
-    }
-}
-
 private struct AccountStep: View {
-    // Inputs from PreferencesStep
-    let dietTags: Set<String>
-    let allergies: Set<String>
-    let macroTags: Set<String>
-    let chefLevel: String
-    let onFinish: () -> Void
-    
     @EnvironmentObject var authVM: AuthViewModel
     
     @State private var showFeatures = false
@@ -367,189 +261,20 @@ private struct AccountStep: View {
         }
         .sheet(isPresented: $showAuthSheet) {
             AuthView(onAuthSuccess: {
-                // Save user preferences to Firestore once they sign up/log in
-                authVM.saveUserPreferences(
-                    level: chefLevel,
-                    diets: dietTags,
-                    allergy: allergies,
-                    macros: macroTags
-                )
+                UserDefaults.standard.set(true, forKey: "hasOnboarded")
                 showAuthSheet = false
-                onFinish()
             })
             .presentationDetents([.fraction(0.85), .large])
         }
     }
 }
 
-// MARK: - Shared UI
-
-private struct SinglePreferenceSection: View {
-    let title: String
-    let options: [String]
-    @Binding var selected: String
-    var onInfoTap: (() -> Void)? = nil
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Text(title).font(.system(size: 20, weight: .bold, design: .rounded))
-                if let onInfoTap = onInfoTap {
-                    Button(action: onInfoTap) {
-                        Image(systemName: "info.circle.fill")
-                            .foregroundStyle(Color.primary.opacity(0.4))
-                            .font(.system(size: 18))
-                    }
-                }
-            }.padding(.horizontal, 24)
-            
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    Spacer().frame(width: 12)
-                    ForEach(options, id: \.self) { option in
-                        let isSelected = selected == option
-                        Button {
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                            selected = option
-                        } label: {
-                            Text(option).font(.system(size: 16, weight: .bold, design: .rounded))
-                                .foregroundStyle(isSelected ? .white : .primary)
-                                .padding(.horizontal, 20).padding(.vertical, 14)
-                                .background(isSelected ? Color.orange : Color(.systemGray6))
-                                .clipShape(Capsule())
-                                .animation(.spring(response: 0.3, dampingFraction: 0.6), value: isSelected)
-                        }.buttonStyle(.plain)
-                    }
-                    Spacer().frame(width: 12)
-                }
-            }
-        }
-    }
-}
-
-private struct PreferenceSection: View {
-    let title: String
-    let options: [String]
-    @Binding var selected: Set<String>
-    var onInfoTap: (() -> Void)? = nil
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 8) {
-                Text(title).font(.system(size: 20, weight: .bold, design: .rounded))
-                if let onInfoTap = onInfoTap {
-                    Button(action: onInfoTap) {
-                        Image(systemName: "info.circle.fill")
-                            .foregroundStyle(Color.primary.opacity(0.4))
-                            .font(.system(size: 18))
-                    }
-                }
-            }.padding(.horizontal, 24)
-            
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    Spacer().frame(width: 12)
-                    ForEach(options, id: \.self) { option in
-                        let isSelected = selected.contains(option)
-                        Button {
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                            if isSelected { selected.remove(option) } else { selected.insert(option) }
-                        } label: {
-                            Text(option).font(.system(size: 16, weight: .bold, design: .rounded)).foregroundStyle(isSelected ? .white : .primary).padding(.horizontal, 20).padding(.vertical, 14).background(isSelected ? Color.green : Color(.systemGray6)).clipShape(Capsule()).animation(.spring(response: 0.3, dampingFraction: 0.6), value: isSelected)
-                        }.buttonStyle(.plain)
-                    }
-                    Spacer().frame(width: 12)
-                }
-            }
-        }
-    }
-}
-
-// Sub-view for the Level Info Sheet
-private struct LevelInfoSheet: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Chef Levels")
-                .font(.system(size: 24, weight: .bold, design: .rounded))
-                .padding(.bottom, 4)
-            
-            VStack(alignment: .leading, spacing: 16) {
-                LevelDescriptionRow(icon: "🍳", title: "Beginner", description: "You need step-by-step help, clear instructions, and simple recipes.")
-                LevelDescriptionRow(icon: "👨‍🍳", title: "Intermediate", description: "You're comfortable with basics and looking to expand your skills.")
-                LevelDescriptionRow(icon: "🔪", title: "Advanced", description: "You're a confident cook who can handle complex techniques and timing.")
-                LevelDescriptionRow(icon: "🌟", title: "Masterchef", description: "You're an expert looking for culinary challenges and fresh inspiration.")
-            }
-            Spacer()
-        }
-        .padding(24)
-        .padding(.top, 16)
-    }
-}
-
-// Sub-view for the Macro Info Sheet
-private struct MacroInfoSheet: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Macro Goals")
-                .font(.system(size: 24, weight: .bold, design: .rounded))
-                .padding(.bottom, 4)
-            
-            VStack(alignment: .leading, spacing: 16) {
-                LevelDescriptionRow(icon: "⚖️", title: "Balanced", description: "A well-rounded ratio of proteins, fats, and carbohydrates for general health.")
-                LevelDescriptionRow(icon: "💪", title: "High Protein", description: "Prioritizes recipes rich in protein to support muscle growth and recovery.")
-                LevelDescriptionRow(icon: "🔥", title: "Low Calorie", description: "Focuses on meals with a lower total caloric intake for weight management.")
-                LevelDescriptionRow(icon: "🍞", title: "Low Carb", description: "Minimizes carbohydrates, often favored for ketogenic or low-carb diets.")
-            }
-            Spacer()
-        }
-        .padding(24)
-        .padding(.top, 16)
-    }
-}
-
-// Sub-view for the other simpler info sheets
-private struct SimpleInfoSheet: View {
-    let title: String
-    let message: String
-    
-    var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text(title)
-                .font(.system(size: 24, weight: .bold, design: .rounded))
-            
-            Text(message)
-                .font(.system(size: 16, weight: .regular))
-                .foregroundStyle(.secondary)
-                .lineSpacing(4)
-            
-            Spacer()
-        }
-        .padding(24)
-        .padding(.top, 16)
-    }
-}
-
-private struct LevelDescriptionRow: View {
-    let icon: String
-    let title: String
-    let description: String
-    
-    var body: some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(icon).font(.title)
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title).font(.headline.bold())
-                Text(description).font(.subheadline).foregroundStyle(.secondary)
-            }
-        }
-    }
-}
+// MARK: - Shared UI components
 
 private struct BottomDock: View {
     let step: OnboardingStep
     let onBack: () -> Void
     let onNext: () -> Void
-    let onFinish: () -> Void
     @State private var isPressed = false
     
     var body: some View {
