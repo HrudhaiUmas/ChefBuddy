@@ -20,8 +20,10 @@ enum OnboardingStep: Int, CaseIterable {
 
 struct OnboardingFlowView: View {
     @Binding var hasOnboarded: Bool
+    @StateObject private var authVM = AuthViewModel()
     @State private var step: OnboardingStep = .welcome
     
+    // Preference States to be saved to Firestore db
     @State private var dietTags: Set<String> = []
     @State private var allergies: Set<String> = []
     @State private var macroTags: Set<String> = []
@@ -47,7 +49,7 @@ struct OnboardingFlowView: View {
                     
                     FeatureStep(
                         icons: ["frying.pan.fill", "sparkles", "bubble.left.and.bubble.right.fill"],
-                        title: "Your Al Sous-Chef",
+                        title: "Your AI Sous-Chef",
                         subtitle: "Get step-by-step guidance and ask questions in real-time while you cook."
                     )
                     .tag(OnboardingStep.aiAssistant)
@@ -60,8 +62,15 @@ struct OnboardingFlowView: View {
                     )
                     .tag(OnboardingStep.preferences)
                     
-                    AccountStep(onFinish: { hasOnboarded = true })
-                        .tag(OnboardingStep.account)
+                    AccountStep(
+                        dietTags: dietTags,
+                        allergies: allergies,
+                        macroTags: macroTags,
+                        chefLevel: chefLevel,
+                        onFinish: { hasOnboarded = true }
+                    )
+                    .environmentObject(authVM)
+                    .tag(OnboardingStep.account)
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
                 .animation(.spring(response: 0.5, dampingFraction: 0.8), value: step)
@@ -153,7 +162,7 @@ private struct WelcomeStep: View {
             VStack(spacing: 12) {
                 Text("ChefBuddy")
                     .font(.system(size: 42, weight: .heavy, design: .rounded))
-                Text("Your Al-Powered Kitchen Companion.\nTurn ingredients into masterpieces.")
+                Text("Your AI-Powered Kitchen Companion.\nTurn ingredients into masterpieces.")
                     .font(.system(size: 18, weight: .medium, design: .rounded))
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
@@ -258,7 +267,15 @@ private struct PreferencesStep: View {
 }
 
 private struct AccountStep: View {
+    // Inputs from PreferencesStep
+    let dietTags: Set<String>
+    let allergies: Set<String>
+    let macroTags: Set<String>
+    let chefLevel: String
     let onFinish: () -> Void
+    
+    @EnvironmentObject var authVM: AuthViewModel
+    
     @State private var showFeatures = false
     @State private var isFloating = false
     @State private var shimmerOffset: CGFloat = -1.0
@@ -266,7 +283,7 @@ private struct AccountStep: View {
     
     let features = [
         ("camera.viewfinder", "Smart Ingredient Scanning"),
-        ("sparkles", "Personalized Al Recipes"),
+        ("sparkles", "Personalized AI Recipes"),
         ("bubble.left.and.bubble.right.fill", "Real-time Cooking Assistant"),
         ("slider.horizontal.3", "Recipe Adjustment & Detail"),
         ("cart.fill", "Auto-Generated Grocery Lists")
@@ -350,6 +367,13 @@ private struct AccountStep: View {
         }
         .sheet(isPresented: $showAuthSheet) {
             AuthView(onAuthSuccess: {
+                // Save user preferences to Firestore once they sign up/log in
+                authVM.saveUserPreferences(
+                    level: chefLevel,
+                    diets: dietTags,
+                    allergy: allergies,
+                    macros: macroTags
+                )
                 showAuthSheet = false
                 onFinish()
             })
@@ -373,7 +397,7 @@ private struct SinglePreferenceSection: View {
                 if let onInfoTap = onInfoTap {
                     Button(action: onInfoTap) {
                         Image(systemName: "info.circle.fill")
-                            .foregroundStyle(Color.primary.opacity(0.4)) // 🛠️ Adjusted for clear visibility in light & dark mode
+                            .foregroundStyle(Color.primary.opacity(0.4))
                             .font(.system(size: 18))
                     }
                 }
@@ -416,7 +440,7 @@ private struct PreferenceSection: View {
                 if let onInfoTap = onInfoTap {
                     Button(action: onInfoTap) {
                         Image(systemName: "info.circle.fill")
-                            .foregroundStyle(Color.primary.opacity(0.4)) // 🛠️ Adjusted for clear visibility in light & dark mode
+                            .foregroundStyle(Color.primary.opacity(0.4))
                             .font(.system(size: 18))
                     }
                 }
@@ -536,12 +560,12 @@ private struct BottomDock: View {
                         Button(action: onBack) {
                             Image(systemName: "arrow.left")
                                 .font(.system(size: 20, weight: .bold))
-                                .foregroundStyle(Color.primary) // 🛠️ Solid primary for maximum contrast
+                                .foregroundStyle(Color.primary)
                                 .frame(width: 64, height: 64)
-                                .background(.thickMaterial) // 🛠️ Upgraded to thickMaterial to separate from background
+                                .background(.thickMaterial)
                                 .clipShape(Circle())
                                 .overlay(Circle().stroke(Color.primary.opacity(0.15), lineWidth: 1))
-                                .shadow(color: .black.opacity(0.15), radius: 8, y: 4) // 🛠️ Slightly stronger shadow
+                                .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
                         }
                     }
                     

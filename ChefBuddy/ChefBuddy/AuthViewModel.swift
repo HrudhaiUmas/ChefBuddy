@@ -8,6 +8,7 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseCore
+import FirebaseFirestore
 import GoogleSignIn
 import Combine
 
@@ -24,9 +25,26 @@ class AuthViewModel: ObservableObject {
     @Published var userSession: FirebaseAuth.User?
     @Published var errorMessage: String = ""
     
+    private let db = Firestore.firestore()
+    
     init() {
         // Check if a user is already logged in when the app starts
         self.userSession = Auth.auth().currentUser
+    }
+    
+    // MARK: - Firestore Sync
+    
+    func saveUserPreferences(level: String, diets: Set<String>, allergy: Set<String>, macros: Set<String>) {
+        guard let user = userSession else { return }
+        
+        let newUser = DBUser(auth: user, level: level, diets: diets, allergy: allergy, macros: macros)
+        
+        do {
+            try db.collection("users").document(user.uid).setData(from: newUser)
+            print("Successfully saved user preferences to Firestore.")
+        } catch {
+            self.errorMessage = "Failed to save profile: \(error.localizedDescription)"
+        }
     }
     
     // MARK: - Email / Password Auth
