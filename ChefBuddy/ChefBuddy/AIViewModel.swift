@@ -10,11 +10,32 @@ import FirebaseFirestore
 import FirebaseAILogic
 import SwiftUI
 
+enum CookingAssistantError: LocalizedError {
+    case modelNotReady
+    case imageProcessingFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .modelNotReady:        return "ChefBuddy is still loading. Please wait a moment and try again."
+        case .imageProcessingFailed: return "Couldn't process the image. Please try again."
+        }
+    }
+}
+
 class CookingAssistant: ObservableObject {
     private let db = Firestore.firestore()
 
     @Published var model: GenerativeModel?
     @Published var isModelReady = false
+
+    /// Waits up to 10s for the model to be ready, then throws if it still isn't
+    func waitUntilReady() async throws {
+        let deadline = Date().addingTimeInterval(10)
+        while !isModelReady {
+            if Date() > deadline { throw CookingAssistantError.modelNotReady }
+            try await Task.sleep(nanoseconds: 200_000_000) // 0.2s poll
+        }
+    }
 
     func setupAssistant(userId: String) async {
         do {
@@ -55,9 +76,10 @@ class CookingAssistant: ObservableObject {
             - Keep responses concise, encouraging, and practical.
             """
 
+            // systemInstruction uses ModelContent with TextPart (Part protocol, not enum)
             let newModel = FirebaseAI.firebaseAI().generativeModel(
-                modelName: "gemini-2.0-flash-preview",
-                systemInstruction: ModelContent(parts: [TextPart(systemPrompt)])
+                modelName: "gemini-2.0-flash",
+                systemInstruction: ModelContent(role: "system", parts: [TextPart(systemPrompt)])
             )
 
             await MainActor.run {
@@ -70,17 +92,28 @@ class CookingAssistant: ObservableObject {
         }
     }
 
-    // Text-only chat
+    // Text-only chat — throws if model isn't ready so callers can handle it properly
     func getHelp(question: String) async throws -> String {
-        guard let model = model else { return "Chef is still getting ready..." }
+        guard let model = model else {
+            throw CookingAssistantError.modelNotReady
+        }
         let response = try await model.generateContent(question)
         return response.text ?? "Hmm, I couldn't come up with anything. Try rephrasing!"
     }
 
-    // Live camera frame + question — image first, then text (Firebase SDK convention)
+    // Live camera frame + question
+    // InlineDataPart is the correct type (ModelContent.Part enum was removed in Firebase SDK 12.x)
     func getLiveHelp(image: UIImage, question: String) async throws -> String {
-        guard let model = model else { return "Chef is still getting ready..." }
-        let response = try await model.generateContent(image, question)
+        guard let model = model else {
+            throw CookingAssistantError.modelNotReady
+        }
+
+        guard let imageData = image.jpegData(compressionQuality: 0.8) else {
+            throw CookingAssistantError.imageProcessingFailed
+        }
+
+        let imagePart = InlineDataPart(data: imageData, mimeType: "image/jpeg")
+        let response = try await model.generateContent(imagePart, question)
         return response.text ?? "I'm not sure — could you show me the ingredients again?"
     }
 }
