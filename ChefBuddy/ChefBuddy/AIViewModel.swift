@@ -78,7 +78,7 @@ class CookingAssistant: ObservableObject {
 
             // systemInstruction uses ModelContent with TextPart (Part protocol, not enum)
             let newModel = FirebaseAI.firebaseAI().generativeModel(
-                modelName: "gemini-2.0-flash",
+                modelName: "gemini-2.5-flash",
                 systemInstruction: ModelContent(role: "system", parts: [TextPart(systemPrompt)])
             )
 
