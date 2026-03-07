@@ -1,5 +1,13 @@
+//
+//  HomeView.swift
+//  ChefBuddy
+//
+//  Created by Hrudhai Umas on 3/5/26.
+//
+
 import SwiftUI
 import FirebaseAuth
+import FirebaseFirestore
 
 struct HomeView: View {
     @EnvironmentObject var authVM: AuthViewModel
@@ -9,6 +17,10 @@ struct HomeView: View {
     @State private var showDropdown = false
     @State private var showSettings = false
     @State private var appearAnimation = false
+    @State private var showRecipePicker = false
+    @State private var selectedLiveRecipe: Recipe? = nil
+    @State private var showLiveCooking = false
+    @State private var savedRecipes: [Recipe] = []
 
     var displayName: String {
         if let name = authVM.userSession?.displayName, !name.isEmpty {
@@ -32,12 +44,11 @@ struct HomeView: View {
                 // content layout -->
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 24) {
-                        
+
                         // welcome to homepage
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Hello, \(displayName)!")
                                 .font(.system(size: 34, weight: .bold, design: .rounded))
-                            
                             Text("What are we cooking today?")
                                 .font(.system(size: 16))
                                 .foregroundStyle(.secondary)
@@ -74,6 +85,31 @@ struct HomeView: View {
                         .offset(y: appearAnimation ? 0 : 15)
                         .opacity(appearAnimation ? 1.0 : 0)
 
+                        // Live cooking help card
+                        Button(action: { showRecipePicker = true }) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Live Cooking Help")
+                                        .font(.headline)
+                                    Text("Pick a recipe — AI guides you step by step.")
+                                        .font(.subheadline)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Image(systemName: "video.fill")
+                                    .font(.title)
+                                    .foregroundStyle(.green)
+                            }
+                            .padding()
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                            .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color.primary.opacity(0.05), lineWidth: 1))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 24)
+                        .offset(y: appearAnimation ? 0 : 15)
+                        .opacity(appearAnimation ? 1.0 : 0)
+
                         // ai integrated recipes view
                         VStack(alignment: .leading, spacing: 16) {
                             HStack {
@@ -90,13 +126,12 @@ struct HomeView: View {
                         .offset(y: appearAnimation ? 0 : 20)
                         .opacity(appearAnimation ? 1.0 : 0)
 
-                        // kitchen tools
-                        // shortcuts -->
+                        // kitchen tools shortcuts
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Your Kitchen Tools")
                                 .font(.system(size: 20, weight: .bold, design: .rounded))
                                 .padding(.horizontal, 24)
-                            
+
                             HStack(spacing: 12) {
                                 ToolButton(icon: "calendar", title: "Meal Plan", color: .green)
                                 ToolButton(icon: "cart.fill", title: "Grocery List", color: .orange)
@@ -105,12 +140,12 @@ struct HomeView: View {
                         }
                         .offset(y: appearAnimation ? 0 : 25)
                         .opacity(appearAnimation ? 1.0 : 0)
-                        
+
                         Spacer(minLength: 100)
                     }
                 }
-                
-                // profile
+
+                // profile button
                 Button(action: {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
@@ -126,31 +161,56 @@ struct HomeView: View {
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 16)
-                
+
                 // dropdown
                 if showDropdown {
-                    DropdownOverlay(showDropdown: $showDropdown, showSettings: $showSettings, authVM: authVM)
-                        .transition(.asymmetric(
-                            insertion: .scale(scale: 0.8, anchor: .topTrailing).combined(with: .opacity),
-                            removal: .scale(scale: 0.8, anchor: .topTrailing).combined(with: .opacity)
-                        ))
+                    DropdownOverlay(
+                        showDropdown: $showDropdown,
+                        showSettings: $showSettings,
+                        showRecipePicker: $showRecipePicker,
+                        authVM: authVM
+                    )
+                    .transition(.asymmetric(
+                        insertion: .scale(scale: 0.8, anchor: .topTrailing).combined(with: .opacity),
+                        removal:   .scale(scale: 0.8, anchor: .topTrailing).combined(with: .opacity)
+                    ))
                 }
             }
             .navigationDestination(isPresented: $showSettings) {
                 ProfileSettingsView().environmentObject(authVM)
+            }
+            .sheet(isPresented: $showRecipePicker) {
+                RecipePickerSheet(recipes: savedRecipes) { recipe in
+                    selectedLiveRecipe = recipe
+                    showLiveCooking = true
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+            .fullScreenCover(isPresented: $showLiveCooking) {
+                if let recipe = selectedLiveRecipe {
+                    LiveCookingView(recipe: recipe, assistant: assistant)
+                }
             }
             .onAppear {
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.8).delay(0.1)) { appearAnimation = true }
                 // AI Initialization
                 if let uid = authVM.userSession?.uid {
                     Task { await assistant.setupAssistant(userId: uid) }
+                    // Keep savedRecipes in sync for the RecipePicker
+                    Firestore.firestore().collection("users").document(uid)
+                        .collection("recipes").order(by: "createdAt", descending: true)
+                        .addSnapshotListener { snap, _ in
+                            guard let docs = snap?.documents else { return }
+                            savedRecipes = docs.compactMap { try? $0.data(as: Recipe.self) }
+                        }
                 }
             }
         }
     }
 }
 
-
+// MARK: - Subviews
 
 struct ToolButton: View {
     let icon: String
@@ -175,8 +235,9 @@ struct ToolButton: View {
 struct DropdownOverlay: View {
     @Binding var showDropdown: Bool
     @Binding var showSettings: Bool
+    @Binding var showRecipePicker: Bool
     let authVM: AuthViewModel
-    
+
     var body: some View {
         ZStack(alignment: .topTrailing) {
             Color.black.opacity(0.001)
@@ -184,8 +245,13 @@ struct DropdownOverlay: View {
                 .onTapGesture {
                     withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) { showDropdown = false }
                 }
-            
+
             VStack(alignment: .leading, spacing: 12) {
+                MenuRow(icon: "video.fill", title: "Live Help", color: .orange) {
+                    showDropdown = false
+                    showRecipePicker = true
+                }
+                Divider().padding(.horizontal, 16)
                 MenuRow(icon: "slider.horizontal.3", title: "Profile") {
                     showDropdown = false
                     showSettings = true

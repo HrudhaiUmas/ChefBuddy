@@ -75,6 +75,50 @@ class RecipesViewModel: ObservableObject {
 
     func stopListening() { listener?.remove() }
 
+    // Auto-generate starter recipes until user has 3, using the user's actual saved preferences
+    func autoGenerateIfNeeded(assistant: CookingAssistant, userId: String) {
+        guard recipes.count < 3, !isGenerating else { return }
+
+        // Fetch the user's profile so starters are personalised
+        let db = Firestore.firestore()
+        db.collection("users").document(userId).getDocument { snap, _ in
+            let data = snap?.data() ?? [:]
+
+            let diets      = (data["dietTags"]      as? [String])?.joined(separator: ", ") ?? ""
+            let allergies  = (data["allergies"]     as? [String])?.joined(separator: ", ") ?? ""
+            let macros     = (data["macroTags"]     as? [String])?.joined(separator: ", ") ?? ""
+            let spice      = data["spiceTolerance"] as? String ?? "Medium"
+            let cookTime   = data["cookTime"]       as? String ?? "30 mins"
+            let budget     = data["budget"]         as? String ?? "Standard"
+            let servings   = data["servingSize"]    as? String ?? "1 Person"
+            let cuisines   = (data["cuisines"]      as? [String])?.joined(separator: ", ") ?? ""
+            let appliances = (data["appliances"]    as? [String])?.joined(separator: ", ") ?? "basic kitchen tools"
+            let goal       = data["targetGoal"]     as? String ?? "Maintain"
+            let dislikes   = data["dislikes"]       as? String ?? ""
+
+            // Build context string from real preferences
+            var ctx = ""
+            if !diets.isEmpty      { ctx += "Diet: \(diets). " }
+            if !allergies.isEmpty  { ctx += "Allergies to avoid: \(allergies). " }
+            if !macros.isEmpty     { ctx += "Macro goal: \(macros). " }
+            if !cuisines.isEmpty   { ctx += "Preferred cuisines: \(cuisines). " }
+            if !dislikes.isEmpty   { ctx += "Ingredients to avoid: \(dislikes). " }
+            ctx += "Spice tolerance: \(spice). Cook time: \(cookTime). Budget: \(budget). Serving size: \(servings). Goal: \(goal). Available appliances: \(appliances)."
+
+            // Three distinct starter prompts that use the user's real preferences
+            let starterPrompts = [
+                "A delicious \(cookTime) dinner that fits these preferences — \(ctx)",
+                "A nutritious breakfast or lunch using these preferences — \(ctx)",
+                "A crowd-pleasing meal that matches these tastes — \(ctx)"
+            ]
+
+            let prompt = starterPrompts[min(self.recipes.count, starterPrompts.count - 1)]
+            DispatchQueue.main.async {
+                self.generateAndSave(prompt: prompt, assistant: assistant, userId: userId)
+            }
+        }
+    }
+
     func toggleFavorite(_ recipe: Recipe, userId: String) {
         guard let id = recipe.id else { return }
         db.collection("users").document(userId).collection("recipes").document(id)
@@ -209,6 +253,7 @@ struct RecipesView: View {
     @State private var showGenerateSheet = false
     @State private var appeared = false
     @State private var showJustGenerated = false
+    @State private var autoGenTriggered = false
 
     private var userId: String { authVM.userSession?.uid ?? "" }
 
@@ -328,9 +373,16 @@ struct RecipesView: View {
                     VStack(spacing: 10) {
                         HStack(spacing: 12) {
                             ProgressView().tint(.white)
-                            Text("ChefBuddy is cooking...")
-                                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.white)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(vm.recipes.count < 3 ? "Building your starter recipes..." : "ChefBuddy is cooking...")
+                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                if vm.recipes.count < 3 {
+                                    Text("Recipe \(vm.recipes.count + 1) of 3")
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.white.opacity(0.75))
+                                }
+                            }
                             Spacer()
                             Text(timeString(vm.elapsedSeconds))
                                 .font(.system(size: 14, weight: .bold, design: .monospaced))
@@ -364,6 +416,22 @@ struct RecipesView: View {
             withAnimation(.spring(response: 0.55, dampingFraction: 0.8).delay(0.05)) { appeared = true }
         }
         .onDisappear { vm.stopListening() }
+        // After recipes load, auto-generate if fewer than 3
+        .onChange(of: vm.recipes) { recipes in
+            if recipes.count < 3 && !vm.isGenerating && assistant.isModelReady {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    vm.autoGenerateIfNeeded(assistant: assistant, userId: userId)
+                }
+            }
+        }
+        // Also trigger once model becomes ready (catches the case where recipes loaded before model)
+        .onChange(of: assistant.isModelReady) { ready in
+            if ready && vm.recipes.count < 3 && !vm.isGenerating {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                    vm.autoGenerateIfNeeded(assistant: assistant, userId: userId)
+                }
+            }
+        }
         .onChange(of: vm.justGeneratedRecipe) { recipe in
             if recipe != nil {
                 // small delay so Firestore listener has time to insert into grid first
