@@ -180,13 +180,24 @@ struct HomeView: View {
                 ProfileSettingsView().environmentObject(authVM)
             }
             .sheet(isPresented: $showRecipePicker) {
-                RecipePickerSheet(recipes: savedRecipes) { recipe in
-                    selectedLiveRecipe = recipe
-                    showLiveCooking = true
-                }
-                .presentationDetents([.medium, .large])
-                .presentationDragIndicator(.visible)
-            }
+                            RecipePickerSheet(recipes: savedRecipes) { recipe in
+                                selectedLiveRecipe = recipe
+                            }
+                            .presentationDetents([.medium, .large])
+                            .presentationDragIndicator(.visible)
+                        }
+                        .onChange(of: showRecipePicker) { _, isPresented in
+                            if !isPresented && selectedLiveRecipe != nil {
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                                    showLiveCooking = true
+                                }
+                            }
+                        }
+                        .fullScreenCover(isPresented: $showLiveCooking, onDismiss: { selectedLiveRecipe = nil }) {
+                            if let recipe = selectedLiveRecipe {
+                                LiveCookingView(recipe: recipe, assistant: assistant)
+                            }
+                        }
             .fullScreenCover(isPresented: $showLiveCooking) {
                 if let recipe = selectedLiveRecipe {
                     LiveCookingView(recipe: recipe, assistant: assistant)

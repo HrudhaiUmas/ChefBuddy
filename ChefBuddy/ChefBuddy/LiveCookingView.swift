@@ -21,10 +21,32 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
 
     override init() {
         super.init()
-        setupSession()
+        
+        // Create the layer immediately so the UI doesn't default to the gray box
+        let layer = AVCaptureVideoPreviewLayer(session: session)
+        layer.videoGravity = .resizeAspectFill
+        self.previewLayer = layer
+        
+        // Check and request permissions before adding inputs
+        checkPermissionAndSetup()
     }
 
-    private func setupSession() {
+    private func checkPermissionAndSetup() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            setupSessionInputs()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                if granted {
+                    self?.setupSessionInputs()
+                }
+            }
+        default:
+            print("Camera permission denied")
+        }
+    }
+
+    private func setupSessionInputs() {
         session.sessionPreset = .high
         guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
               let input = try? AVCaptureDeviceInput(device: device) else { return }
@@ -34,10 +56,6 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "cameraQueue"))
         output.alwaysDiscardsLateVideoFrames = true
         if session.canAddOutput(output) { session.addOutput(output) }
-
-        let layer = AVCaptureVideoPreviewLayer(session: session)
-        layer.videoGravity = .resizeAspectFill
-        DispatchQueue.main.async { self.previewLayer = layer }
     }
 
     func start() {
@@ -71,17 +89,25 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
 
 struct CameraPreview: UIViewRepresentable {
     let layer: AVCaptureVideoPreviewLayer
+    
+    class VideoView: UIView {
+        var previewLayer: AVCaptureVideoPreviewLayer?
+        
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            previewLayer?.frame = bounds
+        }
+    }
 
     func makeUIView(context: Context) -> UIView {
-        let view = UIView()
+        let view = VideoView()
+        view.previewLayer = layer
         view.layer.addSublayer(layer)
         return view
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        DispatchQueue.main.async {
-            self.layer.frame = uiView.bounds
-        }
+        // Handled automatically by layoutSubviews so i think we dont need to do anything here
     }
 }
 
