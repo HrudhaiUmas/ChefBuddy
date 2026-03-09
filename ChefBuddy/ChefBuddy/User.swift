@@ -24,6 +24,7 @@ struct DBUser: Codable {
     var age: String
     var height: String
     var weight: String
+    var sex: String
     var targetGoal: String
     var activityLevel: String
     
@@ -43,11 +44,27 @@ struct DBUser: Codable {
     var servingSize: String
     var budget: String
     
-    init(auth: FirebaseAuth.User, level: String, diets: Set<String>, allergy: Set<String>, macros: Set<String>,
-         age: String, height: String, weight: String, targetGoal: String, activityLevel: String,
-         appliances: Set<String>, cookTime: String, mealPrep: Bool, cuisines: Set<String>,
-         spiceTolerance: String, dislikes: String, servingSize: String, budget: String) {
-        
+    init(
+        auth: FirebaseAuth.User,
+        level: String,
+        diets: Set<String>,
+        allergy: Set<String>,
+        macros: Set<String>,
+        age: String,
+        height: String,
+        weight: String,
+        sex: String,
+        targetGoal: String,
+        activityLevel: String,
+        appliances: Set<String>,
+        cookTime: String,
+        mealPrep: Bool,
+        cuisines: Set<String>,
+        spiceTolerance: String,
+        dislikes: String,
+        servingSize: String,
+        budget: String
+    ) {
         self.id = auth.uid
         self.email = auth.email
         self.dateCreated = Date()
@@ -60,6 +77,7 @@ struct DBUser: Codable {
         self.age = age
         self.height = height
         self.weight = weight
+        self.sex = sex
         self.targetGoal = targetGoal
         self.activityLevel = activityLevel
         

@@ -42,16 +42,31 @@ class AuthViewModel: ObservableObject {
     // MARK: - Firestore Sync
     
     func saveUserPreferences(level: String, diets: Set<String>, allergy: Set<String>, macros: Set<String>,
-                             age: String, height: String, weight: String, targetGoal: String, activity: String,
+                             age: String, height: String, weight: String, sex: String, targetGoal: String, activity: String,
                              appliances: Set<String>, cookTime: String, mealPrep: Bool, cuisines: Set<String>,
                              spice: String, dislikes: String, servings: String, budget: String) {
         guard let user = userSession else { return }
         
         let newUser = DBUser(
-            auth: user, level: level, diets: diets, allergy: allergy, macros: macros,
-            age: age, height: height, weight: weight, targetGoal: targetGoal, activityLevel: activity,
-            appliances: appliances, cookTime: cookTime, mealPrep: mealPrep, cuisines: cuisines,
-            spiceTolerance: spice, dislikes: dislikes, servingSize: servings, budget: budget
+            auth: user,
+            level: level,
+            diets: diets,
+            allergy: allergy,
+            macros: macros,
+            age: age,
+            height: height,
+            weight: weight,
+            sex: sex,
+            targetGoal: targetGoal,
+            activityLevel: activity,
+            appliances: appliances,
+            cookTime: cookTime,
+            mealPrep: mealPrep,
+            cuisines: cuisines,
+            spiceTolerance: spice,
+            dislikes: dislikes,
+            servingSize: servings,
+            budget: budget
         )
         
         do {
@@ -88,7 +103,7 @@ class AuthViewModel: ObservableObject {
     }
     
     func updateUserPreferences(level: String, diets: Set<String>, allergy: Set<String>, macros: Set<String>,
-                               age: String, height: String, weight: String, targetGoal: String, activity: String,
+                               age: String, height: String, weight: String, sex: String, targetGoal: String, activity: String,
                                appliances: Set<String>, cookTime: String, mealPrep: Bool, cuisines: Set<String>,
                                spice: String, dislikes: String, servings: String, budget: String) {
         guard let uid = userSession?.uid else { return }
@@ -101,6 +116,7 @@ class AuthViewModel: ObservableObject {
             "age": age,
             "height": height,
             "weight": weight,
+            "sex": sex,
             "targetGoal": targetGoal,
             "activityLevel": activity,
             "appliances": Array(appliances),
