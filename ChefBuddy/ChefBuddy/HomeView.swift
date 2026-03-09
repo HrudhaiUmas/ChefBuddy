@@ -113,20 +113,10 @@ struct HomeView: View {
                         .opacity(appearAnimation ? 1.0 : 0)
 
                         // ai integrated recipes view
-                        VStack(alignment: .leading, spacing: 16) {
-                            HStack {
-                                Text("Suggested for You")
-                                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                                Spacer()
-                                Button("See All") {}.font(.caption.bold()).foregroundStyle(.orange)
-                            }
-                            .padding(.horizontal, 24)
-
-                            RecipesView(assistant: assistant)
-                                .environmentObject(authVM)
-                        }
-                        .offset(y: appearAnimation ? 0 : 20)
-                        .opacity(appearAnimation ? 1.0 : 0)
+                        RecipesView(assistant: assistant)
+                            .environmentObject(authVM)
+                            .offset(y: appearAnimation ? 0 : 20)
+                            .opacity(appearAnimation ? 1.0 : 0)
 
                         // kitchen tools shortcuts
                         VStack(alignment: .leading, spacing: 12) {
@@ -182,24 +172,22 @@ struct HomeView: View {
                 ProfileSettingsView().environmentObject(authVM)
             }
             .sheet(isPresented: $showRecipePicker) {
-                            RecipePickerSheet(recipes: savedRecipes) { recipe in
-                                selectedLiveRecipe = recipe
-                            }
-                            .presentationDetents([.medium, .large])
-                            .presentationDragIndicator(.visible)
-                        }
-                        .onChange(of: showRecipePicker) { _, isPresented in
-                            if !isPresented && selectedLiveRecipe != nil {
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                                    showLiveCooking = true
-                                }
-                            }
-                        }
-                        .sheet(isPresented: $showCamera) {
-                                        ImagePicker(image: $fridgeImage)
-                        }
-
-                     
+                RecipePickerSheet(recipes: savedRecipes) { recipe in
+                    selectedLiveRecipe = recipe
+                }
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+            }
+            .onChange(of: showRecipePicker) { _, isPresented in
+                if !isPresented && selectedLiveRecipe != nil {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                        showLiveCooking = true
+                    }
+                }
+            }
+            .sheet(isPresented: $showCamera) {
+                ImagePicker(image: $fridgeImage)
+            }
             .fullScreenCover(isPresented: $showLiveCooking) {
                 if let recipe = selectedLiveRecipe {
                     LiveCookingView(recipe: recipe, assistant: assistant)
