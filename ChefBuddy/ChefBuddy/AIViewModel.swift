@@ -19,23 +19,28 @@ struct RecipeSuggestion: Identifiable, Codable, Equatable {
     let servings: String
     let difficulty: String
     let calories: String
+    let carbs: String
+    let protein: String
+    let fat: String
+    let saturatedFat: String
+    let sugar: String
+    let fiber: String
+    let sodium: String
     let tags: [String]
     let ingredients: [String]
     let steps: [String]
     let matchReason: String
 
     enum CodingKeys: String, CodingKey {
-        case title
-        case emoji
-        case description
-        case prepTime
-        case servings
-        case difficulty
-        case calories
-        case tags
-        case ingredients
-        case steps
-        case matchReason
+        case title, emoji, description, prepTime, servings, difficulty
+        case calories, carbs, protein, fat, saturatedFat, sugar, fiber, sodium
+        case tags, ingredients, steps, matchReason
+    }
+
+    var nutrition: NutritionInfo {
+        NutritionInfo(calories: calories, carbs: carbs, protein: protein,
+                      fat: fat, saturatedFat: saturatedFat, sugar: sugar,
+                      fiber: fiber, sodium: sodium)
     }
 }
 
@@ -111,11 +116,13 @@ class CookingAssistant: ObservableObject {
         return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func fetchRecipeSuggestions() async {
+    func fetchRecipeSuggestions(reviewFeedback: String = "") async {
         guard let model = model else { return }
 
+        let feedbackSection = reviewFeedback.isEmpty ? "" : "\n\n        Important — personalise based on this user feedback from past recipes:\n        \(reviewFeedback)\n        Use this to suggest recipes they will enjoy more and avoid patterns they disliked."
+
         let prompt = """
-        Generate 3 fully detailed recipe suggestions based on my profile.
+        Generate 3 fully detailed recipe suggestions based on my profile.\(feedbackSection)
 
         Return ONLY valid JSON.
 
@@ -130,6 +137,13 @@ class CookingAssistant: ObservableObject {
             "servings": "2 people",
             "difficulty": "Easy",
             "calories": "420 kcal",
+            "carbs": "42g",
+            "protein": "35g",
+            "fat": "12g",
+            "saturatedFat": "4g",
+            "sugar": "8g",
+            "fiber": "5g",
+            "sodium": "620mg",
             "tags": ["Healthy", "Quick", "High Protein"],
             "ingredients": ["ingredient 1", "ingredient 2", "ingredient 3"],
             "steps": ["step one", "step two", "step three"],
@@ -167,7 +181,7 @@ class CookingAssistant: ObservableObject {
         }
     }
 
-    func fetchOneMoreRecipeSuggestion(excludingTitles: [String]) async throws {
+    func fetchOneMoreRecipeSuggestion(excludingTitles: [String], reviewFeedback: String = "") async throws {
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
         }
@@ -183,8 +197,10 @@ class CookingAssistant: ObservableObject {
             excludedTitlesText = cleanedTitles.joined(separator: ", ")
         }
 
+        let feedbackSection = reviewFeedback.isEmpty ? "" : "\n\n        Important — personalise based on this user feedback from past recipes:\n        \(reviewFeedback)\n        Use this to suggest a recipe they will enjoy more and avoid patterns they disliked."
+
         let prompt = """
-        Generate exactly 1 fully detailed recipe suggestion based on my profile.
+        Generate exactly 1 fully detailed recipe suggestion based on my profile.\(feedbackSection)
 
         The recipe title MUST be different from all of these existing titles:
         \(excludedTitlesText)
@@ -201,6 +217,13 @@ class CookingAssistant: ObservableObject {
           "servings": "2 people",
           "difficulty": "Easy",
           "calories": "420 kcal",
+          "carbs": "42g",
+          "protein": "35g",
+          "fat": "12g",
+          "saturatedFat": "4g",
+          "sugar": "8g",
+          "fiber": "5g",
+          "sodium": "620mg",
           "tags": ["Healthy", "Quick", "High Protein"],
           "ingredients": ["ingredient 1", "ingredient 2", "ingredient 3"],
           "steps": ["step one", "step two", "step three"],

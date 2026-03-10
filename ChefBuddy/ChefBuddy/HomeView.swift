@@ -21,8 +21,6 @@ struct HomeView: View {
     @State private var selectedLiveRecipe: Recipe? = nil
     @State private var showLiveCooking = false
     @State private var savedRecipes: [Recipe] = []
-    @State private var showCamera = false
-    @State private var fridgeImage: UIImage?
 
     var displayName: String {
         if let name = authVM.userSession?.displayName, !name.isEmpty {
@@ -80,7 +78,7 @@ struct HomeView: View {
                             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color.primary.opacity(0.05), lineWidth: 1))
                             .onTapGesture {
-                                showCamera = true
+                                // ingredient inputs
                             }
                         }
                         .padding(.horizontal, 24)
@@ -113,10 +111,12 @@ struct HomeView: View {
                         .opacity(appearAnimation ? 1.0 : 0)
 
                         // ai integrated recipes view
-                        RecipesView(assistant: assistant)
-                            .environmentObject(authVM)
-                            .offset(y: appearAnimation ? 0 : 20)
-                            .opacity(appearAnimation ? 1.0 : 0)
+                        VStack(alignment: .leading, spacing: 16) {
+                            RecipesView(assistant: assistant)
+                                .environmentObject(authVM)
+                        }
+                        .offset(y: appearAnimation ? 0 : 20)
+                        .opacity(appearAnimation ? 1.0 : 0)
 
                         // kitchen tools shortcuts
                         VStack(alignment: .leading, spacing: 12) {
@@ -174,22 +174,14 @@ struct HomeView: View {
             .sheet(isPresented: $showRecipePicker) {
                 RecipePickerSheet(recipes: savedRecipes) { recipe in
                     selectedLiveRecipe = recipe
+                    showLiveCooking = true
                 }
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
             }
-            .onChange(of: showRecipePicker) { _, isPresented in
-                if !isPresented && selectedLiveRecipe != nil {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        showLiveCooking = true
-                    }
-                }
-            }
-            .sheet(isPresented: $showCamera) {
-                ImagePicker(image: $fridgeImage)
-            }
             .fullScreenCover(isPresented: $showLiveCooking) {
-                if let recipe = selectedLiveRecipe {
+                if let recipe = selectedLiveRecipe,
+                   let uid = authVM.userSession?.uid {
                     LiveCookingView(recipe: recipe, assistant: assistant)
                 }
             }
@@ -205,20 +197,6 @@ struct HomeView: View {
                             guard let docs = snap?.documents else { return }
                             savedRecipes = docs.compactMap { try? $0.data(as: Recipe.self) }
                         }
-                }
-            }
-            .task(id: fridgeImage) {
-                guard let image = fridgeImage else { return }
-
-                do {
-                    let ingredients = try await assistant.scanFridgeIngredients(image: image)
-
-                    print("Detected ingredients:", ingredients)
-
-                    await assistant.generateRecipesFromIngredients(ingredients)
-
-                } catch {
-                    print("Fridge scan failed:", error)
                 }
             }
         }

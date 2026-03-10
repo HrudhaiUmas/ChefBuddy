@@ -10,6 +10,22 @@ import Combine
 
 // MARK: - Model
 
+struct NutritionInfo: Codable, Equatable {
+    var calories: String   // total kcal (mirrors Recipe.calories for convenience)
+    var carbs: String      // e.g. "42g"
+    var protein: String    // e.g. "35g"
+    var fat: String        // e.g. "12g"
+    var saturatedFat: String // e.g. "4g"
+    var sugar: String      // e.g. "8g"
+    var fiber: String      // e.g. "5g"
+    var sodium: String     // e.g. "620mg"
+
+    static var empty: NutritionInfo {
+        NutritionInfo(calories: "", carbs: "", protein: "", fat: "",
+                      saturatedFat: "", sugar: "", fiber: "", sodium: "")
+    }
+}
+
 struct Recipe: Identifiable, Codable, Equatable {
     @DocumentID var id: String?
     var title: String
@@ -22,8 +38,12 @@ struct Recipe: Identifiable, Codable, Equatable {
     var difficulty: String
     var tags: [String]
     var calories: String
+    var nutrition: NutritionInfo
     var createdAt: Date
     var isFavorite: Bool
+    // Cooking history
+    var cookedCount: Int
+    var lastCookedAt: Date?
 
     init(
         title: String,
@@ -36,8 +56,11 @@ struct Recipe: Identifiable, Codable, Equatable {
         difficulty: String,
         tags: [String] = [],
         calories: String = "",
+        nutrition: NutritionInfo = .empty,
         createdAt: Date = Date(),
-        isFavorite: Bool = false
+        isFavorite: Bool = false,
+        cookedCount: Int = 0,
+        lastCookedAt: Date? = nil
     ) {
         self.title = title
         self.emoji = emoji
@@ -49,9 +72,14 @@ struct Recipe: Identifiable, Codable, Equatable {
         self.difficulty = difficulty
         self.tags = tags
         self.calories = calories
+        self.nutrition = nutrition
         self.createdAt = createdAt
         self.isFavorite = isFavorite
+        self.cookedCount = cookedCount
+        self.lastCookedAt = lastCookedAt
     }
+
+    var hasBeenCooked: Bool { cookedCount > 0 }
 }
 
 // MARK: - ViewModel
@@ -68,12 +96,14 @@ class RecipesViewModel: ObservableObject {
     private var listener: ListenerRegistration?
     private var timerTask: Task<Void, Never>? = nil
 
-    let filters = ["All", "❤️ Saved", "⚡ Quick", "💪 Protein", "🥗 Healthy"]
+    let filters = ["All", "❤️ Saved", "✅ Cooked", "⚡ Quick", "💪 Protein", "🥗 Healthy"]
 
     var filteredRecipes: [Recipe] {
         switch selectedFilter {
         case "❤️ Saved":
             return recipes.filter { $0.isFavorite }
+        case "✅ Cooked":
+            return recipes.filter { $0.hasBeenCooked }
         case "⚡ Quick":
             return recipes.filter {
                 $0.cookTime.contains("15") || $0.cookTime.lowercased().contains("quick")
@@ -197,6 +227,31 @@ class RecipesViewModel: ObservableObject {
             .delete()
     }
 
+    func markAsCooked(_ recipe: Recipe, userId: String) {
+        guard let id = recipe.id, !userId.isEmpty else { return }
+        let newCount = recipe.cookedCount + 1
+        db.collection("users").document(userId).collection("recipes").document(id)
+            .updateData(["cookedCount": newCount, "lastCookedAt": Date()])
+    }
+
+    func updateRecipeAfterReview(_ updatedRecipe: Recipe, userId: String) {
+        guard let id = updatedRecipe.id, !userId.isEmpty else { return }
+        guard let encoded = try? Firestore.Encoder().encode(updatedRecipe) else { return }
+        db.collection("users").document(userId).collection("recipes").document(id).setData(encoded)
+    }
+
+    func saveReview(recipeId: String, liked: [String], likedNote: String, improvement: String, userId: String) {
+        guard !userId.isEmpty else { return }
+        let data: [String: Any] = [
+            "likedTags": liked,
+            "likedNote": likedNote,
+            "improvement": improvement,
+            "createdAt": Date()
+        ]
+        db.collection("users").document(userId).collection("recipes").document(recipeId)
+            .collection("reviews").addDocument(data: data)
+    }
+
     func saveSuggestedRecipe(_ recipe: Recipe, userId: String) {
         guard !userId.isEmpty else { return }
 
@@ -256,6 +311,13 @@ class RecipesViewModel: ObservableObject {
                 Servings: [e.g. 2 people]
                 Difficulty: [Easy / Medium / Hard]
                 Calories: [e.g. 420 kcal]
+                Carbs: [e.g. 42g]
+                Protein: [e.g. 35g]
+                Fat: [e.g. 12g]
+                Saturated Fat: [e.g. 4g]
+                Sugar: [e.g. 8g]
+                Fiber: [e.g. 5g]
+                Sodium: [e.g. 620mg]
                 Tags: [comma-separated, e.g. High Protein, Healthy, Quick]
 
                 Ingredients:
@@ -306,6 +368,13 @@ class RecipesViewModel: ObservableObject {
         var difficulty = "Medium"
         var tags: [String] = []
         var calories = ""
+        var carbs = ""
+        var protein = ""
+        var fat = ""
+        var saturatedFat = ""
+        var sugar = ""
+        var fiber = ""
+        var sodium = ""
         var section = ""
 
         for rawLine in text.components(separatedBy: "\n") {
@@ -326,6 +395,20 @@ class RecipesViewModel: ObservableObject {
                 difficulty = after("Difficulty:", in: line)
             } else if low.hasPrefix("calories:") {
                 calories = after("Calories:", in: line)
+            } else if low.hasPrefix("carbs:") || low.hasPrefix("carbohydrates:") {
+                carbs = after(low.hasPrefix("carbs:") ? "Carbs:" : "Carbohydrates:", in: line)
+            } else if low.hasPrefix("protein:") {
+                protein = after("Protein:", in: line)
+            } else if low.hasPrefix("saturated fat:") {
+                saturatedFat = after("Saturated Fat:", in: line)
+            } else if low.hasPrefix("fat:") {
+                fat = after("Fat:", in: line)
+            } else if low.hasPrefix("sugar:") {
+                sugar = after("Sugar:", in: line)
+            } else if low.hasPrefix("fiber:") || low.hasPrefix("fibre:") {
+                fiber = after(low.hasPrefix("fiber:") ? "Fiber:" : "Fibre:", in: line)
+            } else if low.hasPrefix("sodium:") {
+                sodium = after("Sodium:", in: line)
             } else if low.hasPrefix("tags:") {
                 tags = after("Tags:", in: line)
                     .components(separatedBy: ",")
@@ -359,6 +442,17 @@ class RecipesViewModel: ObservableObject {
             description = "A delicious recipe generated just for you by ChefBuddy."
         }
 
+        let nutrition = NutritionInfo(
+            calories: calories,
+            carbs: carbs,
+            protein: protein,
+            fat: fat,
+            saturatedFat: saturatedFat,
+            sugar: sugar,
+            fiber: fiber,
+            sodium: sodium
+        )
+
         return Recipe(
             title: title,
             emoji: emoji,
@@ -369,7 +463,8 @@ class RecipesViewModel: ObservableObject {
             servings: servings,
             difficulty: difficulty,
             tags: tags,
-            calories: calories
+            calories: calories,
+            nutrition: nutrition
         )
     }
 
@@ -391,7 +486,7 @@ struct RecipesView: View {
     @State private var showGenerateSheet = false
     @State private var showAllRecipesScreen = false
     @State private var appeared = false
-
+    @State private var recipeToReview: Recipe? = nil
     @State private var isLoadingInitialSuggestions = false
     @State private var isLoadingMoreSuggestion = false
 
@@ -412,7 +507,8 @@ struct RecipesView: View {
             servings: suggestion.servings,
             difficulty: suggestion.difficulty,
             tags: suggestion.tags,
-            calories: suggestion.calories
+            calories: suggestion.calories,
+            nutrition: suggestion.nutrition
         )
     }
 
@@ -426,51 +522,91 @@ struct RecipesView: View {
         }
     }
 
+    private func loadInitialSuggestions() async {
+        guard !isLoadingInitialSuggestions else { return }
+        await MainActor.run { isLoadingInitialSuggestions = true }
+        do {
+            try await assistant.waitUntilReady()
+            // Load any past review feedback so suggestions are personalised
+            let feedback = await loadReviewFeedbackSummary()
+            await assistant.fetchRecipeSuggestions(reviewFeedback: feedback)
+        } catch {
+            print("Initial suggestion fetch failed: \(error)")
+        }
+        await MainActor.run { isLoadingInitialSuggestions = false }
+    }
+
+    private func loadOneMoreSuggestion() async {
+        guard !isLoadingMoreSuggestion else { return }
+        await MainActor.run { isLoadingMoreSuggestion = true }
+        do {
+            try await assistant.waitUntilReady()
+            let feedback = await loadReviewFeedbackSummary()
+            try await assistant.fetchOneMoreRecipeSuggestion(
+                excludingTitles: vm.recipes.map { $0.title } + assistant.suggestions.map { $0.title },
+                reviewFeedback: feedback
+            )
+        } catch {
+            print("Load one more suggestion failed: \(error)")
+        }
+        await MainActor.run { isLoadingMoreSuggestion = false }
+    }
+
+    /// Reads the last 10 reviews across all saved recipes and returns a summary string
+    /// the AI can use to avoid repeating things users didn't like.
+    private func loadReviewFeedbackSummary() async -> String {
+        guard !userId.isEmpty else { return "" }
+        let db = Firestore.firestore()
+        var improvements: [String] = []
+        var liked: [String] = []
+
+        do {
+            // Fetch all recipe IDs
+            let recipeDocs = try await db.collection("users").document(userId)
+                .collection("recipes").getDocuments()
+
+            for recipeDoc in recipeDocs.documents {
+                let reviews = try await db.collection("users").document(userId)
+                    .collection("recipes").document(recipeDoc.documentID)
+                    .collection("reviews")
+                    .order(by: "createdAt", descending: true)
+                    .limit(to: 3)
+                    .getDocuments()
+
+                for review in reviews.documents {
+                    let data = review.data()
+                    if let imp = data["improvement"] as? String, !imp.trimmingCharacters(in: .whitespaces).isEmpty {
+                        improvements.append(imp)
+                    }
+                    if let tags = data["likedTags"] as? [String] {
+                        liked.append(contentsOf: tags)
+                    }
+                    if let note = data["likedNote"] as? String, !note.trimmingCharacters(in: .whitespaces).isEmpty {
+                        liked.append(note)
+                    }
+                }
+            }
+        } catch {
+            print("Failed to load review feedback: \(error)")
+        }
+
+        var summary = ""
+        if !liked.isEmpty {
+            let topLiked = Array(Set(liked)).prefix(6).joined(separator: ", ")
+            summary += "User has previously enjoyed: \(topLiked). "
+        }
+        if !improvements.isEmpty {
+            let topImprovements = improvements.prefix(5).joined(separator: "; ")
+            summary += "User has asked for improvements like: \(topImprovements). Avoid repeating these issues."
+        }
+        return summary
+    }
+
     private func toggleFavoriteEverywhere(_ recipe: Recipe) {
         vm.toggleFavorite(recipe, userId: userId)
 
         if selectedRecipe?.id == recipe.id {
             selectedRecipe?.isFavorite.toggle()
-        }
-    }
-
-    private func loadInitialSuggestions() async {
-        guard !isLoadingInitialSuggestions else { return }
-
-        await MainActor.run {
-            isLoadingInitialSuggestions = true
-        }
-
-        do {
-            try await assistant.waitUntilReady()
-            await assistant.fetchRecipeSuggestions()
-        } catch {
-            print("Initial suggestion fetch failed: \(error)")
-        }
-
-        await MainActor.run {
-            isLoadingInitialSuggestions = false
-        }
-    }
-
-    private func loadOneMoreSuggestion() async {
-        guard !isLoadingMoreSuggestion else { return }
-
-        await MainActor.run {
-            isLoadingMoreSuggestion = true
-        }
-
-        do {
-            try await assistant.waitUntilReady()
-            try await assistant.fetchOneMoreRecipeSuggestion(
-                excludingTitles: vm.recipes.map { $0.title } + assistant.suggestions.map { $0.title }
-            )
-        } catch {
-            print("Load one more suggestion failed: \(error)")
-        }
-
-        await MainActor.run {
-            isLoadingMoreSuggestion = false
         }
     }
 
@@ -579,7 +715,6 @@ struct RecipesView: View {
                                     HStack {
                                         Text("AI Suggestions")
                                             .font(.system(size: 20, weight: .bold, design: .rounded))
-
                                         Spacer()
                                     }
                                     .padding(.horizontal, 20)
@@ -588,17 +723,13 @@ struct RecipesView: View {
                                         HStack(spacing: 14) {
                                             ForEach(unsavedSuggestions) { suggestion in
                                                 let suggestionRecipe = recipeFromSuggestion(suggestion)
-
                                                 RecipeCard(
                                                     recipe: suggestionRecipe,
-                                                    onTap: {
-                                                        selectedSuggestionRecipe = suggestionRecipe
-                                                    },
+                                                    onTap: { selectedSuggestionRecipe = suggestionRecipe },
                                                     onFavorite: { }
                                                 )
                                                 .frame(width: 180)
                                             }
-
                                             if isLoadingMoreSuggestion {
                                                 SuggestionCookingCard()
                                                     .frame(width: 180)
@@ -637,23 +768,54 @@ struct RecipesView: View {
                                     }
                                     .padding(.horizontal, 20)
 
-                                    LazyVGrid(
-                                        columns: [GridItem(.flexible()), GridItem(.flexible())],
-                                        spacing: 14
-                                    ) {
-                                        ForEach(vm.previewRecipes) { recipe in
-                                            RecipeCard(
-                                                recipe: recipe,
-                                                onTap: {
-                                                    selectedRecipe = recipe
-                                                },
-                                                onFavorite: {
-                                                    toggleFavoriteEverywhere(recipe)
+                                    let freshRecipes = vm.previewRecipes.filter { !$0.hasBeenCooked }
+                                    let cookedRecipes = vm.previewRecipes.filter { $0.hasBeenCooked }
+
+                                    if !freshRecipes.isEmpty {
+                                        LazyVGrid(
+                                            columns: [GridItem(.flexible()), GridItem(.flexible())],
+                                            spacing: 14
+                                        ) {
+                                            ForEach(freshRecipes) { recipe in
+                                                RecipeCard(
+                                                    recipe: recipe,
+                                                    onTap: { selectedRecipe = recipe },
+                                                    onFavorite: { toggleFavoriteEverywhere(recipe) },
+                                                    onReview: { recipeToReview = recipe }
+                                                )
+                                            }
+                                        }
+                                        .padding(.horizontal, 16)
+                                    }
+
+                                    if !cookedRecipes.isEmpty {
+                                        VStack(alignment: .leading, spacing: 12) {
+                                            HStack(spacing: 6) {
+                                                Text("✅")
+                                                Text("Previously Cooked")
+                                                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            .padding(.horizontal, 20)
+                                            .padding(.top, 8)
+
+                                            LazyVGrid(
+                                                columns: [GridItem(.flexible()), GridItem(.flexible())],
+                                                spacing: 14
+                                            ) {
+                                                ForEach(cookedRecipes) { recipe in
+                                                    RecipeCard(
+                                                        recipe: recipe,
+                                                        onTap: { selectedRecipe = recipe },
+                                                        onFavorite: { toggleFavoriteEverywhere(recipe) },
+                                                        onReview: { recipeToReview = recipe },
+                                                        isCooked: true
+                                                    )
                                                 }
-                                            )
+                                            }
+                                            .padding(.horizontal, 16)
                                         }
                                     }
-                                    .padding(.horizontal, 16)
                                 }
                             }
                         }
@@ -817,7 +979,6 @@ struct RecipesView: View {
                 onSave: {
                     vm.saveSuggestedRecipe(recipe, userId: userId)
                     selectedSuggestionRecipe = nil
-
                     Task {
                         try? await Task.sleep(nanoseconds: 500_000_000)
                         await loadOneMoreSuggestion()
@@ -828,8 +989,26 @@ struct RecipesView: View {
         .sheet(isPresented: $showAllRecipesScreen) {
             AllRecipesView(
                 vm: vm,
-                userId: userId
+                userId: userId,
+                assistant: assistant
             )
+        }
+        .sheet(item: $recipeToReview) { recipe in
+            RecipeReviewView(
+                recipe: recipe,
+                assistant: assistant,
+                userId: userId,
+                onComplete: { updatedRecipe, liked, likedNote, improvement in
+                    vm.markAsCooked(updatedRecipe, userId: userId)
+                    vm.updateRecipeAfterReview(updatedRecipe, userId: userId)
+                    if let recipeId = updatedRecipe.id {
+                        vm.saveReview(recipeId: recipeId, liked: Array(liked), likedNote: likedNote, improvement: improvement, userId: userId)
+                    }
+                    recipeToReview = nil
+                }
+            )
+            .presentationDetents([.large])
+            .presentationDragIndicator(.visible)
         }
     }
 }
@@ -840,6 +1019,8 @@ private struct RecipeCard: View {
     let recipe: Recipe
     let onTap: () -> Void
     let onFavorite: () -> Void
+    var onReview: (() -> Void)? = nil
+    var isCooked: Bool = false
 
     var difficultyColor: Color {
         switch recipe.difficulty.lowercased() {
@@ -884,6 +1065,21 @@ private struct RecipeCard: View {
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
+                    // Cooked badge (inline, top of info area)
+                    if isCooked {
+                        HStack(spacing: 4) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 9, weight: .bold))
+                            Text("Previously Cooked")
+                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.green.opacity(0.85))
+                        .clipShape(Capsule())
+                    }
+
                     Text(recipe.title)
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .lineLimit(2)
@@ -892,12 +1088,9 @@ private struct RecipeCard: View {
                     HStack(spacing: 4) {
                         Image(systemName: "clock")
                             .font(.system(size: 10))
-
                         Text(recipe.cookTime)
                             .font(.system(size: 11, weight: .medium))
-
                         Spacer()
-
                         Text(recipe.difficulty)
                             .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(difficultyColor)
@@ -913,6 +1106,33 @@ private struct RecipeCard: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.orange)
                     }
+
+                    // Review button — always visible, full width, below all info
+                    if let onReview = onReview {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            onReview()
+                        }) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "star.fill")
+                                    .font(.system(size: 10))
+                                Text("Leave a Review")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 7)
+                            .background(
+                                LinearGradient(
+                                    colors: [.orange, .green.opacity(0.85)],
+                                    startPoint: .leading, endPoint: .trailing
+                                )
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                        }
+                        .buttonStyle(.plain)
+                        .padding(.top, 2)
+                    }
                 }
                 .padding(12)
             }
@@ -926,6 +1146,8 @@ private struct RecipeCard: View {
             .contentShape(RoundedRectangle(cornerRadius: 20))
         }
         .buttonStyle(RecipeCardButtonStyle())
+        .opacity(isCooked ? 0.85 : 1.0)
+        .saturation(isCooked ? 0.8 : 1.0)
     }
 }
 
@@ -947,29 +1169,23 @@ private struct SuggestionsLoadingSection: View {
             HStack {
                 Text("AI Suggestions")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
-
                 Spacer()
             }
             .padding(.horizontal, 20)
 
             VStack(spacing: 14) {
                 HStack(spacing: 12) {
-                    ProgressView()
-                        .tint(.white)
-
+                    ProgressView().tint(.white)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("ChefBuddy is cooking...")
                             .font(.system(size: 15, weight: .bold, design: .rounded))
                             .foregroundStyle(.white)
-
                         Text("Generating recipe ideas for you")
                             .font(.system(size: 12, weight: .medium, design: .rounded))
                             .foregroundStyle(.white.opacity(0.78))
                     }
-
                     Spacer()
                 }
-
                 Capsule()
                     .fill(.white.opacity(0.22))
                     .frame(height: 5)
@@ -983,19 +1199,13 @@ private struct SuggestionsLoadingSection: View {
             .padding(.horizontal, 18)
             .padding(.vertical, 16)
             .background(
-                LinearGradient(
-                    colors: [.orange, .green.opacity(0.85)],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
+                LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
             )
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .shadow(color: .orange.opacity(0.25), radius: 10, y: 5)
             .padding(.horizontal, 16)
         }
-        .onAppear {
-            animate = true
-        }
+        .onAppear { animate = true }
     }
 }
 
@@ -1007,34 +1217,26 @@ private struct SuggestionCookingCard: View {
             ZStack {
                 LinearGradient(
                     colors: [Color.orange.opacity(0.18), Color.green.opacity(0.12)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
+                    startPoint: .topLeading, endPoint: .bottomTrailing
                 )
                 .frame(height: 110)
                 .clipShape(RoundedRectangle(cornerRadius: 16))
 
                 VStack(spacing: 8) {
-                    ProgressView()
-                        .tint(.orange)
-
+                    ProgressView().tint(.orange)
                     Text("🍳")
                         .font(.system(size: 34))
                         .scaleEffect(animate ? 1.06 : 0.94)
                         .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: animate)
                 }
             }
-
             VStack(alignment: .leading, spacing: 6) {
                 Text("ChefBuddy is cooking...")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary)
-                    .lineLimit(2)
-
+                    .foregroundStyle(.primary).lineLimit(2)
                 Text("Making your next recipe idea")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-
+                    .foregroundStyle(.secondary).lineLimit(2)
                 Text("Please wait")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(.orange)
@@ -1043,14 +1245,9 @@ private struct SuggestionCookingCard: View {
         }
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20))
-        .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.05), lineWidth: 1))
         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
-        .onAppear {
-            animate = true
-        }
+        .onAppear { animate = true }
     }
 }
 
@@ -1059,9 +1256,11 @@ private struct SuggestionCookingCard: View {
 struct AllRecipesView: View {
     @ObservedObject var vm: RecipesViewModel
     let userId: String
+    let assistant: CookingAssistant
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRecipe: Recipe? = nil
+    @State private var recipeToReview: Recipe? = nil
 
     private var titleText: String {
         vm.selectedFilter == "All" ? "All Recipes" : vm.selectedFilter
@@ -1093,12 +1292,10 @@ struct AllRecipesView: View {
                             ForEach(vm.filteredRecipes) { recipe in
                                 RecipeCard(
                                     recipe: recipe,
-                                    onTap: {
-                                        selectedRecipe = recipe
-                                    },
-                                    onFavorite: {
-                                        vm.toggleFavorite(recipe, userId: userId)
-                                    }
+                                    onTap: { selectedRecipe = recipe },
+                                    onFavorite: { vm.toggleFavorite(recipe, userId: userId) },
+                                    onReview: { recipeToReview = recipe },
+                                    isCooked: recipe.hasBeenCooked
                                 )
                             }
                         }
@@ -1119,14 +1316,29 @@ struct AllRecipesView: View {
             .sheet(item: $selectedRecipe) { recipe in
                 RecipeDetailView(
                     recipe: recipe,
-                    onFavorite: {
-                        vm.toggleFavorite(recipe, userId: userId)
-                    },
+                    onFavorite: { vm.toggleFavorite(recipe, userId: userId) },
                     onDelete: {
                         vm.deleteRecipe(recipe, userId: userId)
                         selectedRecipe = nil
                     }
                 )
+            }
+            .sheet(item: $recipeToReview) { recipe in
+                RecipeReviewView(
+                    recipe: recipe,
+                    assistant: assistant,
+                    userId: userId,
+                    onComplete: { updatedRecipe, liked, likedNote, improvement in
+                        vm.markAsCooked(updatedRecipe, userId: userId)
+                        vm.updateRecipeAfterReview(updatedRecipe, userId: userId)
+                        if let recipeId = updatedRecipe.id {
+                            vm.saveReview(recipeId: recipeId, liked: Array(liked), likedNote: likedNote, improvement: improvement, userId: userId)
+                        }
+                        recipeToReview = nil
+                    }
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
             }
         }
     }
@@ -1373,6 +1585,10 @@ struct RecipeDetailView: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 20)
                 .padding(.bottom, 16)
+
+                NutritionBreakdownCard(nutrition: recipe.nutrition, calories: recipe.calories)
+                    .padding(.bottom, 8)
+
 
                 HStack(spacing: 0) {
                     ForEach(["Ingredients", "Instructions"].indices, id: \.self) { i in
@@ -1714,5 +1930,443 @@ private struct RecipesEmptyState: View {
             Spacer()
         }
         .padding()
+    }
+}
+
+// MARK: - Nutrition Breakdown Card
+
+struct NutritionBreakdownCard: View {
+    let nutrition: NutritionInfo
+    let calories: String
+
+    private var hasAnyData: Bool {
+        !nutrition.carbs.isEmpty || !nutrition.protein.isEmpty ||
+        !nutrition.fat.isEmpty || !nutrition.sugar.isEmpty ||
+        !nutrition.fiber.isEmpty || !nutrition.sodium.isEmpty ||
+        !calories.isEmpty
+    }
+
+    var body: some View {
+        if hasAnyData {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 6) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.orange)
+                    Text("Nutrition Per Serving")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                }
+
+                // Calories hero row
+                if !calories.isEmpty {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(calories)
+                                .font(.system(size: 26, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.orange)
+                            Text("Total Calories")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .padding(.bottom, 2)
+                }
+
+                // Macro grid
+                let macros: [(String, String, Color)] = [
+                    ("Carbs", nutrition.carbs, .blue),
+                    ("Protein", nutrition.protein, .green),
+                    ("Fat", nutrition.fat, .orange),
+                    ("Sat. Fat", nutrition.saturatedFat, .red),
+                    ("Sugar", nutrition.sugar, .pink),
+                    ("Fiber", nutrition.fiber, .teal),
+                    ("Sodium", nutrition.sodium, .purple),
+                ]
+                let filledMacros = macros.filter { !$0.1.isEmpty }
+
+                if !filledMacros.isEmpty {
+                    LazyVGrid(
+                        columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
+                        spacing: 10
+                    ) {
+                        ForEach(filledMacros, id: \.0) { name, value, color in
+                            VStack(spacing: 4) {
+                                Text(value)
+                                    .font(.system(size: 15, weight: .heavy, design: .rounded))
+                                    .foregroundStyle(color)
+                                Text(name)
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(color.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                    }
+                }
+            }
+            .padding(16)
+            .background(
+                LinearGradient(
+                    colors: [Color.orange.opacity(0.05), Color.green.opacity(0.04)],
+                    startPoint: .topLeading, endPoint: .bottomTrailing
+                )
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.orange.opacity(0.15), lineWidth: 1))
+            .padding(.horizontal, 24)
+        }
+    }
+}
+
+// MARK: - Recipe Review View
+
+struct RecipeReviewView: View {
+    let recipe: Recipe
+    let assistant: CookingAssistant
+    let userId: String
+    let onComplete: (Recipe, Set<String>, String, String) -> Void
+
+    @Environment(\.dismiss) var dismiss
+    @State private var selectedLiked: Set<String> = []
+    @State private var likedNote = ""
+    @State private var improvementText = ""
+    @State private var isRegenerating = false
+    @State private var revisedRecipe: Recipe? = nil
+    @State private var showConfirmation = false
+    @FocusState private var focusedField: Bool
+
+    let likedOptions = [
+        "🔥 Flavour", "⏱️ Cook Time", "🥗 Ingredients",
+        "📋 Instructions", "🍽️ Portion Size", "💰 Budget-Friendly",
+        "😊 Easy to Make", "🌶️ Spice Level"
+    ]
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color(.systemBackground).ignoresSafeArea()
+                Circle().fill(Color.orange.opacity(0.10)).blur(radius: 80).offset(x: -160, y: -200).ignoresSafeArea()
+                Circle().fill(Color.green.opacity(0.08)).blur(radius: 80).offset(x: 160, y: 300).ignoresSafeArea()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 28) {
+
+                        // Header
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack(spacing: 14) {
+                                Text(recipe.emoji).font(.system(size: 52))
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("How was it?")
+                                        .font(.system(size: 26, weight: .heavy, design: .rounded))
+                                    Text(recipe.title)
+                                        .font(.system(size: 15))
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(1)
+                                }
+                            }
+
+                            Text("Your feedback helps ChefBuddy improve this recipe just for you.")
+                                .font(.system(size: 14))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(4)
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.top, 8)
+
+                        // Nutrition breakdown
+                        NutritionBreakdownCard(nutrition: recipe.nutrition, calories: recipe.calories)
+
+                        // What you liked chips
+                        VStack(alignment: .leading, spacing: 14) {
+                            Label("What did you love?", systemImage: "heart.fill")
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 24)
+
+                            LazyVGrid(
+                                columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())],
+                                spacing: 10
+                            ) {
+                                ForEach(likedOptions, id: \.self) { option in
+                                    let selected = selectedLiked.contains(option)
+                                    Button(action: {
+                                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                        if selected { selectedLiked.remove(option) } else { selectedLiked.insert(option) }
+                                    }) {
+                                        Text(option)
+                                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(selected ? .white : .primary)
+                                            .multilineTextAlignment(.center)
+                                            .padding(.horizontal, 10)
+                                            .padding(.vertical, 10)
+                                            .frame(maxWidth: .infinity)
+                                            .background(
+                                                selected
+                                                ? AnyView(LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing))
+                                                : AnyView(Color(.systemGray6))
+                                            )
+                                            .clipShape(RoundedRectangle(cornerRadius: 12))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 24)
+
+                            TextField("Anything else you loved? (optional)", text: $likedNote, axis: .vertical)
+                                .font(.system(size: 15, design: .rounded))
+                                .padding(14)
+                                .background(Color(.systemGray6))
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                                .lineLimit(3)
+                                .padding(.horizontal, 24)
+                                .focused($focusedField)
+                        }
+
+                        // Improvements
+                        VStack(alignment: .leading, spacing: 12) {
+                            Label("What would you improve?", systemImage: "wand.and.stars")
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .foregroundStyle(.primary)
+                                .padding(.horizontal, 24)
+
+                            Text("Be specific — e.g. \"less salt\", \"add more garlic\", \"simpler steps\", \"bigger portions\"")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 24)
+
+                            TextField("Describe what you'd change...", text: $improvementText, axis: .vertical)
+                                .font(.system(size: 15, design: .rounded))
+                                .padding(14)
+                                .background(Color(.systemGray6))
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                                .lineLimit(5)
+                                .padding(.horizontal, 24)
+                                .focused($focusedField)
+                        }
+
+                        // AI Revision Preview
+                        if let revised = revisedRecipe {
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "sparkles")
+                                        .foregroundStyle(.orange)
+                                    Text("ChefBuddy revised your recipe!")
+                                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                                }
+                                .padding(.horizontal, 24)
+
+                                VStack(alignment: .leading, spacing: 12) {
+                                    HStack(spacing: 12) {
+                                        Text(revised.emoji).font(.system(size: 40))
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(revised.title)
+                                                .font(.system(size: 18, weight: .heavy, design: .rounded))
+                                            Text(revised.description)
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                        }
+                                    }
+
+                                    HStack(spacing: 10) {
+                                        Label(revised.cookTime, systemImage: "clock")
+                                        Label(revised.servings, systemImage: "person.2")
+                                        Label(revised.calories.isEmpty ? "—" : revised.calories, systemImage: "flame")
+                                    }
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(.secondary)
+
+                                    Divider()
+
+                                    NutritionBreakdownCard(nutrition: revised.nutrition, calories: revised.calories)
+                                        .padding(.horizontal, -16)
+
+                                    Divider()
+
+                                    Text("Tap **Save & Update Recipe** below to replace your current recipe with this improved version.")
+                                        .font(.system(size: 13))
+                                        .foregroundStyle(.secondary)
+                                        .lineSpacing(3)
+                                }
+                                .padding(16)
+                                .background(
+                                    LinearGradient(
+                                        colors: [.orange.opacity(0.07), .green.opacity(0.06)],
+                                        startPoint: .topLeading, endPoint: .bottomTrailing
+                                    )
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 18))
+                                .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.orange.opacity(0.2), lineWidth: 1))
+                                .padding(.horizontal, 24)
+                            }
+                        }
+
+                        // Action buttons
+                        VStack(spacing: 12) {
+                            if revisedRecipe == nil {
+                                // Generate improvement
+                                Button(action: generateRevision) {
+                                    HStack(spacing: 10) {
+                                        if isRegenerating {
+                                            ProgressView().tint(.white).scaleEffect(0.85)
+                                            Text("ChefBuddy is revising...").font(.system(size: 17, weight: .bold, design: .rounded))
+                                        } else {
+                                            Image(systemName: "sparkles")
+                                            Text(improvementText.trimmingCharacters(in: .whitespaces).isEmpty ? "Save & Mark as Cooked" : "Revise Recipe with AI")
+                                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                        }
+                                    }
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 56)
+                                    .background(
+                                        LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                                    )
+                                    .clipShape(Capsule())
+                                    .shadow(color: .orange.opacity(0.3), radius: 10, y: 4)
+                                }
+                                .disabled(isRegenerating)
+                            } else {
+                                // Save revised recipe
+                                Button(action: {
+                                    if let revised = revisedRecipe {
+                                        onComplete(revised, selectedLiked, likedNote, improvementText)
+                                    }
+                                }) {
+                                    HStack(spacing: 10) {
+                                        Image(systemName: "checkmark.circle.fill")
+                                        Text("Save & Update Recipe")
+                                            .font(.system(size: 17, weight: .bold, design: .rounded))
+                                    }
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .frame(height: 56)
+                                    .background(
+                                        LinearGradient(colors: [.green, .green.opacity(0.75)], startPoint: .leading, endPoint: .trailing)
+                                    )
+                                    .clipShape(Capsule())
+                                    .shadow(color: .green.opacity(0.3), radius: 10, y: 4)
+                                }
+
+                                // Keep original, just mark cooked
+                                Button(action: { onComplete(recipe, selectedLiked, likedNote, improvementText) }) {
+                                    Text("Keep Original & Mark Cooked")
+                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                        .frame(maxWidth: .infinity)
+                                        .frame(height: 48)
+                                        .background(Color(.systemGray6))
+                                        .clipShape(Capsule())
+                                }
+                            }
+
+                            // Skip without changes
+                            Button(action: { dismiss() }) {
+                                Text("Skip for Now")
+                                    .font(.system(size: 14, weight: .medium))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .frame(maxWidth: .infinity)
+                        }
+                        .padding(.horizontal, 24)
+                        .padding(.bottom, 40)
+                    }
+                    .padding(.top, 8)
+                }
+            }
+            .navigationTitle("Leave a Review")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func generateRevision() {
+        let hasImprovements = !improvementText.trimmingCharacters(in: .whitespaces).isEmpty
+        guard hasImprovements else {
+            // No improvements — just mark as cooked with original
+            onComplete(recipe, selectedLiked, likedNote, "")
+            return
+        }
+
+        isRegenerating = true
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        Task {
+            do {
+                try await assistant.waitUntilReady()
+
+                let likedList = selectedLiked.isEmpty ? "everything overall" : selectedLiked.joined(separator: ", ")
+                let originalIngredients = recipe.ingredients.map { "- \($0)" }.joined(separator: "\n")
+                let originalSteps = recipe.steps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+
+                let prompt = """
+                I cooked "\(recipe.title)" and want you to improve it based on my feedback.
+
+                What I liked: \(likedList)
+                \(likedNote.isEmpty ? "" : "Additional notes on what I liked: \(likedNote)")
+                What I want improved: \(improvementText)
+
+                Current recipe:
+                Ingredients:
+                \(originalIngredients)
+
+                Instructions:
+                \(originalSteps)
+
+                Please revise the recipe incorporating my feedback. Keep what I liked, and specifically address my improvements.
+
+                Respond ONLY in this exact format, no extra text:
+                Title: [recipe name]
+                Emoji: [single relevant emoji]
+                Description: [one sentence about the dish]
+                Cook Time: [e.g. 25 mins]
+                Servings: [e.g. 2 people]
+                Difficulty: [Easy / Medium / Hard]
+                Calories: [e.g. 420 kcal]
+                Carbs: [e.g. 42g]
+                Protein: [e.g. 35g]
+                Fat: [e.g. 12g]
+                Saturated Fat: [e.g. 4g]
+                Sugar: [e.g. 8g]
+                Fiber: [e.g. 5g]
+                Sodium: [e.g. 620mg]
+                Tags: [comma-separated]
+
+                Ingredients:
+                - [ingredient 1]
+                - [ingredient 2]
+
+                Instructions:
+                1. [step one]
+                2. [step two]
+                """
+
+                let raw = try await assistant.getHelp(question: prompt)
+                var revised = RecipesViewModel.parseRecipe(from: raw)
+                revised.id = recipe.id
+                revised.createdAt = recipe.createdAt
+                revised.isFavorite = recipe.isFavorite
+                revised.cookedCount = recipe.cookedCount + 1
+                revised.lastCookedAt = Date()
+
+                await MainActor.run {
+                    self.revisedRecipe = revised
+                    self.isRegenerating = false
+                    UINotificationFeedbackGenerator().notificationOccurred(.success)
+                }
+            } catch {
+                await MainActor.run {
+                    self.isRegenerating = false
+                    UINotificationFeedbackGenerator().notificationOccurred(.error)
+                }
+            }
+        }
     }
 }
