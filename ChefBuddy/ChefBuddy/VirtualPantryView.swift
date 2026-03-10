@@ -1,0 +1,1683 @@
+//
+//  VirtualPantryView.swift
+//  ChefBuddy
+//
+//  Created by Hrudhai Umas on 3/9/26.
+//
+
+import SwiftUI
+import PhotosUI
+import FirebaseFirestore
+import FirebaseAuth
+import Combine
+import UniformTypeIdentifiers
+
+struct PantrySpace: Identifiable, Hashable {
+    let id: String
+    var name: String
+    var emoji: String
+    var colorTheme: String
+}
+
+struct VirtualPantryView: View {
+    @Environment(\.dismiss) var dismiss
+    @EnvironmentObject var authVM: AuthViewModel
+    @ObservedObject var assistant: CookingAssistant
+    
+    // Selected pantry data
+    @State private var pantryCategories: [String: [String]] = [:]
+    @State private var pantrySpaces: [PantrySpace] = []
+    @State private var selectedPantryId: String? = nil
+    @State private var selectedPantryName: String = ""
+    
+    // Create/Edit pantry flow
+    @State private var showCreatePantrySheet = false
+    @State private var editingPantryId: String? = nil
+    @State private var newPantryName: String = ""
+    @State private var newPantryEmoji: String = "🥑"
+    @State private var newPantryColorTheme: String = "Orange"
+    
+    // Delete pantry flow
+    @State private var pantryToDelete: PantrySpace? = nil
+    @State private var showDeletePantryAlert = false
+    
+    // Ingredient input
+    @State private var newIngredient: String = ""
+    @State private var isScanning = false
+    @State private var isFetchingDB = true
+    
+    @State private var selectedPhotos: [PhotosPickerItem] = []
+    @State private var showCamera = false
+    @State private var cameraImage: UIImage?
+    @State private var showClearAllConfirmation = false
+    
+    // Last scanned message
+    @State private var lastScannedDate: Date? = nil
+    
+    // Edit item flow
+    @State private var editingOriginalItem: String? = nil
+    @State private var editingOriginalCategory: String? = nil
+    @State private var editedIngredientName: String = ""
+    @State private var editedIngredientCategory: String = "Other"
+    @State private var showEditIngredientSheet = false
+    
+    // Drag and drop state
+    @State private var draggedItem: String? = nil
+    @State private var draggedFromCategory: String? = nil
+    
+    // Live relative time refresh
+    let relativeTimeTimer = Timer.publish(every: 30.0, on: .main, in: .common).autoconnect()
+    @State private var relativeTimeRefresh = Date()
+    
+    // Simulated scan progress
+    @State private var scanProgressTimer: Timer? = nil
+    @State private var scanStatusText: String = "Waking up ChefBuddy..."
+    @State private var scanAnimationStep: Int = 0
+    let scanStatusMessages = [
+        "Waking up ChefBuddy...",
+        "Looking through your ingredients...",
+        "Trying not to call ketchup a smoothie...",
+        "Sorting everything into sections...",
+        "Checking what belongs in the fridge...",
+        "Finishing the pantry magic..."
+    ]
+    
+    // UI Helpers for splitting Fridge vs Pantry
+    let fridgeCategories = ["Produce", "Protein", "Dairy", "Condiments", "Beverages"]
+    let pantryCategoriesList = ["Pantry", "Spices", "Snacks", "Other"]
+    
+    var hasIngredients: Bool {
+        !pantryCategories.values.flatMap { $0 }.isEmpty
+    }
+    
+    var totalIngredientCount: Int {
+        pantryCategories.values.reduce(0) { $0 + $1.count }
+    }
+    
+    var allCategories: [String] {
+        fridgeCategories + pantryCategoriesList
+    }
+    
+    var currentSpace: PantrySpace? {
+        pantrySpaces.first(where: { $0.id == selectedPantryId })
+    }
+    
+    var activeColor: Color {
+        colorForTheme(currentSpace?.colorTheme ?? "Orange")
+    }
+    
+    var lastScannedRelativeText: String? {
+        guard let lastScannedDate else { return nil }
+        let seconds = Int(Date().timeIntervalSince(lastScannedDate))
+        
+        if seconds < 10 { return "Scanned just now" }
+        else if seconds < 60 { return "Scanned \(seconds) sec ago" }
+        else if seconds < 3600 { return "Scanned \(seconds / 60) min ago" }
+        else if seconds < 86400 { let h = seconds / 3600; return "Scanned \(h) hr\(h == 1 ? "" : "s") ago" }
+        else { let d = seconds / 86400; return "Scanned \(d) day\(d == 1 ? "" : "s") ago" }
+    }
+    
+    var body: some View {
+        ZStack {
+            LinearGradient(
+                colors: [Color(.systemGray6), Color(.systemGroupedBackground)],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .ignoresSafeArea()
+            
+            if isFetchingDB {
+                ProgressView("Opening Pantry...")
+                    .scaleEffect(1.2)
+            } else if pantrySpaces.isEmpty {
+                // MARK: - Initial Onboarding / Creation Flow
+                PantryCardCreatorView(
+                    name: $newPantryName,
+                    emoji: $newPantryEmoji,
+                    colorTheme: $newPantryColorTheme,
+                    isFirstPantry: true,
+                    isEditing: false,
+                    onSave: {
+                        savePantrySpace()
+                    },
+                    onCancel: nil
+                )
+                .transition(.opacity.combined(with: .scale))
+            } else {
+                // MARK: - Main Pantry Interface
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 28) {
+                        
+                        // Header
+                        VStack(spacing: 12) {
+                            Text(currentSpace?.emoji ?? "🥑")
+                                .font(.system(size: 64))
+                                .padding(.top, 10)
+                                .shadow(color: activeColor.opacity(0.3), radius: 10, y: 5)
+                            
+                            Text("Virtual Pantry")
+                                .font(.system(size: 34, weight: .heavy, design: .rounded))
+                            
+                            Text(selectedPantryName)
+                                .font(.headline)
+                                .foregroundStyle(activeColor)
+                            
+                            Text(hasIngredients
+                                 ? "You’ve got \(totalIngredientCount) ingredient\(totalIngredientCount == 1 ? "" : "s") stocked in \(selectedPantryName)."
+                                 : "\(selectedPantryName) is ready for its first haul.")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                                .padding(.horizontal, 30)
+                        }
+                        
+                        pantrySwitcher
+                            .padding(.horizontal, 24)
+                        
+                        // Action Bar
+                        actionBar
+                            .padding(.horizontal, 24)
+                        
+                        if isScanning {
+                            ScanStatusCard(
+                                pantryName: selectedPantryName,
+                                statusText: scanStatusText,
+                                animationStep: scanAnimationStep,
+                                funEmoji: currentSpace?.emoji ?? "✨",
+                                accentColor: activeColor
+                            )
+                            .padding(.horizontal, 24)
+                        }
+                        
+                        if let lastScannedRelativeText, !isScanning {
+                            HStack(spacing: 10) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .foregroundStyle(.green)
+                                
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text(lastScannedRelativeText)
+                                        .font(.callout.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                    
+                                    Text("\(selectedPantryName) was scanned successfully.")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .background(Color.green.opacity(0.08))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(Color.green.opacity(0.15), lineWidth: 1)
+                            )
+                            .padding(.horizontal, 24)
+                        }
+                        
+                        if !hasIngredients && !isScanning {
+                            VStack(spacing: 10) {
+                                Image(systemName: "basket")
+                                    .font(.system(size: 40))
+                                    .foregroundStyle(.tertiary)
+                                
+                                Text("A little shelf-control goes a long way.")
+                                    .font(.headline)
+                                
+                                Text("Scan groceries or add a few ingredients manually to fill up \(selectedPantryName).")
+                                    .multilineTextAlignment(.center)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 30)
+                            }
+                            .padding(.top, 4)
+                        }
+                        
+                        // Fridge
+                        StorageUnitView(
+                            title: "The Fridge",
+                            icon: "snowflake",
+                            color: .cyan,
+                            categories: fridgeCategories,
+                            data: $pantryCategories,
+                            emptyTitle: "Chill... it’s looking a little empty in here.",
+                            emptySubtitle: "Scan your fridge or add a few cold items to get things cooling again.",
+                            onDelete: { savePantry(isScan: false) },
+                            onEdit: openEditSheet,
+                            onMove: moveIngredient,
+                            draggedItem: $draggedItem,
+                            draggedFromCategory: $draggedFromCategory
+                        )
+                        
+                        // Pantry
+                        StorageUnitView(
+                            title: "The Pantry",
+                            icon: "door.french.closed",
+                            color: activeColor,
+                            categories: pantryCategoriesList,
+                            data: $pantryCategories,
+                            emptyTitle: "Not much is pantry-ing right now.",
+                            emptySubtitle: "Add shelf-stable staples, snacks, or spices to stock things up.",
+                            onDelete: { savePantry(isScan: false) },
+                            onEdit: openEditSheet,
+                            onMove: moveIngredient,
+                            draggedItem: $draggedItem,
+                            draggedFromCategory: $draggedFromCategory
+                        )
+                    }
+                    .padding(.bottom, 60)
+                }
+            }
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: $showCamera) {
+            CameraPicker(image: $cameraImage)
+        }
+        .sheet(isPresented: $showEditIngredientSheet) {
+            NavigationStack {
+                Form {
+                    Section("Ingredient") {
+                        TextField("Ingredient name", text: $editedIngredientName)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    
+                    Section("Category") {
+                        Picker("Category", selection: $editedIngredientCategory) {
+                            ForEach(allCategories, id: \.self) { category in
+                                Text(category).tag(category)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    }
+                }
+                .navigationTitle("Edit Ingredient")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel") {
+                            showEditIngredientSheet = false
+                        }
+                    }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("Save") {
+                            saveEditedIngredient()
+                        }
+                        .disabled(editedIngredientName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                }
+            }
+        }
+        .fullScreenCover(isPresented: $showCreatePantrySheet) {
+            PantryCardCreatorView(
+                name: $newPantryName,
+                emoji: $newPantryEmoji,
+                colorTheme: $newPantryColorTheme,
+                isFirstPantry: false,
+                isEditing: editingPantryId != nil,
+                onSave: {
+                    savePantrySpace()
+                },
+                onCancel: {
+                    showCreatePantrySheet = false
+                    resetNewPantryForm()
+                }
+            )
+        }
+        .alert("Delete Pantry?", isPresented: $showDeletePantryAlert) {
+            Button("Delete", role: .destructive) {
+                if let space = pantryToDelete {
+                    deletePantrySpace(space)
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pantryToDelete = nil
+            }
+        } message: {
+            Text("Are you sure you want to delete '\(pantryToDelete?.name ?? "")'? This cannot be undone.")
+        }
+        .confirmationDialog(
+            "Remove all ingredients?",
+            isPresented: $showClearAllConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Remove All", role: .destructive) {
+                clearAllIngredients()
+            }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("This will clear everything from \(selectedPantryName).")
+        }
+        .onChange(of: cameraImage) { image in
+            if let img = image {
+                Task { await processCameraImage(img) }
+            }
+        }
+        .onReceive(relativeTimeTimer) { value in
+            relativeTimeRefresh = value
+        }
+        .onAppear {
+            loadPantrySpaces()
+        }
+    }
+    
+    // MARK: - Subviews
+    
+    private var pantrySwitcher: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Your Pantry Spaces")
+                    .font(.headline)
+                Spacer()
+                Button(action: {
+                    resetNewPantryForm()
+                    showCreatePantrySheet = true
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "plus")
+                        Text("New")
+                    }
+                    .font(.subheadline.weight(.semibold))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(activeColor.opacity(0.12))
+                    .foregroundStyle(activeColor)
+                    .clipShape(Capsule())
+                }
+            }
+            
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(pantrySpaces) { space in
+                        let isSelected = selectedPantryId == space.id
+                        let spaceColor = colorForTheme(space.colorTheme)
+                        
+                        Button(action: {
+                            switchToPantry(space)
+                        }) {
+                            HStack(spacing: 6) {
+                                Text(space.emoji)
+                                Text(space.name)
+                                    .font(.subheadline.weight(.semibold))
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .background(
+                                isSelected
+                                ? spaceColor
+                                : Color(.secondarySystemGroupedBackground)
+                            )
+                            .foregroundStyle(
+                                isSelected ? Color.white : Color.primary
+                            )
+                            .clipShape(Capsule())
+                            .overlay(
+                                Capsule()
+                                    .stroke(
+                                        isSelected
+                                        ? spaceColor
+                                        : Color.primary.opacity(0.08),
+                                        lineWidth: 1
+                                    )
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .contextMenu {
+                            Button {
+                                newPantryName = space.name
+                                newPantryEmoji = space.emoji
+                                newPantryColorTheme = space.colorTheme
+                                editingPantryId = space.id
+                                showCreatePantrySheet = true
+                            } label: {
+                                Label("Edit Space", systemImage: "pencil")
+                            }
+                            
+                            Button(role: .destructive) {
+                                pantryToDelete = space
+                                showDeletePantryAlert = true
+                            } label: {
+                                Label("Delete Space", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+                .padding(.vertical, 2)
+            }
+            
+            Text("Tip: Press and hold a space to edit or delete it.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .padding(.top, -4)
+        }
+    }
+    
+    private var actionBar: some View {
+        VStack(spacing: 16) {
+            HStack(spacing: 12) {
+                TextField("Add item manually...", text: $newIngredient)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .padding()
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                    )
+                    .submitLabel(.done)
+                    .disabled(isScanning || selectedPantryId == nil)
+                    .onSubmit(addManualIngredient)
+                
+                Button(action: addManualIngredient) {
+                    Image(systemName: "plus")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 50, height: 50)
+                        .background(
+                            newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isScanning || selectedPantryId == nil
+                            ? Color.gray.opacity(0.4)
+                            : activeColor
+                        )
+                        .clipShape(Circle())
+                        .shadow(color: activeColor.opacity(0.25), radius: 5, y: 2)
+                }
+                .disabled(newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isScanning || selectedPantryId == nil)
+            }
+            
+            HStack(spacing: 12) {
+                PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 5, matching: .images) {
+                    ActionButton(icon: "photo.on.rectangle.angled", title: "Scan Gallery", color: .blue, isDisabled: isScanning || selectedPantryId == nil)
+                }
+                .disabled(isScanning || selectedPantryId == nil)
+                .onChange(of: selectedPhotos) { newItems in
+                    Task { await processSelectedPhotos(newItems) }
+                }
+                
+                Button(action: { showCamera = true }) {
+                    ActionButton(icon: "camera.viewfinder", title: "Use Camera", color: .green, isDisabled: isScanning || selectedPantryId == nil)
+                }
+                .disabled(isScanning || selectedPantryId == nil)
+            }
+            
+            if hasIngredients {
+                Button(role: .destructive) {
+                    showClearAllConfirmation = true
+                } label: {
+                    HStack(spacing: 8) {
+                        Image(systemName: "trash")
+                        Text("Remove All Ingredients")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.red.opacity(0.08))
+                    .foregroundStyle(.red)
+                    .clipShape(RoundedRectangle(cornerRadius: 16))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16)
+                            .stroke(Color.red.opacity(0.18), lineWidth: 1)
+                    )
+                }
+                .disabled(isScanning || selectedPantryId == nil)
+            }
+        }
+    }
+    
+    // MARK: - Logic Helpers
+    
+    private func resetNewPantryForm() {
+        newPantryName = ""
+        newPantryEmoji = "🥑"
+        newPantryColorTheme = "Orange"
+        editingPantryId = nil
+    }
+    
+    private func colorForTheme(_ theme: String) -> Color {
+        switch theme {
+        case "Blue": return .blue
+        case "Green": return .green
+        case "Pink": return .pink
+        case "Purple": return .purple
+        case "Red": return .red
+        case "Cyan": return .cyan
+        case "Yellow": return .yellow
+        case "Mint": return .mint
+        default: return .orange
+        }
+    }
+    
+    private func pantrySpacesCollection() -> CollectionReference? {
+        guard let uid = authVM.userSession?.uid else { return nil }
+        return Firestore.firestore()
+            .collection("users")
+            .document(uid)
+            .collection("pantrySpaces")
+    }
+    
+    private func loadPantrySpaces() {
+        guard let collection = pantrySpacesCollection() else { return }
+        
+        isFetchingDB = true
+        
+        collection.getDocuments { snapshot, error in
+            guard let docs = snapshot?.documents else {
+                self.isFetchingDB = false
+                return
+            }
+            
+            if docs.isEmpty {
+                withAnimation {
+                    self.pantrySpaces = []
+                    self.isFetchingDB = false
+                }
+                return
+            }
+            
+            let spaces = docs.map { doc in
+                PantrySpace(
+                    id: doc.documentID,
+                    name: (doc.data()["name"] as? String) ?? "Untitled Pantry",
+                    emoji: (doc.data()["emoji"] as? String) ?? "🥑",
+                    colorTheme: (doc.data()["colorTheme"] as? String) ?? "Orange"
+                )
+            }
+            .sorted { $0.name < $1.name }
+            
+            withAnimation {
+                self.pantrySpaces = spaces
+            }
+            
+            if let currentSelected = self.selectedPantryId,
+               let existing = spaces.first(where: { $0.id == currentSelected }) {
+                self.selectedPantryName = existing.name
+                loadPantry(spaceId: existing.id, spaceName: existing.name)
+            } else if let first = spaces.first {
+                self.selectedPantryId = first.id
+                self.selectedPantryName = first.name
+                loadPantry(spaceId: first.id, spaceName: first.name)
+            } else {
+                self.isFetchingDB = false
+            }
+        }
+    }
+    
+    private func savePantrySpace() {
+        let cleanName = newPantryName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleanName.isEmpty, let collection = pantrySpacesCollection() else { return }
+        
+        if let editId = editingPantryId {
+            // Update Existing Space
+            collection.document(editId).updateData([
+                "name": cleanName,
+                "emoji": newPantryEmoji,
+                "colorTheme": newPantryColorTheme,
+                "updatedAt": FieldValue.serverTimestamp()
+            ]) { error in
+                guard error == nil else { return }
+                if let idx = self.pantrySpaces.firstIndex(where: { $0.id == editId }) {
+                    withAnimation(.spring()) {
+                        self.pantrySpaces[idx].name = cleanName
+                        self.pantrySpaces[idx].emoji = newPantryEmoji
+                        self.pantrySpaces[idx].colorTheme = newPantryColorTheme
+                        self.pantrySpaces.sort { $0.name < $1.name }
+                        
+                        if self.selectedPantryId == editId {
+                            self.selectedPantryName = cleanName
+                        }
+                    }
+                }
+                self.showCreatePantrySheet = false
+                self.resetNewPantryForm()
+            }
+        } else {
+            // Create New Space
+            let doc = collection.document()
+            let payload: [String: Any] = [
+                "name": cleanName,
+                "emoji": newPantryEmoji,
+                "colorTheme": newPantryColorTheme,
+                "virtualPantry": [:],
+                "createdAt": FieldValue.serverTimestamp(),
+                "updatedAt": FieldValue.serverTimestamp()
+            ]
+            
+            doc.setData(payload) { error in
+                guard error == nil else { return }
+                let newSpace = PantrySpace(id: doc.documentID, name: cleanName, emoji: newPantryEmoji, colorTheme: newPantryColorTheme)
+                withAnimation(.spring()) {
+                    self.pantrySpaces.append(newSpace)
+                    self.pantrySpaces.sort { $0.name < $1.name }
+                    self.selectedPantryId = newSpace.id
+                    self.selectedPantryName = newSpace.name
+                    self.pantryCategories = [:]
+                    self.showCreatePantrySheet = false
+                    self.lastScannedDate = nil
+                }
+                self.resetNewPantryForm()
+                self.loadPantry(spaceId: newSpace.id, spaceName: newSpace.name)
+            }
+        }
+    }
+    
+    private func deletePantrySpace(_ space: PantrySpace) {
+        guard let collection = pantrySpacesCollection() else { return }
+        
+        collection.document(space.id).delete() { _ in
+            withAnimation(.spring()) {
+                self.pantrySpaces.removeAll(where: { $0.id == space.id })
+                
+                if self.selectedPantryId == space.id {
+                    if let first = self.pantrySpaces.first {
+                        self.switchToPantry(first)
+                    } else {
+                        self.selectedPantryId = nil
+                        self.selectedPantryName = ""
+                        self.pantryCategories = [:]
+                    }
+                }
+            }
+        }
+    }
+    
+    private func switchToPantry(_ space: PantrySpace) {
+        guard selectedPantryId != space.id else { return }
+        withAnimation {
+            selectedPantryId = space.id
+            selectedPantryName = space.name
+        }
+        loadPantry(spaceId: space.id, spaceName: space.name)
+    }
+    
+    private func loadPantry(spaceId: String, spaceName: String) {
+        guard let collection = pantrySpacesCollection() else { return }
+        
+        collection.document(spaceId).getDocument { snapshot, error in
+            var newCategories: [String: [String]] = [:]
+            var newLastScannedDate: Date? = nil
+            
+            if let data = snapshot?.data() {
+                if let savedPantry = data["virtualPantry"] as? [String: [String]] {
+                    newCategories = savedPantry
+                }
+                if let timestamp = data["lastScannedAt"] as? Timestamp {
+                    newLastScannedDate = timestamp.dateValue()
+                }
+            }
+            
+            withAnimation(.easeIn(duration: 0.25)) {
+                self.pantryCategories = newCategories
+                self.lastScannedDate = newLastScannedDate
+                self.selectedPantryId = spaceId
+                self.selectedPantryName = spaceName
+                self.isFetchingDB = false
+            }
+        }
+    }
+    
+    private func savePantry(isScan: Bool = false) {
+        guard let collection = pantrySpacesCollection(),
+              let selectedPantryId else { return }
+        
+        var cleanedPantry = pantryCategories
+        for (key, value) in cleanedPantry {
+            if value.isEmpty {
+                cleanedPantry.removeValue(forKey: key)
+            }
+        }
+        
+        var payload: [String: Any] = [
+            "virtualPantry": cleanedPantry,
+            "updatedAt": FieldValue.serverTimestamp()
+        ]
+        
+        if isScan {
+            payload["lastScannedAt"] = FieldValue.serverTimestamp()
+        }
+        
+        collection.document(selectedPantryId).setData(payload, merge: true)
+    }
+    
+    private func clearAllIngredients() {
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            pantryCategories.removeAll()
+        }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        savePantry(isScan: false)
+    }
+    
+    private func addManualIngredient() {
+        let clean = newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !clean.isEmpty else { return }
+        
+        let itemToAdd = normalizeIngredientItem(clean)
+        
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
+            var items = pantryCategories["Other"] ?? []
+            if !items.contains(itemToAdd) {
+                items.insert(itemToAdd, at: 0)
+                pantryCategories["Other"] = items
+            }
+        }
+        
+        newIngredient = ""
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        savePantry(isScan: false)
+    }
+    
+    private func processSelectedPhotos(_ items: [PhotosPickerItem]) async {
+        guard !items.isEmpty else { return }
+        
+        await MainActor.run {
+            startScanAnimation()
+        }
+        
+        var images: [UIImage] = []
+        for item in items {
+            if let data = try? await item.loadTransferable(type: Data.self),
+               let image = UIImage(data: data) {
+                images.append(image)
+            }
+        }
+        
+        do {
+            let scannedCategories = try await assistant.scanMultipleImages(images: images)
+            
+            await MainActor.run {
+                mergeIngredients(scannedCategories)
+                finishScanAnimation()
+            }
+        } catch {
+            print("Failed to scan images: \(error)")
+            await MainActor.run {
+                stopScanAnimation(resetProgress: true)
+            }
+        }
+        
+        await MainActor.run {
+            selectedPhotos.removeAll()
+        }
+    }
+    
+    private func processCameraImage(_ image: UIImage) async {
+        await MainActor.run {
+            startScanAnimation()
+        }
+        
+        do {
+            let scannedCategories = try await assistant.scanMultipleImages(images: [image])
+            
+            await MainActor.run {
+                mergeIngredients(scannedCategories)
+                finishScanAnimation()
+            }
+        } catch {
+            print("Failed to scan camera image: \(error)")
+            await MainActor.run {
+                stopScanAnimation(resetProgress: true)
+            }
+        }
+        
+        await MainActor.run {
+            cameraImage = nil
+        }
+    }
+    
+    private func mergeIngredients(_ newCategories: [String: [String]]) {
+        withAnimation(.spring()) {
+            for (category, items) in newCategories {
+                var currentItems = pantryCategories[category] ?? []
+                
+                for item in items {
+                    let cleanedItem = normalizeIngredientItem(item)
+                    if !currentItems.contains(cleanedItem) {
+                        currentItems.append(cleanedItem)
+                    }
+                }
+                
+                if !currentItems.isEmpty {
+                    pantryCategories[category] = currentItems
+                }
+            }
+        }
+        
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        savePantry(isScan: true)
+        lastScannedDate = Date()
+    }
+    
+    private func openEditSheet(item: String, category: String) {
+        editingOriginalItem = item
+        editingOriginalCategory = category
+        
+        let parts = item.split(separator: " ", maxSplits: 1)
+        if parts.count == 2 {
+            editedIngredientName = String(parts[1])
+        } else {
+            editedIngredientName = item
+        }
+        
+        editedIngredientCategory = category
+        showEditIngredientSheet = true
+    }
+    
+    private func saveEditedIngredient() {
+        guard let originalItem = editingOriginalItem,
+              let originalCategory = editingOriginalCategory else {
+            return
+        }
+        
+        let cleanedName = editedIngredientName
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        
+        guard !cleanedName.isEmpty else { return }
+        
+        // Preserve original emoji if one exists, otherwise generate one
+        let updatedItem: String
+        let oldParts = originalItem.split(separator: " ", maxSplits: 1)
+        if oldParts.count == 2 {
+            updatedItem = "\(oldParts[0]) \(cleanedName)"
+        } else {
+            updatedItem = normalizeIngredientItem(cleanedName)
+        }
+        
+        withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+            removeItem(originalItem, from: originalCategory)
+            
+            var targetItems = pantryCategories[editedIngredientCategory] ?? []
+            if !targetItems.contains(updatedItem) {
+                targetItems.insert(updatedItem, at: 0)
+                pantryCategories[editedIngredientCategory] = targetItems
+            }
+        }
+        
+        savePantry(isScan: false)
+        
+        showEditIngredientSheet = false
+        editingOriginalItem = nil
+        editingOriginalCategory = nil
+        editedIngredientName = ""
+        editedIngredientCategory = "Other"
+    }
+    
+    private func removeItem(_ item: String, from category: String) {
+        pantryCategories[category]?.removeAll(where: { $0 == item })
+        if pantryCategories[category]?.isEmpty == true {
+            pantryCategories.removeValue(forKey: category)
+        }
+    }
+    
+    private func moveIngredient(_ item: String, from sourceCategory: String, to destinationCategory: String) {
+        guard sourceCategory != destinationCategory else { return }
+        
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+            pantryCategories[sourceCategory]?.removeAll(where: { $0 == item })
+            
+            if pantryCategories[sourceCategory]?.isEmpty == true {
+                pantryCategories.removeValue(forKey: sourceCategory)
+            }
+            
+            var destinationItems = pantryCategories[destinationCategory] ?? []
+            if !destinationItems.contains(item) {
+                destinationItems.insert(item, at: 0)
+                pantryCategories[destinationCategory] = destinationItems
+            }
+        }
+        
+        draggedItem = nil
+        draggedFromCategory = nil
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        savePantry(isScan: false)
+    }
+    
+    private func normalizeIngredientItem(_ item: String) -> String {
+        let trimmed = item.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let parts = trimmed.split(separator: " ", maxSplits: 1)
+        
+        if parts.count == 2 {
+            return "\(parts[0]) \(parts[1])"
+        } else {
+            let defaultEmojis = ["🥫", "🍱", "🍲", "🥗", "🍛", "🥘", "🌮", "🍝", "🥩", "🍗", "🥦", "🍋", "🌶️", "🍄", "🥕"]
+            let randomEmoji = defaultEmojis.randomElement() ?? "🥘"
+            return "\(randomEmoji) \(trimmed)"
+        }
+    }
+    
+    private func startScanAnimation() {
+        stopScanAnimation(resetProgress: true)
+        
+        isScanning = true
+        scanAnimationStep = 0
+        scanStatusText = scanStatusMessages[0]
+        
+        // Endless loop animating until the API returns
+        scanProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
+            let nextStep = (scanAnimationStep + 1) % scanStatusMessages.count
+            withAnimation(.easeInOut(duration: 0.5)) {
+                scanAnimationStep = nextStep
+                scanStatusText = scanStatusMessages[nextStep]
+            }
+        }
+    }
+    
+    private func finishScanAnimation() {
+        scanProgressTimer?.invalidate()
+        scanProgressTimer = nil
+        
+        withAnimation(.easeInOut(duration: 0.25)) {
+            scanStatusText = "Done stocking \(selectedPantryName)."
+        }
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            stopScanAnimation(resetProgress: true)
+        }
+    }
+    
+    private func stopScanAnimation(resetProgress: Bool) {
+        scanProgressTimer?.invalidate()
+        scanProgressTimer = nil
+        isScanning = false
+        
+        if resetProgress {
+            scanStatusText = "Waking up ChefBuddy..."
+            scanAnimationStep = 0
+        }
+    }
+}
+
+// MARK: - Pantry Card Creator View
+struct PantryCardCreatorView: View {
+    @Binding var name: String
+    @Binding var emoji: String
+    @Binding var colorTheme: String
+    
+    let isFirstPantry: Bool
+    let isEditing: Bool
+    let onSave: () -> Void
+    let onCancel: (() -> Void)?
+    
+    let colorThemes = ["Orange", "Blue", "Green", "Pink", "Purple", "Red", "Cyan", "Yellow", "Mint"]
+    let emojis = ["🥑", "🥩", "🧀", "🥦", "🥛", "🥕", "🍗", "🍅", "🍞", "🌶️", "🥐", "🧊", "🍔", "🍕", "🧁"]
+    
+    var activeColor: Color {
+        switch colorTheme {
+        case "Blue": return .blue
+        case "Green": return .green
+        case "Pink": return .pink
+        case "Purple": return .purple
+        case "Red": return .red
+        case "Cyan": return .cyan
+        case "Yellow": return .yellow
+        case "Mint": return .mint
+        default: return .orange
+        }
+    }
+    
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color(.systemGroupedBackground).ignoresSafeArea()
+                
+                ScrollView {
+                    VStack(spacing: 32) {
+                        
+                        if isFirstPantry {
+                            VStack(spacing: 8) {
+                                Text("Welcome to ChefBuddy")
+                                    .font(.title2.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                Text("Let's set up your first space.")
+                                    .font(.title.weight(.heavy))
+                                    .multilineTextAlignment(.center)
+                            }
+                            .padding(.top, 20)
+                        }
+                        
+                        // Contact Card Preview
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [activeColor.opacity(0.6), activeColor],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .shadow(color: activeColor.opacity(0.3), radius: 15, y: 8)
+                            
+                            VStack(spacing: 20) {
+                                Text(emoji)
+                                    .font(.system(size: 80))
+                                    .shadow(color: .black.opacity(0.2), radius: 10, y: 5)
+                                    .scaleEffect(1.05)
+                                    .animation(.spring(response: 0.3, dampingFraction: 0.5), value: emoji)
+                                
+                                TextField("Pantry Name", text: $name)
+                                    .font(.system(size: 30, weight: .heavy, design: .rounded))
+                                    .foregroundColor(.white)
+                                    .multilineTextAlignment(.center)
+                                    .tint(.white)
+                                    .submitLabel(.done)
+                                    .padding(.horizontal)
+                            }
+                            .padding()
+                        }
+                        .frame(width: 260, height: 320)
+                        .padding(.top, isFirstPantry ? 10 : 30)
+                        
+                        // Customization Controls
+                        VStack(spacing: 28) {
+                            
+                            // Color Picker
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Background Theme")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 24)
+                                
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 16) {
+                                        ForEach(colorThemes, id: \.self) { theme in
+                                            Circle()
+                                                .fill(themeColor(for: theme))
+                                                .frame(width: 44, height: 44)
+                                                .overlay(
+                                                    Circle()
+                                                        .stroke(Color.white, lineWidth: colorTheme == theme ? 3 : 0)
+                                                )
+                                                .shadow(color: colorTheme == theme ? themeColor(for: theme).opacity(0.5) : .clear, radius: 5, y: 2)
+                                                .scaleEffect(colorTheme == theme ? 1.15 : 1.0)
+                                                .onTapGesture {
+                                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                                        colorTheme = theme
+                                                    }
+                                                }
+                                        }
+                                    }
+                                    .padding(.horizontal, 24)
+                                    .padding(.vertical, 8)
+                                }
+                            }
+                            
+                            // Emoji Picker
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("Pantry Icon")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 24)
+                                
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 16) {
+                                        ForEach(emojis, id: \.self) { e in
+                                            Text(e)
+                                                .font(.system(size: 32))
+                                                .frame(width: 50, height: 50)
+                                                .background(
+                                                    Circle()
+                                                        .fill(emoji == e ? activeColor.opacity(0.2) : Color(.secondarySystemGroupedBackground))
+                                                )
+                                                .scaleEffect(emoji == e ? 1.15 : 1.0)
+                                                .onTapGesture {
+                                                    withAnimation(.spring(response: 0.3, dampingFraction: 0.5)) {
+                                                        emoji = e
+                                                    }
+                                                }
+                                        }
+                                    }
+                                    .padding(.horizontal, 24)
+                                    .padding(.vertical, 8)
+                                }
+                            }
+                        }
+                        
+                        Spacer(minLength: 40)
+                    }
+                }
+                
+                // Bottom Sticky Button
+                VStack {
+                    Spacer()
+                    Button(action: {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        onSave()
+                    }) {
+                        Text(isFirstPantry ? "Start Cooking" : (isEditing ? "Save Changes" : "Create Pantry"))
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 18)
+                            .background(name.trimmingCharacters(in: .whitespaces).isEmpty ? Color.gray : activeColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                            .shadow(color: name.trimmingCharacters(in: .whitespaces).isEmpty ? .clear : activeColor.opacity(0.4), radius: 10, y: 5)
+                            .animation(.default, value: name)
+                    }
+                    .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
+                }
+            }
+            .navigationTitle(isFirstPantry ? "" : (isEditing ? "Edit Pantry" : "New Pantry"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if let onCancel = onCancel {
+                    ToolbarItem(placement: .cancellationAction) {
+                        Button("Cancel", action: onCancel)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func themeColor(for name: String) -> Color {
+        switch name {
+        case "Blue": return .blue
+        case "Green": return .green
+        case "Pink": return .pink
+        case "Purple": return .purple
+        case "Red": return .red
+        case "Cyan": return .cyan
+        case "Yellow": return .yellow
+        case "Mint": return .mint
+        default: return .orange
+        }
+    }
+}
+
+// MARK: - Custom UI Components
+
+struct StorageUnitView: View {
+    let title: String
+    let icon: String
+    let color: Color
+    let categories: [String]
+    @Binding var data: [String: [String]]
+    let emptyTitle: String
+    let emptySubtitle: String
+    let onDelete: () -> Void
+    let onEdit: (String, String) -> Void
+    let onMove: (String, String, String) -> Void
+    @Binding var draggedItem: String?
+    @Binding var draggedFromCategory: String?
+    
+    private var totalCount: Int {
+        categories.reduce(0) { result, category in
+            result + (data[category]?.count ?? 0)
+        }
+    }
+    
+    private var hasItems: Bool {
+        totalCount > 0
+    }
+    
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                HStack(spacing: 10) {
+                    Image(systemName: icon)
+                        .foregroundStyle(color)
+                        .font(.title2)
+                    
+                    Text(title)
+                        .font(.system(size: 22, weight: .bold, design: .rounded))
+                }
+                
+                Spacer()
+                
+                Text("\(totalCount)")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(color)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(color.opacity(0.12))
+                    .clipShape(Capsule())
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 16)
+            
+            VStack(spacing: 24) {
+                // Fix for empty states: If the user is dragging something, force categories to render as drop zones
+                if hasItems || draggedItem != nil {
+                    ForEach(categories, id: \.self) { category in
+                        let validDropTarget = draggedItem != nil && draggedFromCategory != category
+                        
+                        CategoryDropSection(
+                            categoryName: category,
+                            items: data[category] ?? [],
+                            isValidDropTarget: validDropTarget,
+                            accentColor: color,
+                            onEdit: { itemToEdit in
+                                onEdit(itemToEdit, category)
+                            },
+                            onDelete: { itemToDelete in
+                                withAnimation(.spring()) {
+                                    data[category]?.removeAll(where: { $0 == itemToDelete })
+                                    if data[category]?.isEmpty == true {
+                                        data.removeValue(forKey: category)
+                                    }
+                                    onDelete()
+                                }
+                            },
+                            onDragStart: { item in
+                                draggedItem = item
+                                draggedFromCategory = category
+                            },
+                            onDropItem: {
+                                guard let item = draggedItem,
+                                      let sourceCategory = draggedFromCategory else { return }
+                                onMove(item, sourceCategory, category)
+                            }
+                        )
+                    }
+                } else {
+                    EmptyStorageView(
+                        icon: icon,
+                        color: color,
+                        title: emptyTitle,
+                        subtitle: emptySubtitle
+                    )
+                }
+            }
+            .padding(.vertical, 20)
+            .background(
+                RoundedRectangle(cornerRadius: 24)
+                    .fill(Color(UIColor.secondarySystemGroupedBackground))
+                    .shadow(color: .black.opacity(0.03), radius: 10, y: 5)
+            )
+            .padding(.horizontal, 16)
+        }
+    }
+}
+
+struct CategoryDropSection: View {
+    let categoryName: String
+    let items: [String]
+    let isValidDropTarget: Bool
+    let accentColor: Color
+    let onEdit: (String) -> Void
+    let onDelete: (String) -> Void
+    let onDragStart: (String) -> Void
+    let onDropItem: () -> Void
+    
+    // Automatically flips cleanly on hover when dragging!
+    @State private var isTargeted: Bool = false
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(categoryName)
+                .font(.subheadline)
+                .fontWeight(.bold)
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 20)
+            
+            if items.isEmpty {
+                RoundedRectangle(cornerRadius: 14)
+                    .fill(isTargeted ? accentColor.opacity(0.14) : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 14)
+                            .stroke(
+                                isTargeted ? accentColor.opacity(0.65) : Color.gray.opacity(0.2),
+                                style: StrokeStyle(lineWidth: isTargeted ? 2 : 1.5, dash: [6])
+                            )
+                    )
+                    .frame(height: 64)
+                    .overlay(
+                        Text(isTargeted ? "Drop ingredient here" : "Drag ingredients here")
+                            .font(.footnote.weight(isTargeted ? .semibold : .regular))
+                            .foregroundStyle(isTargeted ? accentColor : .secondary)
+                    )
+                    .padding(.horizontal, 20)
+            } else {
+                if #available(iOS 16.0, *) {
+                    FlowLayout(spacing: 10) {
+                        ForEach(items, id: \.self) { item in
+                            IngredientCard(
+                                fullText: item,
+                                onTap: {
+                                    onEdit(item)
+                                },
+                                onDelete: {
+                                    onDelete(item)
+                                },
+                                onDragStart: {
+                                    onDragStart(item)
+                                }
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 2)
+                }
+            }
+            
+            // Bottom Highlight Line
+            Rectangle()
+                .fill(
+                    isTargeted
+                    ? LinearGradient(
+                        colors: [accentColor.opacity(0.65), accentColor.opacity(0.3)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                    : LinearGradient(
+                        colors: [Color.gray.opacity(0.1), Color.gray.opacity(0.3)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+                .frame(height: isTargeted ? 10 : 6)
+                .cornerRadius(5)
+                .padding(.horizontal, 12)
+                .padding(.top, 4)
+        }
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(isTargeted ? accentColor.opacity(0.10) : Color.clear)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18)
+                        .stroke(
+                            isTargeted ? accentColor.opacity(0.40) : Color.clear,
+                            lineWidth: isTargeted ? 1.5 : 0
+                        )
+                )
+                .shadow(
+                    color: isTargeted ? accentColor.opacity(0.22) : .clear,
+                    radius: isTargeted ? 12 : 0,
+                    y: 0
+                )
+        )
+        .scaleEffect(isTargeted ? 1.01 : 1.0)
+        .animation(.easeInOut(duration: 0.18), value: isTargeted)
+        .padding(.horizontal, 12)
+        .contentShape(RoundedRectangle(cornerRadius: 18))
+        .onDrop(of: [UTType.text], isTargeted: $isTargeted) { _ in
+            onDropItem()
+            return true
+        }
+    }
+}
+
+struct EmptyStorageView: View {
+    let icon: String
+    let color: Color
+    let title: String
+    let subtitle: String
+    
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 28))
+                .foregroundStyle(color.opacity(0.8))
+                .padding(14)
+                .background(color.opacity(0.12))
+                .clipShape(Circle())
+            
+            Text(title)
+                .font(.system(size: 17, weight: .bold, design: .rounded))
+                .multilineTextAlignment(.center)
+            
+            Text(subtitle)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 24)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
+        .padding(.horizontal, 12)
+    }
+}
+
+struct IngredientCard: View {
+    let fullText: String
+    let onTap: () -> Void
+    let onDelete: () -> Void
+    let onDragStart: () -> Void
+    
+    var parsedEmoji: String {
+        let parts = fullText.split(separator: " ", maxSplits: 1)
+        return parts.count == 2 ? String(parts[0]) : "🥘"
+    }
+    
+    var parsedTitle: String {
+        let parts = fullText.split(separator: " ", maxSplits: 1)
+        return parts.count == 2 ? String(parts[1]) : fullText
+    }
+    
+    var body: some View {
+        HStack(spacing: 8) {
+            Button(action: onTap) {
+                HStack(spacing: 8) {
+                    Text(parsedEmoji)
+                        .font(.system(size: 16))
+                    
+                    Text(parsedTitle.capitalized)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    
+                    Image(systemName: "pencil")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(.secondary.opacity(0.4))
+                }
+            }
+            .buttonStyle(.plain)
+            
+            Button(action: {
+                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                onDelete()
+            }) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(.secondary.opacity(0.5))
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(.background)
+                .shadow(color: .black.opacity(0.06), radius: 4, y: 2)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+        .onDrag {
+            onDragStart()
+            return NSItemProvider(object: fullText as NSString)
+        }
+    }
+}
+
+struct ActionButton: View {
+    let icon: String
+    let title: String
+    let color: Color
+    var isDisabled: Bool = false
+    
+    var body: some View {
+        HStack {
+            Image(systemName: icon)
+            Text(title)
+                .fontWeight(.semibold)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 14)
+        .background(.ultraThinMaterial)
+        .foregroundStyle(isDisabled ? .secondary : color)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke((isDisabled ? Color.gray.opacity(0.2) : color.opacity(0.3)), lineWidth: 1)
+        )
+        .opacity(isDisabled ? 0.7 : 1)
+    }
+}
+
+struct ScanStatusCard: View {
+    let pantryName: String
+    let statusText: String
+    let animationStep: Int
+    let funEmoji: String
+    let accentColor: Color
+    
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(
+                        LinearGradient(
+                            colors: [accentColor.opacity(0.18), Color.pink.opacity(0.14)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 54, height: 54)
+                
+                Text(funEmoji)
+                    .font(.system(size: 28))
+                    .scaleEffect(animationStep % 2 == 0 ? 1.0 : 1.08)
+                    .animation(.spring(response: 0.35, dampingFraction: 0.65), value: animationStep)
+            }
+            
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("ChefBuddy is organizing \(pantryName)")
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(.primary)
+                }
+                
+                Text(statusText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                
+                HStack(spacing: 5) {
+                    Text("Scanning")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    
+                    BouncingDotsView(step: animationStep, color: accentColor)
+                }
+            }
+            Spacer()
+        }
+        .padding(16)
+        .background(
+            RoundedRectangle(cornerRadius: 18)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18)
+                .stroke(accentColor.opacity(0.16), lineWidth: 1)
+        )
+    }
+}
+
+struct BouncingDotsView: View {
+    let step: Int
+    let color: Color
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(index <= (step % 3) ? color : Color.gray.opacity(0.35))
+                    .frame(width: 6, height: 6)
+                    .offset(y: index == (step % 3) ? -2 : 0)
+                    .animation(.easeInOut(duration: 0.2), value: step)
+            }
+        }
+    }
+}
+
+// iOS 16 Custom Layout for wrapping cards
+@available(iOS 16.0, *)
+struct FlowLayout: Layout {
+    var spacing: CGFloat = 8
+    
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let result = FlowResult(in: proposal.width ?? 0, subviews: subviews, spacing: spacing)
+        return result.size
+    }
+    
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let result = FlowResult(in: bounds.width, subviews: subviews, spacing: spacing)
+        for (index, subview) in subviews.enumerated() {
+            let point = result.frames[index].origin
+            subview.place(
+                at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y),
+                proposal: .unspecified
+            )
+        }
+    }
+    
+    struct FlowResult {
+        var size: CGSize = .zero
+        var frames: [CGRect] = []
+        
+        init(in maxWidth: CGFloat, subviews: Subviews, spacing: CGFloat) {
+            var currentX: CGFloat = 0
+            var currentY: CGFloat = 0
+            var rowHeight: CGFloat = 0
+            
+            for subview in subviews {
+                let size = subview.sizeThatFits(.unspecified)
+                
+                if currentX + size.width > maxWidth && currentX > 0 {
+                    currentX = 0
+                    currentY += rowHeight + spacing
+                    rowHeight = 0
+                }
+                
+                frames.append(CGRect(x: currentX, y: currentY, width: size.width, height: size.height))
+                rowHeight = max(rowHeight, size.height)
+                currentX += size.width + spacing
+            }
+            
+            self.size = CGSize(width: maxWidth, height: currentY + rowHeight)
+        }
+    }
+}
+
+// Inline Camera Picker
+struct CameraPicker: UIViewControllerRepresentable {
+    @Binding var image: UIImage?
+    @Environment(\.dismiss) var dismiss
+    
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        return picker
+    }
+    
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+    
+    func makeCoordinator() -> Coordinator {
+        Coordinator(self)
+    }
+    
+    class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
+        let parent: CameraPicker
+        
+        init(_ parent: CameraPicker) {
+            self.parent = parent
+        }
+        
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]
+        ) {
+            if let img = info[.originalImage] as? UIImage {
+                parent.image = img
+            }
+            parent.dismiss()
+        }
+        
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            parent.dismiss()
+        }
+    }
+}

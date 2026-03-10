@@ -82,9 +82,9 @@ class CookingAssistant: ObservableObject {
         guard var jsonString = rawText else { return nil }
 
         jsonString = jsonString
-            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "```json", with: "", options: String.CompareOptions.caseInsensitive)
             .replacingOccurrences(of: "```", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
         if let start = jsonString.firstIndex(of: "[") {
             jsonString = String(jsonString[start...])
@@ -94,16 +94,16 @@ class CookingAssistant: ObservableObject {
             jsonString = String(jsonString[...end])
         }
 
-        return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return jsonString.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
     }
 
     private func cleanJSONObjectString(from rawText: String?) -> String? {
         guard var jsonString = rawText else { return nil }
 
         jsonString = jsonString
-            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "```json", with: "", options: String.CompareOptions.caseInsensitive)
             .replacingOccurrences(of: "```", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
 
         if let start = jsonString.firstIndex(of: "{") {
             jsonString = String(jsonString[start...])
@@ -113,7 +113,7 @@ class CookingAssistant: ObservableObject {
             jsonString = String(jsonString[...end])
         }
 
-        return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return jsonString.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
     }
 
     func fetchRecipeSuggestions(reviewFeedback: String = "") async {
@@ -187,7 +187,7 @@ class CookingAssistant: ObservableObject {
         }
 
         let cleanedTitles = excludingTitles
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .map { $0.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
         let excludedTitlesText: String
@@ -255,13 +255,13 @@ class CookingAssistant: ObservableObject {
         )
 
         let normalizedNewTitle = decoded.title
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
             .lowercased()
 
         await MainActor.run {
             if !normalizedExcluded.contains(normalizedNewTitle) &&
                 !self.suggestions.contains(where: {
-                    $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedNewTitle
+                    $0.title.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines).lowercased() == normalizedNewTitle
                 }) {
                 self.suggestions.append(decoded)
             }
@@ -344,44 +344,16 @@ class CookingAssistant: ObservableObject {
         return response.text ?? "I'm not sure — could you show me the ingredients again?"
     }
 
-    func scanFridgeIngredients(image: UIImage) async throws -> [String] {
-        guard let model else {
-            throw CookingAssistantError.modelNotReady
-        }
-
-        guard let imageData = image.jpegData(compressionQuality: 0.8) else {
-            throw CookingAssistantError.imageProcessingFailed
-        }
-
-        let imagePart = InlineDataPart(data: imageData, mimeType: "image/jpeg")
-
-        let prompt = """
-        Look at this fridge image and identify food ingredients.
-
-        Return ONLY a JSON array of ingredient names.
-
-        Example:
-        ["eggs", "milk", "spinach", "cheese"]
-        """
-
-        let response = try await model.generateContent(imagePart, prompt)
-
-        guard let text = response.text else { return [] }
-
-        let cleaned = text
-            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
-            .replacingOccurrences(of: "```", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        guard let data = cleaned.data(using: .utf8) else { return [] }
-
-        return try JSONDecoder().decode([String].self, from: data)
-    }
-
     func generateRecipesFromIngredients(_ ingredients: [String]) async {
         guard let model else { return }
 
-        let ingredientList = ingredients.joined(separator: ", ")
+        // Strip out the emojis before passing to recipe generator
+        let cleanIngredients = ingredients.map { item -> String in
+            let parts = item.split(separator: " ", maxSplits: 1)
+            return parts.count == 2 ? String(parts[1]) : item
+        }
+        
+        let ingredientList = cleanIngredients.joined(separator: ", ")
 
         let prompt = """
         Create 3 fully detailed recipes using ONLY these ingredients:
@@ -429,5 +401,52 @@ class CookingAssistant: ObservableObject {
         } catch {
             print("Recipe generation failed:", error)
         }
+    }
+    
+    // Method to handle multiple images and categorize ingredients
+    func scanMultipleImages(images: [UIImage]) async throws -> [String: [String]] {
+        guard let model else { throw CookingAssistantError.modelNotReady }
+        
+        var parts: [any Part] = []
+        
+        for image in images {
+            if let imageData = image.jpegData(compressionQuality: 0.8) {
+                parts.append(InlineDataPart(data: imageData, mimeType: "image/jpeg"))
+            }
+        }
+        
+        guard !parts.isEmpty else { throw CookingAssistantError.imageProcessingFailed }
+        
+        let prompt = """
+        Look at these images of a fridge/pantry and identify all the raw food ingredients visible.
+        Categorize them into exactly these categories: "Produce", "Protein", "Dairy", "Pantry", "Condiments", and "Other".
+        Return ONLY a valid JSON object where keys are the categories and values are arrays of strings.
+        Each string MUST start with a single highly relevant emoji, followed by a space, and then the ingredient name in lowercase.
+        Do not duplicate ingredients.
+
+        Example:
+        {
+          "Produce": ["🥬 spinach", "🍅 tomato"],
+          "Protein": ["🍗 chicken", "🥚 eggs"],
+          "Dairy": ["🥛 milk", "🧀 cheese"],
+          "Pantry": ["🍚 rice", "🍝 pasta"],
+          "Condiments": ["🥫 ketchup"], 
+          "Other": ["🧃 juice"]
+        }
+        """
+        
+        parts.append(TextPart(prompt))
+        
+        let content = ModelContent(role: "user", parts: parts)
+        let response = try await model.generateContent([content])
+        
+        guard let text = response.text else { return [:] }
+        let cleaned = text
+            .replacingOccurrences(of: "```json", with: "", options: String.CompareOptions.caseInsensitive)
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines)
+
+        guard let data = cleaned.data(using: String.Encoding.utf8) else { return [:] }
+        return try JSONDecoder().decode([String: [String]].self, from: data)
     }
 }

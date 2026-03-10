@@ -18,9 +18,14 @@ struct HomeView: View {
     @State private var showSettings = false
     @State private var appearAnimation = false
     @State private var showRecipePicker = false
+    @State private var showVirtualPantry = false
     @State private var selectedLiveRecipe: Recipe? = nil
     @State private var showLiveCooking = false
+    
+    // Data States
     @State private var savedRecipes: [Recipe] = []
+    @State private var isPantryEmpty = true
+    @State private var dailyPrompt = "What are we cooking today? 🍳"
 
     var displayName: String {
         if let name = authVM.userSession?.displayName, !name.isEmpty {
@@ -29,6 +34,49 @@ struct HomeView: View {
             return String(email.split(separator: "@").first ?? "Chef")
         }
         return "Chef"
+    }
+    
+    // Dynamic Time-Based Greeting
+    var timeBasedGreeting: String {
+        let date = Date()
+        let hour = Calendar.current.component(.hour, from: date)
+        let minute = Calendar.current.component(.minute, from: date)
+        
+        // We match against a tuple of (hour, minute) to catch the exact 3:30 AM cutoff
+        switch (hour, minute) {
+            
+        // 12:00 AM to 3:30 AM (Late Night)
+        case (0...2, _), (3, 0...30):
+            return [
+                "Midnight munchies, \(displayName)? 🦉",
+                "Late night cravings, \(displayName)? 🌙",
+                "Fueling the midnight oil, \(displayName)? 🍜"
+            ].randomElement() ?? "Late night snack, \(displayName)?"
+            
+        // 3:31 AM to 11:59 AM (Morning)
+        case (3...11, _):
+            return [
+                "Rise and shine, Chef \(displayName)! 🍳",
+                "Let's get this bread, \(displayName). 🍞",
+                "Time to fuel up for the day, \(displayName). ☕️"
+            ].randomElement() ?? "Good morning, \(displayName)!"
+            
+        // 12:00 PM to 4:59 PM (Afternoon)
+        case (12...16, _):
+            return [
+                "Lunchtime cravings, \(displayName)? 🌮",
+                "Midday fuel, \(displayName)? 🥗",
+                "Let’s cook up a midday masterpiece, \(displayName). 🧑‍🍳"
+            ].randomElement() ?? "Good afternoon, \(displayName)!"
+            
+        // 5:00 PM to 11:59 PM (Evening)
+        default:
+            return [
+                "What's on the dinner menu, \(displayName)? 🥘",
+                "Time to unwind and dine, \(displayName). 🍽️",
+                "Let's cook up something cozy tonight, \(displayName). 🍲"
+            ].randomElement() ?? "Good evening, \(displayName)!"
+        }
     }
 
     var body: some View {
@@ -47,9 +95,9 @@ struct HomeView: View {
 
                         // welcome to homepage
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Hello, \(displayName)!")
+                            Text(timeBasedGreeting)
                                 .font(.system(size: 34, weight: .bold, design: .rounded))
-                            Text("What are we cooking today?")
+                            Text(dailyPrompt)
                                 .font(.system(size: 16))
                                 .foregroundStyle(.secondary)
                         }
@@ -59,17 +107,27 @@ struct HomeView: View {
                         .opacity(appearAnimation ? 1.0 : 0)
 
                         // fridge scanning feature
-                        VStack(spacing: 16) {
+                        Button(action: { showVirtualPantry = true }) {
                             HStack {
                                 VStack(alignment: .leading, spacing: 4) {
-                                    Text("Empty Fridge?")
-                                        .font(.headline)
-                                    Text("Scan or type ingredients to start.")
-                                        .font(.subheadline)
-                                        .foregroundStyle(.secondary)
+                                    if isPantryEmpty {
+                                        Text("Crickets in the Kitchen? 🦗")
+                                            .font(.headline)
+                                        Text("A virtual pantry lets you track ingredients to craft recipes with what you have. Scan your fridge and pantry to stock up!")
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                            .multilineTextAlignment(.leading)
+                                    } else {
+                                        Text("View Virtual Pantry")
+                                            .font(.headline)
+                                        Text("Craft recipes with what you have. Check your available ingredients or add more to your virtual shelves.")
+                                            .font(.subheadline)
+                                            .foregroundStyle(.secondary)
+                                            .multilineTextAlignment(.leading)
+                                    }
                                 }
                                 Spacer()
-                                Image(systemName: "camera.viewfinder")
+                                Image(systemName: isPantryEmpty ? "camera.viewfinder" : "basket.fill")
                                     .font(.title)
                                     .foregroundStyle(.orange)
                             }
@@ -77,10 +135,8 @@ struct HomeView: View {
                             .background(.ultraThinMaterial)
                             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
                             .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color.primary.opacity(0.05), lineWidth: 1))
-                            .onTapGesture {
-                                // ingredient inputs
-                            }
                         }
+                        .buttonStyle(.plain)
                         .padding(.horizontal, 24)
                         .offset(y: appearAnimation ? 0 : 15)
                         .opacity(appearAnimation ? 1.0 : 0)
@@ -171,6 +227,10 @@ struct HomeView: View {
             .navigationDestination(isPresented: $showSettings) {
                 ProfileSettingsView().environmentObject(authVM)
             }
+            .navigationDestination(isPresented: $showVirtualPantry) {
+                VirtualPantryView(assistant: assistant)
+                    .environmentObject(authVM)
+            }
             .sheet(isPresented: $showRecipePicker) {
                 RecipePickerSheet(recipes: savedRecipes) { recipe in
                     selectedLiveRecipe = recipe
@@ -187,19 +247,59 @@ struct HomeView: View {
             }
             .onAppear {
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.8).delay(0.1)) { appearAnimation = true }
-                // AI Initialization
+                setupDynamicPrompts()
+                
+                // AI Initialization and DB Listeners
                 if let uid = authVM.userSession?.uid {
                     Task { await assistant.setupAssistant(userId: uid) }
+                    
+                    let userDocRef = Firestore.firestore().collection("users").document(uid)
+                    
                     // Keep savedRecipes in sync for the RecipePicker
-                    Firestore.firestore().collection("users").document(uid)
-                        .collection("recipes").order(by: "createdAt", descending: true)
+                    userDocRef.collection("recipes").order(by: "createdAt", descending: true)
                         .addSnapshotListener { snap, _ in
                             guard let docs = snap?.documents else { return }
                             savedRecipes = docs.compactMap { try? $0.data(as: Recipe.self) }
                         }
+                    
+                    // Listen for Virtual Pantry changes to update the button UI
+                    // Now looks at the pantrySpaces subcollection to see if any ingredients exist across all spaces
+                    userDocRef.collection("pantrySpaces").addSnapshotListener { snap, _ in
+                        guard let docs = snap?.documents, !docs.isEmpty else {
+                            isPantryEmpty = true
+                            return
+                        }
+                        
+                        // Check if all spaces are completely empty
+                        let hasNoIngredientsAnywhere = docs.allSatisfy { doc in
+                            let pantry = (doc.data()["virtualPantry"] as? [String: [String]]) ?? [:]
+                            return pantry.values.flatMap { $0 }.isEmpty
+                        }
+                        
+                        isPantryEmpty = hasNoIngredientsAnywhere
+                    }
                 }
             }
         }
+    }
+    
+    // MARK: - Helper Methods
+    
+    private func setupDynamicPrompts() {
+        let prompts = [
+            "Ready to whip up something tasty? 🍳",
+            "What's on the menu today? 🌮",
+            "Time to make some magic in the kitchen! ✨",
+            "Let's cook up a storm! 🌪️",
+            "Hungry for something new? 🤤",
+            "Grab your apron, it's cooking time! 👨‍🍳",
+            "Let’s turn your ingredients into something amazing ✨",
+            "Need a recipe idea? I’ve got you 👨‍🍳",
+            "What sounds good right now? 😋",
+            "Let’s make something delicious together 🌮",
+            "Your next favorite meal could start here 🍝"
+        ]
+        dailyPrompt = prompts.randomElement() ?? prompts[0]
     }
 }
 
