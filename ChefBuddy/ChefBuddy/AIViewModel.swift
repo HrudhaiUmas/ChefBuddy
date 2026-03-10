@@ -109,7 +109,8 @@ struct RecipeSuggestion: Identifiable, Codable, Equatable {
         self.sugar = container.decodeFlexibleString(forKey: .sugar, defaultValue: "0g")
         self.fiber = container.decodeFlexibleString(forKey: .fiber, defaultValue: "0g")
         self.sodium = container.decodeFlexibleString(forKey: .sodium, defaultValue: "0mg")
-        self.tags = container.decodeFlexibleStringArray(forKey: .tags)
+        let parsedTags = container.decodeFlexibleStringArray(forKey: .tags)
+        self.tags = parsedTags.isEmpty ? ["Fusion"] : parsedTags
         self.ingredients = container.decodeFlexibleStringArray(forKey: .ingredients)
         self.steps = container.decodeFlexibleStringArray(forKey: .steps)
         self.matchReason = container.decodeFlexibleString(forKey: .matchReason)
@@ -406,10 +407,13 @@ class CookingAssistant: ObservableObject {
         - Do not include markdown
         - Do not include backticks
         - Do not include explanations
-        - tags must be a JSON array of strings
+        - tags must be a JSON array of strings and must include at least one cuisine tag
         - ingredients must be a JSON array of strings
         - steps must be a JSON array of strings
         - never return dictionaries inside ingredients or steps
+        - ingredients must include concrete quantities and units
+        - steps must be detailed and precise, including prep steps (wash/chop/preheat where relevant)
+        - steps must include timing/doneness cues where relevant
         - emoji must be a single relevant food emoji
         - make all 3 recipe titles different from each other
         """
@@ -490,10 +494,13 @@ class CookingAssistant: ObservableObject {
         - Do not include markdown
         - Do not include backticks
         - Do not include explanations
-        - tags must be a JSON array of strings
+        - tags must be a JSON array of strings and must include at least one cuisine tag
         - ingredients must be a JSON array of strings
         - steps must be a JSON array of strings
         - never return dictionaries inside ingredients or steps
+        - ingredients must include concrete quantities and units
+        - steps must be detailed and precise, including prep steps (wash/chop/preheat where relevant)
+        - steps must include timing/doneness cues where relevant
         - emoji must be a single relevant food emoji
         - title must not match or be too similar to any excluded title
         """
@@ -569,10 +576,13 @@ class CookingAssistant: ObservableObject {
 
         Rules:
         - Do not include markdown or backticks
-        - tags must be an array of strings only
+        - tags must be an array of strings only and must include at least one cuisine tag
         - ingredients must be an array of strings only
         - steps must be an array of strings only
         - never return objects inside ingredients or steps
+        - ingredients must include concrete quantities and units
+        - steps must be detailed and precise, including prep steps (wash/chop/preheat where relevant)
+        - steps must include timing/doneness cues where relevant
         - make all 3 recipe titles different from each other
         """
 

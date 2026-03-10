@@ -44,7 +44,7 @@ struct ContentView: View {
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: authVM.currentUserProfile != nil)
         .sheet(isPresented: $showHallucinationWarning) {
             AIWarningSheet(onDismiss: { showHallucinationWarning = false })
-                .presentationDetents([.fraction(0.55)])
+                .presentationDetents([.fraction(0.80)])
                 .presentationDragIndicator(.hidden)
                 .interactiveDismissDisabled(true)
         }
@@ -55,74 +55,255 @@ struct ContentView: View {
 
 private struct AIWarningSheet: View {
     let onDismiss: () -> Void
+
     @State private var understood = false
+    @State private var animateGlow = false
+    @State private var showContent = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            // Header gradient bar
-            LinearGradient(
-                colors: [.orange, .green.opacity(0.85)],
-                startPoint: .leading, endPoint: .trailing
-            )
-            .frame(height: 5)
+        ZStack(alignment: .bottom) {
+            // Dimmed background
+            Color.black.opacity(0.35)
+                .ignoresSafeArea()
 
-            VStack(spacing: 24) {
-                // Icon + title
-                VStack(spacing: 12) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.orange.opacity(0.12))
-                            .frame(width: 72, height: 72)
-                        Text("⚠️")
-                            .font(.system(size: 36))
+            // Floating glow behind sheet
+            ZStack {
+                Circle()
+                    .fill(Color.orange.opacity(animateGlow ? 0.16 : 0.08))
+                    .frame(width: 220, height: 220)
+                    .blur(radius: 40)
+                    .offset(x: -90, y: 40)
+
+                Circle()
+                    .fill(Color.green.opacity(animateGlow ? 0.14 : 0.06))
+                    .frame(width: 180, height: 180)
+                    .blur(radius: 35)
+                    .offset(x: 110, y: 120)
+            }
+            .ignoresSafeArea()
+            .animation(.easeInOut(duration: 2.2).repeatForever(autoreverses: true), value: animateGlow)
+
+            VStack(spacing: 0) {
+                Capsule()
+                    .fill(Color.white.opacity(0.18))
+                    .frame(width: 44, height: 5)
+                    .padding(.top, 10)
+                    .padding(.bottom, 16)
+
+                VStack(spacing: 18) {
+                    // Header
+                    VStack(spacing: 10) {
+                        ZStack {
+                            Circle()
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color.orange.opacity(0.22),
+                                            Color.green.opacity(0.16)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: 62, height: 62)
+                                .shadow(color: .orange.opacity(0.18), radius: 12, y: 5)
+
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundStyle(.orange.opacity(0.8))
+                                .offset(x: 18, y: -18)
+
+                            Text("⚠️")
+                                .font(.system(size: 28))
+                        }
+
+                        VStack(spacing: 4) {
+                            Text("AI-Generated Content")
+                                .font(.system(size: 22, weight: .heavy, design: .rounded))
+                                .multilineTextAlignment(.center)
+
+                            Text("Double-check important details before cooking")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
                     }
 
-                    Text("AI-Generated Content")
-                        .font(.system(size: 22, weight: .heavy, design: .rounded))
+                    // Compact warning list
+                    VStack(spacing: 10) {
+                        CompactWarningRow(
+                            icon: "brain.head.profile",
+                            color: .orange,
+                            title: "Recipes may contain mistakes"
+                        )
 
-                    Text("Please read before cooking")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                }
+                        CompactWarningRow(
+                            icon: "allergens",
+                            color: .red,
+                            title: "Review allergens carefully"
+                        )
 
-                // Warning points
-                VStack(alignment: .leading, spacing: 2) {
-                    WarningRow(icon: "brain.head.profile", color: .orange,
-                               text: "Recipes are AI-generated and may contain errors.")
-                    WarningRow(icon: "allergens", color: .red,
-                               text: "Verify for allergens and dietary restrictions.")
-                    WarningRow(icon: "flame", color: .orange,
-                               text: "Cook times, temperatures and quantities may be inaccurate.")
-                    WarningRow(icon: "cross.case", color: .green,
-                               text: "Consult a professional if you have specific health needs.")
-                }
-                .padding(.horizontal, 4)
+                        CompactWarningRow(
+                            icon: "flame.fill",
+                            color: .orange,
+                            title: "Cook times and measurements may be off"
+                        )
 
-                // Confirm + dismiss
-                Button(action: onDismiss) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .font(.system(size: 18))
-                        Text("I Understand — Let's Cook!")
-                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                        CompactWarningRow(
+                            icon: "cross.case.fill",
+                            color: .green,
+                            title: "Use professional advice for health needs"
+                        )
                     }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 52)
-                    .background(
+
+                    // Acknowledgement row
+                    Button {
+                        withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                            understood.toggle()
+                        }
+                    } label: {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .fill(understood ? Color.green : Color.clear)
+                                    .frame(width: 24, height: 24)
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                            .stroke(
+                                                understood ? Color.green : Color.white.opacity(0.18),
+                                                lineWidth: 1.5
+                                            )
+                                    )
+
+                                if understood {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 11, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .transition(.scale.combined(with: .opacity))
+                                }
+                            }
+
+                            Text("I understand that I should verify important recipe details.")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.white.opacity(0.92))
+                                .multilineTextAlignment(.leading)
+
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(Color.white.opacity(0.06))
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+
+                    // CTA button
+                    Button(action: onDismiss) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.system(size: 17, weight: .bold))
+
+                            Text("I Understand")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 52)
+                        .background(
+                            LinearGradient(
+                                colors: understood
+                                    ? [.orange, .green.opacity(0.9)]
+                                    : [Color.white.opacity(0.12), Color.white.opacity(0.08)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .clipShape(Capsule())
+                        .shadow(
+                            color: understood ? .orange.opacity(0.22) : .clear,
+                            radius: 10,
+                            y: 5
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!understood)
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 22)
+            }
+            .frame(maxWidth: .infinity)
+            .background(
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(
                         LinearGradient(
-                            colors: [.orange, .green.opacity(0.85)],
-                            startPoint: .leading, endPoint: .trailing
+                            colors: [
+                                Color(red: 0.14, green: 0.14, blue: 0.16),
+                                Color(red: 0.10, green: 0.10, blue: 0.12)
+                            ],
+                            startPoint: .top,
+                            endPoint: .bottom
                         )
                     )
-                    .clipShape(Capsule())
-                    .shadow(color: .orange.opacity(0.3), radius: 8, y: 4)
-                }
-            }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 28)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 30, style: .continuous)
+                            .stroke(Color.white.opacity(0.06), lineWidth: 1)
+                    )
+            )
+            .padding(.horizontal, 14)
+            .padding(.bottom, 8)
+            .offset(y: showContent ? 0 : 40)
+            .opacity(showContent ? 1 : 0)
+            .animation(.spring(response: 0.42, dampingFraction: 0.86), value: showContent)
         }
-        .background(Color(.systemBackground))
+        .onAppear {
+            animateGlow = true
+            showContent = true
+        }
+    }
+}
+
+// MARK: - Compact Warning Row
+
+private struct CompactWarningRow: View {
+    let icon: String
+    let color: Color
+    let title: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(color.opacity(0.16))
+                    .frame(width: 42, height: 42)
+
+                Image(systemName: icon)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(color)
+            }
+
+            Text(title)
+                .font(.system(size: 15, weight: .semibold, design: .rounded))
+                .foregroundStyle(.white.opacity(0.95))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.04), lineWidth: 1)
+        )
     }
 }
 

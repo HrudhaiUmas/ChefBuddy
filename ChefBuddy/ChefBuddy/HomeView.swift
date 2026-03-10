@@ -32,12 +32,14 @@ struct HomeView: View {
 
     @State private var savedRecipes: [Recipe] = []
     @State private var dailyPrompt = "What are we cooking today? 🍳"
+    @State private var greetingText = ""
 
     @State private var isPantryEmpty = true
     @State private var availablePantries: [SimplePantrySpace] = []
     @State private var selectedPantryId: String? = nil
     @State private var isGeneratingFromPantry = false
     @State private var generatedPantryRecipes: [RecipeSuggestion]? = nil
+    @State private var pantrySuggestionsById: [String: [RecipeSuggestion]] = [:]
     @State private var selectedGeneratedPantryRecipe: Recipe? = nil
 
     var displayName: String {
@@ -49,7 +51,7 @@ struct HomeView: View {
         return "Chef"
     }
 
-    var timeBasedGreeting: String {
+    private func makeTimeBasedGreeting() -> String {
         let date = Date()
         let hour = Calendar.current.component(.hour, from: date)
         let minute = Calendar.current.component(.minute, from: date)
@@ -102,7 +104,7 @@ struct HomeView: View {
                     VStack(alignment: .leading, spacing: 28) {
 
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(timeBasedGreeting)
+                            Text(greetingText.isEmpty ? makeTimeBasedGreeting() : greetingText)
                                 .font(.system(size: 34, weight: .bold, design: .rounded))
 
                             Text(dailyPrompt)
@@ -274,14 +276,38 @@ struct HomeView: View {
             .sheet(item: $selectedGeneratedPantryRecipe) { recipe in
                 SuggestedRecipeDetailView(
                     recipe: recipe,
+                    assistant: assistant,
                     onSave: {
                         saveGeneratedPantryRecipe(recipe)
-
                         if let pantry = availablePantries.first(where: { $0.id == selectedPantryId }) {
-                            removeAndReplaceSavedPantryRecipe(recipe, pantry: pantry)
+                            removeAndReplaceDislikedPantryRecipe(recipe, pantry: pantry)
                         }
-
                         selectedGeneratedPantryRecipe = nil
+                    },
+                    onDislike: {
+                        if let pantry = availablePantries.first(where: { $0.id == selectedPantryId }) {
+                            removeAndReplaceDislikedPantryRecipe(recipe, pantry: pantry)
+                        }
+                        selectedGeneratedPantryRecipe = nil
+                    },
+                    onRecipeUpdated: { updated in
+                        guard let pantryId = selectedPantryId else { return }
+                        var suggestions = pantrySuggestionsById[pantryId] ?? generatedPantryRecipes ?? []
+
+                        let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        if let idx = suggestions.firstIndex(where: {
+                            $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
+                        }) {
+                            suggestions[idx] = pantrySuggestion(from: updated, previous: suggestions[idx])
+                            pantrySuggestionsById[pantryId] = suggestions
+                            generatedPantryRecipes = suggestions
+                            selectedGeneratedPantryRecipe = updated
+                        }
+                    },
+                    onLiveHelp: {
+                        selectedGeneratedPantryRecipe = nil
+                        selectedLiveRecipe = recipe
+                        showLiveCooking = true
                     }
                 )
             }
@@ -290,6 +316,9 @@ struct HomeView: View {
                     appearAnimation = true
                 }
 
+                if greetingText.isEmpty {
+                    greetingText = makeTimeBasedGreeting()
+                }
                 setupDynamicPrompts()
 
                 if let uid = authVM.userSession?.uid {
@@ -342,6 +371,10 @@ struct HomeView: View {
                             if selectedPantryId == nil, let first = self.availablePantries.first {
                                 selectedPantryId = first.id
                             }
+
+                            if let selectedPantryId {
+                                generatedPantryRecipes = pantrySuggestionsById[selectedPantryId]
+                            }
                         }
                 }
             }
@@ -360,9 +393,10 @@ struct HomeView: View {
                     Menu {
                         ForEach(availablePantries) { space in
                             Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 withAnimation(.spring()) {
                                     selectedPantryId = space.id
-                                    generatedPantryRecipes = nil
+                                    generatedPantryRecipes = pantrySuggestionsById[space.id]
                                 }
                             } label: {
                                 HStack {
@@ -430,7 +464,7 @@ struct HomeView: View {
                                             cookTime: recipe.prepTime,
                                             servings: recipe.servings,
                                             difficulty: recipe.difficulty,
-                                            tags: recipe.tags,
+                                            tags: recipe.tags.isEmpty ? [detectedCuisineTag(title: recipe.title, description: recipe.description, tags: recipe.tags)] : recipe.tags,
                                             calories: recipe.calories,
                                             nutrition: recipe.nutrition,
                                             createdAt: Date()
@@ -509,9 +543,13 @@ struct HomeView: View {
         }
     }
 
-    private func removeAndReplaceSavedPantryRecipe(_ recipe: Recipe, pantry: SimplePantrySpace) {
+    private func removeAndReplaceDislikedPantryRecipe(_ recipe: Recipe, pantry: SimplePantrySpace) {
+        let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         withAnimation(.spring()) {
-            generatedPantryRecipes?.removeAll(where: { $0.title == recipe.title })
+            generatedPantryRecipes?.removeAll {
+                $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
+            }
+            pantrySuggestionsById[pantry.id] = generatedPantryRecipes
         }
 
         Task {
@@ -562,6 +600,9 @@ struct HomeView: View {
                 - do not return dictionaries inside ingredients or steps
                 - do not include markdown
                 - do not include backticks
+                - include at least one cuisine tag in tags
+                - ingredients must include precise quantities and units
+                - steps must include detailed prep and timing/doneness cues
                 """
 
                 let response = try await model.generateContent(prompt)
@@ -579,16 +620,64 @@ struct HomeView: View {
 
                 guard let data = jsonString.data(using: .utf8) else { return }
                 let newRecipe = try JSONDecoder().decode(RecipeSuggestion.self, from: data)
+                let normalizedNewRecipe = RecipeSuggestion(
+                    title: newRecipe.title,
+                    emoji: newRecipe.emoji,
+                    description: newRecipe.description,
+                    prepTime: newRecipe.prepTime,
+                    servings: newRecipe.servings,
+                    difficulty: newRecipe.difficulty,
+                    calories: newRecipe.calories,
+                    carbs: newRecipe.carbs,
+                    protein: newRecipe.protein,
+                    fat: newRecipe.fat,
+                    saturatedFat: newRecipe.saturatedFat,
+                    sugar: newRecipe.sugar,
+                    fiber: newRecipe.fiber,
+                    sodium: newRecipe.sodium,
+                    tags: newRecipe.tags.isEmpty ? [detectedCuisineTag(title: newRecipe.title, description: newRecipe.description, tags: newRecipe.tags)] : newRecipe.tags,
+                    ingredients: newRecipe.ingredients,
+                    steps: newRecipe.steps,
+                    matchReason: newRecipe.matchReason
+                )
 
                 await MainActor.run {
                     withAnimation(.spring()) {
-                        self.generatedPantryRecipes?.append(newRecipe)
+                        self.generatedPantryRecipes?.append(normalizedNewRecipe)
+                        self.pantrySuggestionsById[pantry.id] = self.generatedPantryRecipes
                     }
                 }
             } catch {
                 print("Failed to fetch replacement recipe: \(error)")
             }
         }
+    }
+
+    private func pantrySuggestion(from recipe: Recipe, previous: RecipeSuggestion) -> RecipeSuggestion {
+        let normalizedTags = recipe.tags.isEmpty
+            ? [detectedCuisineTag(title: recipe.title, description: recipe.description, tags: recipe.tags)]
+            : recipe.tags
+
+        return RecipeSuggestion(
+            title: recipe.title,
+            emoji: recipe.emoji,
+            description: recipe.description,
+            prepTime: recipe.cookTime,
+            servings: recipe.servings,
+            difficulty: recipe.difficulty,
+            calories: recipe.calories,
+            carbs: recipe.nutrition.carbs,
+            protein: recipe.nutrition.protein,
+            fat: recipe.nutrition.fat,
+            saturatedFat: recipe.nutrition.saturatedFat,
+            sugar: recipe.nutrition.sugar,
+            fiber: recipe.nutrition.fiber,
+            sodium: recipe.nutrition.sodium,
+            tags: normalizedTags,
+            ingredients: recipe.ingredients,
+            steps: recipe.steps,
+            matchReason: previous.matchReason
+        )
     }
 
     private func generateFromSelectedPantry(ingredients: [String]) {
@@ -605,6 +694,9 @@ struct HomeView: View {
                 await MainActor.run {
                     withAnimation(.spring()) {
                         self.generatedPantryRecipes = generated
+                        if let pantryId = selectedPantryId {
+                            self.pantrySuggestionsById[pantryId] = generated
+                        }
                         self.isGeneratingFromPantry = false
                     }
                 }
@@ -795,7 +887,10 @@ struct PantryRecipeCard: View {
     }
 
     var body: some View {
-        Button(action: onTap) {
+        Button(action: {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onTap()
+        }) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack {
                     LinearGradient(
@@ -804,42 +899,29 @@ struct PantryRecipeCard: View {
                         endPoint: .bottomTrailing
                     )
                     .frame(height: 118)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
 
                     Text(recipe.emoji)
                         .font(.system(size: 52))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
+                VStack(alignment: .leading, spacing: 6) {
                     Text(recipe.title)
                         .font(.system(size: 15, weight: .bold, design: .rounded))
-                        .lineLimit(2)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
                         .foregroundStyle(.primary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 58, alignment: .topLeading)
 
                     HStack(spacing: 8) {
-                        RecipeMiniStatPill(
-                            icon: "clock",
-                            text: recipe.prepTime,
-                            foreground: .orange,
-                            background: Color.orange.opacity(0.12)
-                        )
-
-                        RecipeMiniStatPill(
-                            icon: "person.2",
-                            text: recipe.servings,
-                            foreground: .blue,
-                            background: Color.blue.opacity(0.12)
-                        )
-                    }
-
-                    HStack(spacing: 8) {
-                        RecipeMiniStatPill(
-                            icon: "flame",
-                            text: recipe.calories,
-                            foreground: .red,
-                            background: Color.red.opacity(0.12)
-                        )
+                        HStack(spacing: 5) {
+                            Image(systemName: "clock")
+                                .font(.system(size: 10, weight: .semibold))
+                            Text(recipe.prepTime)
+                                .font(.system(size: 11, weight: .medium))
+                        }
+                        .foregroundStyle(.secondary)
 
                         Text(recipe.difficulty)
                             .font(.system(size: 11, weight: .semibold))
@@ -853,28 +935,32 @@ struct PantryRecipeCard: View {
 
                         Spacer(minLength: 0)
                     }
+                    .lineLimit(1)
+                    .frame(height: 20)
 
-                    if !recipe.tags.isEmpty {
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 6) {
-                                ForEach(recipe.tags.prefix(3), id: \.self) { tag in
-                                    Text(tag)
-                                        .font(.system(size: 10, weight: .semibold))
-                                        .foregroundStyle(.green)
-                                        .lineLimit(1)
-                                        .padding(.horizontal, 8)
-                                        .padding(.vertical, 5)
-                                        .background(Color.green.opacity(0.12))
-                                        .clipShape(Capsule())
-                                        .fixedSize(horizontal: true, vertical: false)
-                                }
-                            }
-                        }
+                    Text(recipe.calories.isEmpty ? "— kcal per serving" : "\(recipe.calories) per serving")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                        .frame(height: 18, alignment: .leading)
+
+                    HStack {
+                        Text(detectedCuisineTag(title: recipe.title, description: recipe.description, tags: recipe.tags))
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 0)
                     }
+                    .frame(height: 22)
                 }
                 .padding(12)
             }
             .frame(width: 220)
+            .frame(height: 266)
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(
@@ -885,31 +971,6 @@ struct PantryRecipeCard: View {
             .contentShape(RoundedRectangle(cornerRadius: 20))
         }
         .buttonStyle(.plain)
-    }
-}
-
-struct RecipeMiniStatPill: View {
-    let icon: String
-    let text: String
-    let foreground: Color
-    let background: Color
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
-
-            Text(text)
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .fixedSize(horizontal: true, vertical: false)
-        }
-        .foregroundStyle(foreground)
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(background)
-        .clipShape(Capsule())
-        .fixedSize(horizontal: true, vertical: false)
     }
 }
 

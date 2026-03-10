@@ -447,6 +447,14 @@ private struct PreferencesFormContent: View {
                 AnimatedSection(isVisible: showSections[1]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "Body & Goals", icon: "figure.walk")
+
+                        ProfileSinglePreference(
+                            title: "Sex",
+                            options: sexList,
+                            selected: $formState.sex
+                        ) {
+                            activeSheet = .sex
+                        }
                         
                         VStack(spacing: 32) {
                             ProfileSlider(
@@ -474,14 +482,6 @@ private struct PreferencesFormContent: View {
                                 activeSheet = .physical
                             }
                             
-                            ProfileSinglePreference(
-                                title: "Sex",
-                                options: sexList,
-                                selected: $formState.sex
-                            ) {
-                                activeSheet = .sex
-                            }
-                            
                             // Calculated BMI Card
                             HStack {
                                 Text("Calculated BMI")
@@ -506,60 +506,6 @@ private struct PreferencesFormContent: View {
                                     .stroke(Color.primary.opacity(0.05), lineWidth: 1)
                             )
                             
-                            // Estimated calories card
-                            VStack(alignment: .leading, spacing: 12) {
-                                HStack(alignment: .center) {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        HStack(spacing: 6) {
-                                            Text("Recommended Daily Calories")
-                                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                                .foregroundStyle(.secondary)
-                                            
-                                            Button(action: {
-                                                activeSheet = .calories
-                                            }) {
-                                                Image(systemName: "info.circle.fill")
-                                                    .foregroundStyle(Color.primary.opacity(0.4))
-                                            }
-                                        }
-                                        
-                                        Text("\(estimatedCalories) cal/day")
-                                            .font(.system(size: 28, weight: .heavy, design: .rounded))
-                                            .foregroundStyle(.orange)
-                                    }
-                                    
-                                    Spacer()
-                                    
-                                    Image(systemName: "flame.fill")
-                                        .font(.system(size: 28))
-                                        .foregroundStyle(.orange)
-                                        .padding(14)
-                                        .background(Color.orange.opacity(0.12))
-                                        .clipShape(Circle())
-                                }
-                                
-                                Text("This is a general recommendation based on your sex, age, height, weight, target goal, and activity level.")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(.primary)
-                                
-                                HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: "exclamationmark.triangle.fill")
-                                        .foregroundStyle(.yellow)
-                                        .padding(.top, 2)
-                                    
-                                    Text("App recommendation only — please check with a registered dietitian or healthcare professional for personalized nutrition advice.")
-                                        .font(.system(size: 13))
-                                        .foregroundStyle(.secondary)
-                                        .lineSpacing(3)
-                                }
-                            }
-                            .padding()
-                            .background(.ultraThinMaterial)
-                            .clipShape(RoundedRectangle(cornerRadius: 16))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16)
-                                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-                            )
                         }
                         .padding(.horizontal, 24)
                         
@@ -578,6 +524,62 @@ private struct PreferencesFormContent: View {
                         ) {
                             activeSheet = .activity
                         }
+
+                        // Estimated calories card
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack(alignment: .center) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack(spacing: 6) {
+                                        Text("Recommended Daily Calories")
+                                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                                            .foregroundStyle(.secondary)
+
+                                        Button(action: {
+                                            activeSheet = .calories
+                                        }) {
+                                            Image(systemName: "info.circle.fill")
+                                                .foregroundStyle(Color.primary.opacity(0.4))
+                                        }
+                                    }
+
+                                    Text("\(estimatedCalories) cal/day")
+                                        .font(.system(size: 28, weight: .heavy, design: .rounded))
+                                        .foregroundStyle(.orange)
+                                }
+
+                                Spacer()
+
+                                Image(systemName: "flame.fill")
+                                    .font(.system(size: 28))
+                                    .foregroundStyle(.orange)
+                                    .padding(14)
+                                    .background(Color.orange.opacity(0.12))
+                                    .clipShape(Circle())
+                            }
+
+                            Text("This is a general recommendation based on your sex, age, height, weight, target goal, and activity level.")
+                                .font(.system(size: 14, weight: .medium))
+                                .foregroundStyle(.primary)
+
+                            HStack(alignment: .top, spacing: 10) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                    .foregroundStyle(.yellow)
+                                    .padding(.top, 2)
+
+                                Text("App recommendation only — please check with a registered dietitian or healthcare professional for personalized nutrition advice.")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                                    .lineSpacing(3)
+                            }
+                        }
+                        .padding()
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 16))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                        )
+                        .padding(.horizontal, 24)
                     }
                 }
                 
@@ -1206,11 +1208,17 @@ private struct SheetRouter: View {
             .presentationDetents([.fraction(0.32)])
             
         case .calories:
-            ProfileSimpleInfoSheet(
+            ProfileDetailedInfoSheet(
                 title: "How Calories Are Calculated",
-                message: "ChefBuddy first converts your weight from pounds to kilograms and your height from inches to centimeters. Then it estimates your BMR using the Mifflin-St Jeor equation: for Male, BMR = (10 × kg) + (6.25 × cm) − (5 × age) + 5. For Female, BMR = (10 × kg) + (6.25 × cm) − (5 × age) − 161. Then we multiply that BMR by your activity level: Sedentary = 1.2, Lightly Active = 1.375, Active = 1.55, Athlete = 1.725. Finally, we adjust for your goal: Weight Loss subtracts 400 calories, Maintain keeps it the same, and Muscle Gain adds 250 calories. This is only a general app estimate, not medical advice."
+                subtitle: "A quick overview of the recommendation logic.",
+                items: [
+                    ("1️⃣", "Base Metabolism (BMR)", "We estimate your baseline burn using age, height, weight, and sex with the Mifflin-St Jeor equation."),
+                    ("2️⃣", "Activity Multiplier", "We multiply BMR by your activity level: Sedentary 1.2, Lightly Active 1.375, Active 1.55, Athlete 1.725."),
+                    ("3️⃣", "Goal Adjustment", "Weight Loss: -400 kcal, Maintain: no change, Muscle Gain: +250 kcal."),
+                    ("⚠️", "Important", "This is a general app estimate and not a medical diagnosis or personalized clinical advice.")
+                ]
             )
-            .presentationDetents([.fraction(0.62)])
+            .presentationDetents([.fraction(0.72)])
             
         case .goal:
             ProfileDetailedInfoSheet(title: "Target Goal", subtitle: "Adjusts meal portions accordingly.", items: [

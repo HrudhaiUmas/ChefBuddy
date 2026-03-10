@@ -82,6 +82,41 @@ struct Recipe: Identifiable, Codable, Equatable {
     var hasBeenCooked: Bool { cookedCount > 0 }
 }
 
+func detectedCuisineTag(title: String, description: String, tags: [String]) -> String {
+    let knownCuisines = [
+        "Italian", "Mexican", "Indian", "Chinese", "Japanese", "Thai",
+        "Mediterranean", "Korean", "Vietnamese", "Greek", "American",
+        "French", "Spanish", "Middle Eastern"
+    ]
+
+    for cuisine in knownCuisines {
+        if tags.contains(where: { $0.localizedCaseInsensitiveContains(cuisine) }) {
+            return cuisine
+        }
+    }
+
+    let text = "\(title) \(description)".lowercased()
+    let keywordMap: [(String, [String])] = [
+        ("Italian", ["pasta", "risotto", "marinara", "alfredo"]),
+        ("Mexican", ["taco", "burrito", "enchilada", "salsa"]),
+        ("Indian", ["curry", "masala", "paneer", "dal", "tikka"]),
+        ("Chinese", ["stir-fry", "fried rice", "noodle", "wok"]),
+        ("Japanese", ["teriyaki", "ramen", "miso", "sushi"]),
+        ("Thai", ["pad thai", "thai", "lemongrass"]),
+        ("Mediterranean", ["mediterranean", "hummus", "tzatziki"]),
+        ("Korean", ["kimchi", "gochujang", "bulgogi"]),
+        ("Vietnamese", ["pho", "banh mi"]),
+        ("Greek", ["gyro", "feta", "greek"]),
+        ("Middle Eastern", ["falafel", "shawarma", "tahini"])
+    ]
+
+    for (cuisine, keywords) in keywordMap where keywords.contains(where: { text.contains($0) }) {
+        return cuisine
+    }
+
+    return "Fusion"
+}
+
 // MARK: - ViewModel
 
 class RecipesViewModel: ObservableObject {
@@ -337,6 +372,14 @@ class RecipesViewModel: ObservableObject {
                 Instructions:
                 1. [step one]
                 2. [step two]
+
+                Rules for quality:
+                - ingredients must include concrete amounts/units (e.g., "1 tbsp olive oil", "200g tofu")
+                - instructions must be detailed, precise, and beginner-friendly
+                - include prep details where relevant (washing, peeling, dicing, preheating, marinating)
+                - include doneness cues and timing checkpoints (e.g., "cook until translucent, 3-4 mins")
+                - never skip important food safety or preparation steps
+                - include at least one cuisine tag in Tags
                 """
 
                 let raw = try await assistant.getHelp(question: fullPrompt)
@@ -463,6 +506,8 @@ class RecipesViewModel: ObservableObject {
             sodium: sodium
         )
 
+        let normalizedTags = tags.isEmpty ? [detectedCuisineTag(title: title, description: description, tags: tags)] : tags
+
         return Recipe(
             title: title,
             emoji: emoji,
@@ -472,7 +517,7 @@ class RecipesViewModel: ObservableObject {
             cookTime: cookTime,
             servings: servings,
             difficulty: difficulty,
-            tags: tags,
+            tags: normalizedTags,
             calories: calories,
             nutrition: nutrition
         )
@@ -499,6 +544,7 @@ struct RecipesView: View {
     @State private var recipeToReview: Recipe? = nil
     @State private var isLoadingInitialSuggestions = false
     @State private var isLoadingMoreSuggestion = false
+    @State private var liveHelpRecipe: Recipe? = nil
 
     private var userId: String { authVM.userSession?.uid ?? "" }
 
@@ -507,7 +553,11 @@ struct RecipesView: View {
     }
 
     private func recipeFromSuggestion(_ suggestion: RecipeSuggestion) -> Recipe {
-        Recipe(
+        let normalizedTags = suggestion.tags.isEmpty
+            ? [detectedCuisineTag(title: suggestion.title, description: suggestion.description, tags: suggestion.tags)]
+            : suggestion.tags
+
+        return Recipe(
             title: suggestion.title,
             emoji: suggestion.emoji,
             description: suggestion.description,
@@ -516,20 +566,37 @@ struct RecipesView: View {
             cookTime: suggestion.prepTime,
             servings: suggestion.servings,
             difficulty: suggestion.difficulty,
-            tags: suggestion.tags,
+            tags: normalizedTags,
             calories: suggestion.calories,
             nutrition: suggestion.nutrition
         )
     }
 
+    private func suggestionFromRecipe(_ recipe: Recipe, previous: RecipeSuggestion) -> RecipeSuggestion {
+        RecipeSuggestion(
+            title: recipe.title,
+            emoji: recipe.emoji,
+            description: recipe.description,
+            prepTime: recipe.cookTime,
+            servings: recipe.servings,
+            difficulty: recipe.difficulty,
+            calories: recipe.calories,
+            carbs: recipe.nutrition.carbs,
+            protein: recipe.nutrition.protein,
+            fat: recipe.nutrition.fat,
+            saturatedFat: recipe.nutrition.saturatedFat,
+            sugar: recipe.nutrition.sugar,
+            fiber: recipe.nutrition.fiber,
+            sodium: recipe.nutrition.sodium,
+            tags: recipe.tags,
+            ingredients: recipe.ingredients,
+            steps: recipe.steps,
+            matchReason: previous.matchReason
+        )
+    }
+
     private var unsavedSuggestions: [RecipeSuggestion] {
-        assistant.suggestions.filter { suggestion in
-            !vm.recipes.contains(where: {
-                $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                ==
-                suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            })
-        }
+        assistant.suggestions
     }
 
     private func loadInitialSuggestions() async {
@@ -620,6 +687,18 @@ struct RecipesView: View {
         }
     }
 
+    private func dislikeSuggestion(_ recipe: Recipe) {
+        let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        assistant.suggestions.removeAll {
+            $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
+        }
+        selectedSuggestionRecipe = nil
+
+        Task {
+            await loadOneMoreSuggestion()
+        }
+    }
+
     var body: some View {
         ZStack {
             Color(.systemBackground).ignoresSafeArea()
@@ -648,22 +727,6 @@ struct RecipesView: View {
                     }
 
                     Spacer()
-
-                    Button(action: { showGenerateSheet = true }) {
-                        Image(systemName: "sparkles")
-                            .font(.system(size: 16, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 44, height: 44)
-                            .background(
-                                LinearGradient(
-                                    colors: [.orange, .green.opacity(0.85)],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .clipShape(Circle())
-                            .shadow(color: .orange.opacity(0.35), radius: 8, y: 4)
-                    }
                 }
                 .padding(.horizontal, 24)
                 .padding(.top, 20)
@@ -736,7 +799,8 @@ struct RecipesView: View {
                                                 RecipeCard(
                                                     recipe: suggestionRecipe,
                                                     onTap: { selectedSuggestionRecipe = suggestionRecipe },
-                                                    onFavorite: { }
+                                                    onFavorite: { },
+                                                    showFavorite: false
                                                 )
                                                 .frame(width: 180)
                                             }
@@ -748,6 +812,15 @@ struct RecipesView: View {
                                     }
                                 }
                                 .padding(.top, 10)
+                            }
+
+                            if vm.selectedFilter == "All" {
+                                GenerateRecipeSpotlightCard(
+                                    onTap: { showGenerateSheet = true },
+                                    isGenerating: vm.isGenerating,
+                                    step: vm.elapsedSeconds
+                                )
+                                    .padding(.horizontal, 16)
                             }
 
                             if vm.filteredRecipes.isEmpty && vm.selectedFilter == "All" {
@@ -766,6 +839,7 @@ struct RecipesView: View {
 
                                         if vm.filteredRecipes.count > 4 {
                                             Button(action: {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                                 showAllRecipesScreen = true
                                             }) {
                                                 Text("See More")
@@ -777,54 +851,20 @@ struct RecipesView: View {
                                     }
                                     .padding(.horizontal, 20)
 
-                                    let freshRecipes = vm.previewRecipes.filter { !$0.hasBeenCooked }
-                                    let cookedRecipes = vm.previewRecipes.filter { $0.hasBeenCooked }
-
-                                    if !freshRecipes.isEmpty {
-                                        LazyVGrid(
-                                            columns: [GridItem(.flexible()), GridItem(.flexible())],
-                                            spacing: 14
-                                        ) {
-                                            ForEach(freshRecipes) { recipe in
-                                                RecipeCard(
-                                                    recipe: recipe,
-                                                    onTap: { selectedRecipe = recipe },
-                                                    onFavorite: { toggleFavoriteEverywhere(recipe) },
-                                                    onReview: { recipeToReview = recipe }
-                                                )
-                                            }
-                                        }
-                                        .padding(.horizontal, 16)
-                                    }
-
-                                    if !cookedRecipes.isEmpty {
-                                        VStack(alignment: .leading, spacing: 12) {
-                                            HStack(spacing: 6) {
-                                                Text("✅")
-                                                Text("Previously Cooked")
-                                                    .font(.system(size: 17, weight: .bold, design: .rounded))
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                            .padding(.horizontal, 20)
-                                            .padding(.top, 8)
-
-                                            LazyVGrid(
-                                                columns: [GridItem(.flexible()), GridItem(.flexible())],
-                                                spacing: 14
-                                            ) {
-                                                ForEach(cookedRecipes) { recipe in
-                                                    RecipeCard(
-                                                        recipe: recipe,
-                                                        onTap: { selectedRecipe = recipe },
-                                                        onFavorite: { toggleFavoriteEverywhere(recipe) },
-                                                        onReview: { recipeToReview = recipe },
-                                                        isCooked: true
-                                                    )
-                                                }
-                                            }
-                                            .padding(.horizontal, 16)
+                                    LazyVGrid(
+                                        columns: [GridItem(.flexible()), GridItem(.flexible())],
+                                        spacing: 14
+                                    ) {
+                                        ForEach(vm.previewRecipes) { recipe in
+                                            RecipeCard(
+                                                recipe: recipe,
+                                                onTap: { selectedRecipe = recipe },
+                                                onFavorite: { toggleFavoriteEverywhere(recipe) },
+                                                isCooked: recipe.hasBeenCooked
+                                            )
                                         }
                                     }
+                                    .padding(.horizontal, 16)
                                 }
                             }
                         }
@@ -865,51 +905,6 @@ struct RecipesView: View {
                 .animation(.spring(response: 0.4), value: vm.errorMessage)
             }
 
-            if vm.isGenerating {
-                VStack {
-                    Spacer()
-                    
-                    HStack(alignment: .center, spacing: 14) {
-                        ZStack {
-                            Circle().fill(Color.white.opacity(0.2)).frame(width: 48, height: 48)
-                            Text("🍳")
-                                .font(.system(size: 24))
-                                .scaleEffect(vm.elapsedSeconds % 2 == 0 ? 1.0 : 1.08)
-                                .animation(.spring(response: 0.35, dampingFraction: 0.65), value: vm.elapsedSeconds)
-                        }
-                        
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(vm.recipes.count < 3 ? "Building your starter recipes..." : "ChefBuddy is cooking...")
-                                .font(.system(size: 15, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                            
-                            HStack(spacing: 5) {
-                                Text(vm.recipes.count < 3 ? "Recipe \(vm.recipes.count + 1) of 3" : "Generating")
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.white.opacity(0.8))
-                                
-                                RecipeBouncingDotsView(step: vm.elapsedSeconds, color: .white)
-                            }
-                        }
-                        
-                        Spacer()
-                        
-                        Text(timeString(vm.elapsedSeconds))
-                            .font(.system(size: 14, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.white.opacity(0.9))
-                    }
-                    .padding(16)
-                    .background(
-                        LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    .shadow(color: .orange.opacity(0.4), radius: 12, y: 6)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 32)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-                .animation(.spring(response: 0.4), value: vm.isGenerating)
-            }
         }
         .onAppear {
             vm.startListening(userId: userId)
@@ -956,24 +951,56 @@ struct RecipesView: View {
         .sheet(item: $selectedRecipe) { recipe in
             RecipeDetailView(
                 recipe: recipe,
+                assistant: assistant,
                 onFavorite: {
                     toggleFavoriteEverywhere(recipe)
                 },
                 onDelete: {
                     vm.deleteRecipe(recipe, userId: userId)
                     selectedRecipe = nil
+                },
+                onRecipeUpdated: { updated in
+                    vm.updateRecipeAfterReview(updated, userId: userId)
+                    selectedRecipe = updated
+                },
+                onMarkCooked: {
+                    selectedRecipe = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        recipeToReview = recipe
+                    }
+                },
+                onLiveHelp: {
+                    selectedRecipe = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        liveHelpRecipe = recipe
+                    }
                 }
             )
         }
         .sheet(item: $selectedSuggestionRecipe) { recipe in
             SuggestedRecipeDetailView(
-                recipe: recipe,
-                onSave: {
-                    vm.saveSuggestedRecipe(recipe, userId: userId)
+                    recipe: recipe,
+                    assistant: assistant,
+                    onSave: {
+                        vm.saveSuggestedRecipe(recipe, userId: userId)
+                        dislikeSuggestion(recipe)
+                    },
+                onDislike: {
+                    dislikeSuggestion(recipe)
+                },
+                onRecipeUpdated: { updated in
+                    let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if let idx = assistant.suggestions.firstIndex(where: {
+                        $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
+                    }) {
+                        assistant.suggestions[idx] = suggestionFromRecipe(updated, previous: assistant.suggestions[idx])
+                        selectedSuggestionRecipe = updated
+                    }
+                },
+                onLiveHelp: {
                     selectedSuggestionRecipe = nil
-                    Task {
-                        try? await Task.sleep(nanoseconds: 500_000_000)
-                        await loadOneMoreSuggestion()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        liveHelpRecipe = recipe
                     }
                 }
             )
@@ -1008,6 +1035,9 @@ struct RecipesView: View {
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
         }
+        .fullScreenCover(item: $liveHelpRecipe) { recipe in
+            LiveCookingView(recipe: recipe, assistant: assistant, userId: userId)
+        }
     }
 }
 
@@ -1036,8 +1066,8 @@ private struct RecipeCard: View {
     let recipe: Recipe
     let onTap: () -> Void
     let onFavorite: () -> Void
-    var onReview: (() -> Void)? = nil
     var isCooked: Bool = false
+    var showFavorite: Bool = true
 
     var difficultyColor: Color {
         switch recipe.difficulty.lowercased() {
@@ -1050,8 +1080,39 @@ private struct RecipeCard: View {
         }
     }
 
+    private var cookedHistoryText: String? {
+        guard recipe.hasBeenCooked else { return nil }
+        let dateText = recipe.lastCookedAt.map { Self.lastCookedFormatter.string(from: $0) } ?? "unknown"
+        return "Cooked \(recipe.cookedCount)x • Last: \(dateText)"
+    }
+
+    private var addedHistoryText: String {
+        "Added \(Self.createdAtFormatter.string(from: recipe.createdAt))"
+    }
+
+    private var cuisineTag: String {
+        detectedCuisineTag(title: recipe.title, description: recipe.description, tags: recipe.tags)
+    }
+
+    private static let lastCookedFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
+    private static let createdAtFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
+
     var body: some View {
-        Button(action: onTap) {
+        Button(action: {
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            onTap()
+        }) {
             VStack(alignment: .leading, spacing: 0) {
                 ZStack(alignment: .topTrailing) {
                     LinearGradient(
@@ -1059,47 +1120,68 @@ private struct RecipeCard: View {
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
-                    .frame(height: 110)
+                    .frame(height: 100)
                     .clipShape(RoundedRectangle(cornerRadius: 16))
 
                     Text(recipe.emoji)
                         .font(.system(size: 52))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .offset(y: -2)
 
-                    Button(action: {
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                        onFavorite()
-                    }) {
-                        Image(systemName: recipe.isFavorite ? "heart.fill" : "heart")
-                            .font(.system(size: 13, weight: .semibold))
-                            .foregroundStyle(recipe.isFavorite ? .red : .secondary)
-                            .padding(7)
-                            .background(.ultraThinMaterial)
-                            .clipShape(Circle())
+                    if showFavorite {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            onFavorite()
+                        }) {
+                            Image(systemName: recipe.isFavorite ? "heart.fill" : "heart")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(recipe.isFavorite ? .red : .secondary)
+                                .padding(7)
+                                .background(.ultraThinMaterial)
+                                .clipShape(Circle())
+                        }
+                        .buttonStyle(.plain)
+                        .padding(8)
                     }
-                    .buttonStyle(.plain)
-                    .padding(8)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    // Cooked badge (inline, top of info area)
-                    if isCooked {
-                        HStack(spacing: 4) {
-                            Image(systemName: "checkmark.circle.fill")
-                                .font(.system(size: 9, weight: .bold))
-                            Text("Previously Cooked")
-                                .font(.system(size: 10, weight: .bold, design: .rounded))
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        if isCooked {
+                            HStack(spacing: 4) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 9, weight: .bold))
+                                Text("Previously Cooked")
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.green.opacity(0.85))
+                            .clipShape(Capsule())
+                        } else {
+                            HStack(spacing: 4) {
+                                Image(systemName: "circle")
+                                    .font(.system(size: 9, weight: .bold))
+                                Text("Not Cooked")
+                                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white.opacity(0.86))
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(Color.white.opacity(0.10))
+                            .clipShape(Capsule())
                         }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 3)
-                        .background(Color.green.opacity(0.85))
-                        .clipShape(Capsule())
+                        Spacer(minLength: 0)
                     }
+                    .frame(height: 16)
 
                     Text(recipe.title)
                         .font(.system(size: 14, weight: .bold, design: .rounded))
-                        .lineLimit(2)
+                        .lineLimit(3)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .frame(height: 54, alignment: .topLeading)
                         .foregroundStyle(.primary)
 
                     HStack(spacing: 4) {
@@ -1117,58 +1199,47 @@ private struct RecipeCard: View {
                             .clipShape(Capsule())
                     }
                     .foregroundStyle(.secondary)
+                    .frame(height: 20)
 
-                    if !recipe.calories.isEmpty {
-                        Text(recipe.calories)
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(.orange)
-                    }
+                    Text(recipe.calories.isEmpty ? "— kcal per serving" : "\(recipe.calories) per serving")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                        .lineLimit(1)
+                        .frame(height: 18, alignment: .leading)
 
-                    // Review button — always visible, full width, below all info
-                    if let onReview = onReview {
-                        Button(action: {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            onReview()
-                        }) {
-                            HStack(spacing: 5) {
-                                Image(systemName: "star.fill")
-                                    .font(.system(size: 10))
-                                Text("Leave a Review")
-                                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                            }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(
-                                LinearGradient(
-                                    colors: [.orange, .green.opacity(0.85)],
-                                    startPoint: .leading, endPoint: .trailing
-                                )
-                            )
-                            .clipShape(RoundedRectangle(cornerRadius: 10))
-                        }
-                        .buttonStyle(.plain)
-                        .padding(.top, 2)
+                    HStack {
+                        Text(cuisineTag)
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.blue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Color.blue.opacity(0.12))
+                            .clipShape(Capsule())
+                            .fixedSize(horizontal: true, vertical: false)
+
+                        Spacer(minLength: 0)
                     }
+                    .frame(height: 22)
+
+                    Text(cookedHistoryText ?? addedHistoryText)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .frame(height: 12, alignment: .topLeading)
                 }
                 .padding(12)
             }
+            .frame(height: 288)
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 20))
             .overlay(
                 RoundedRectangle(cornerRadius: 20)
-                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                    .stroke(isCooked ? Color.green.opacity(0.28) : Color.primary.opacity(0.05), lineWidth: 1)
             )
             .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
             .contentShape(RoundedRectangle(cornerRadius: 20))
         }
         .buttonStyle(RecipeCardButtonStyle())
-        .opacity(isCooked ? 0.82 : 1.0)
-        .saturation(isCooked ? 0.72 : 1.0)
-        .overlay(
-            RoundedRectangle(cornerRadius: 20)
-                .fill(Color.green.opacity(isCooked ? 0.10 : 0))
-        )
     }
 }
 
@@ -1177,6 +1248,103 @@ private struct RecipeCardButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .animation(.spring(response: 0.22, dampingFraction: 0.75), value: configuration.isPressed)
+    }
+}
+
+private struct GenerateRecipeSpotlightCard: View {
+    let onTap: () -> Void
+    var isGenerating: Bool = false
+    var step: Int = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [.orange.opacity(0.95), .green.opacity(0.9)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 34, height: 34)
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Generate Any Recipe")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                    Text("Describe any dish, cuisine, or craving and ChefBuddy will build it.")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            if isGenerating {
+                HStack(spacing: 10) {
+                    ProgressView()
+                        .tint(.white)
+                        .controlSize(.small)
+
+                    Text("ChefBuddy is cooking")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+
+                    RecipeBouncingDotsView(step: step, color: .white)
+
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 44)
+                .padding(.horizontal, 14)
+                .background(
+                    LinearGradient(
+                        colors: [.orange, .green.opacity(0.85)],
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    )
+                )
+                .clipShape(Capsule())
+            } else {
+                Button(action: {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    onTap()
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 14, weight: .bold))
+                        Text("Create Recipe")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 44)
+                    .background(
+                        LinearGradient(
+                            colors: [.orange, .green.opacity(0.85)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(14)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 20))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
     }
 }
 
@@ -1323,48 +1491,205 @@ struct AllRecipesView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRecipe: Recipe? = nil
     @State private var recipeToReview: Recipe? = nil
+    @State private var liveHelpRecipe: Recipe? = nil
+    @State private var searchText = ""
+    @State private var selectedCuisine = "All Cuisines"
+    @State private var selectedFocusFilter = "All"
+    private let focusFilters = ["All", "Favorites", "Cooked"]
 
     private var titleText: String {
         vm.selectedFilter == "All" ? "All Recipes" : vm.selectedFilter
     }
 
+    private var availableCuisines: [String] {
+        let values = vm.filteredRecipes.map {
+            detectedCuisineTag(title: $0.title, description: $0.description, tags: $0.tags)
+        }
+        return ["All Cuisines"] + Array(Set(values)).sorted()
+    }
+
+    private var displayedRecipes: [Recipe] {
+        vm.filteredRecipes.filter { recipe in
+            let matchesSearch: Bool = {
+                let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if q.isEmpty { return true }
+                let text = "\(recipe.title) \(recipe.description) \(recipe.tags.joined(separator: " "))".lowercased()
+                return text.contains(q.lowercased())
+            }()
+
+            let matchesCuisine: Bool = {
+                guard selectedCuisine != "All Cuisines" else { return true }
+                return detectedCuisineTag(title: recipe.title, description: recipe.description, tags: recipe.tags) == selectedCuisine
+            }()
+
+            let matchesFocus: Bool = {
+                switch selectedFocusFilter {
+                case "Favorites":
+                    return recipe.isFavorite
+                case "Cooked":
+                    return recipe.hasBeenCooked
+                default:
+                    return true
+                }
+            }()
+
+            return matchesSearch && matchesCuisine && matchesFocus
+        }
+    }
+
+    private var hasActiveFilters: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
+        selectedCuisine != "All Cuisines" ||
+        selectedFocusFilter != "All"
+    }
+
     var body: some View {
         NavigationStack {
-            Group {
-                if vm.filteredRecipes.isEmpty {
-                    VStack(spacing: 16) {
-                        Text("🍽️")
-                            .font(.system(size: 72))
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.secondary)
 
-                        Text("No recipes here yet")
-                            .font(.system(size: 20, weight: .bold, design: .rounded))
+                            TextField("Search recipes, tags, cuisines...", text: $searchText)
+                                .font(.system(size: 15, design: .rounded))
 
-                        Text("Try another filter or generate a new recipe.")
-                            .font(.system(size: 14))
-                            .foregroundStyle(.secondary)
+                            if !searchText.isEmpty {
+                                Button(action: { searchText = "" }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 11)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 14)
+                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                        )
+
+                        HStack {
+                            Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            Spacer()
+
+                            Text("\(displayedRecipes.count)")
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            if hasActiveFilters {
+                                Button("Reset") {
+                                    searchText = ""
+                                    selectedCuisine = "All Cuisines"
+                                    selectedFocusFilter = "All"
+                                }
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(.orange)
+                                .buttonStyle(.plain)
+                            }
+                        }
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(focusFilters, id: \.self) { filter in
+                                    Button(action: {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        selectedFocusFilter = filter
+                                    }) {
+                                        Text(filter)
+                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(selectedFocusFilter == filter ? .white : .primary)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .background(
+                                                selectedFocusFilter == filter
+                                                ? AnyView(
+                                                    LinearGradient(
+                                                        colors: [.orange, .green.opacity(0.85)],
+                                                        startPoint: .leading,
+                                                        endPoint: .trailing
+                                                    )
+                                                )
+                                                : AnyView(Color(.systemGray6))
+                                            )
+                                            .clipShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 1)
+                        }
+
+                        ScrollView(.horizontal, showsIndicators: false) {
+                            HStack(spacing: 8) {
+                                ForEach(availableCuisines, id: \.self) { cuisine in
+                                    Button(action: {
+                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                        selectedCuisine = cuisine
+                                    }) {
+                                        Text(cuisine)
+                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                            .foregroundStyle(selectedCuisine == cuisine ? .white : .primary)
+                                            .lineLimit(1)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 8)
+                                            .background(
+                                                selectedCuisine == cuisine
+                                                ? AnyView(
+                                                    LinearGradient(
+                                                        colors: [.blue.opacity(0.85), .cyan.opacity(0.85)],
+                                                        startPoint: .leading,
+                                                        endPoint: .trailing
+                                                    )
+                                                )
+                                                : AnyView(Color(.systemGray6))
+                                            )
+                                            .clipShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                            .padding(.horizontal, 1)
+                        }
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .padding()
-                } else {
-                    ScrollView(showsIndicators: false) {
+                    .padding(.horizontal, 16)
+
+                    if displayedRecipes.isEmpty {
+                        VStack(spacing: 10) {
+                            Text("No recipes match your filters")
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                            Text("Try clearing filters or searching with broader keywords.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 28)
+                    } else {
                         LazyVGrid(
                             columns: [GridItem(.flexible()), GridItem(.flexible())],
                             spacing: 14
                         ) {
-                            ForEach(vm.filteredRecipes) { recipe in
+                            ForEach(displayedRecipes) { recipe in
                                 RecipeCard(
                                     recipe: recipe,
                                     onTap: { selectedRecipe = recipe },
                                     onFavorite: { vm.toggleFavorite(recipe, userId: userId) },
-                                    onReview: { recipeToReview = recipe },
                                     isCooked: recipe.hasBeenCooked
                                 )
                             }
                         }
-                        .padding(16)
-                        .padding(.bottom, 30)
+                        .padding(.horizontal, 16)
                     }
                 }
+                .padding(.top, 8)
+                .padding(.bottom, 30)
             }
             .navigationTitle(titleText)
             .navigationBarTitleDisplayMode(.inline)
@@ -1378,10 +1703,27 @@ struct AllRecipesView: View {
             .sheet(item: $selectedRecipe) { recipe in
                 RecipeDetailView(
                     recipe: recipe,
+                    assistant: assistant,
                     onFavorite: { vm.toggleFavorite(recipe, userId: userId) },
                     onDelete: {
                         vm.deleteRecipe(recipe, userId: userId)
                         selectedRecipe = nil
+                    },
+                    onRecipeUpdated: { updated in
+                        vm.updateRecipeAfterReview(updated, userId: userId)
+                        selectedRecipe = updated
+                    },
+                    onMarkCooked: {
+                        selectedRecipe = nil
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            recipeToReview = recipe
+                        }
+                    },
+                    onLiveHelp: {
+                        selectedRecipe = nil
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                            liveHelpRecipe = recipe
+                        }
                     }
                 )
             }
@@ -1403,6 +1745,9 @@ struct AllRecipesView: View {
                 )
                 .presentationDetents([.large])
                 .presentationDragIndicator(.visible)
+            }
+            .fullScreenCover(item: $liveHelpRecipe) { recipe in
+                LiveCookingView(recipe: recipe, assistant: assistant, userId: userId)
             }
         }
     }
@@ -1538,11 +1883,16 @@ struct GenerateRecipeSheet: View {
 
 struct RecipeDetailView: View {
     let recipe: Recipe
+    @ObservedObject var assistant: CookingAssistant
     let onFavorite: () -> Void
     let onDelete: () -> Void
+    var onRecipeUpdated: ((Recipe) -> Void)? = nil
+    var onMarkCooked: (() -> Void)? = nil
+    var onLiveHelp: (() -> Void)? = nil
 
     @State private var activeTab = 0
     @State private var showDeleteConfirm = false
+    @State private var showAssistantSheet = false
     @Environment(\.dismiss) var dismiss
 
     var difficultyColor: Color {
@@ -1555,6 +1905,19 @@ struct RecipeDetailView: View {
             return .orange
         }
     }
+
+    private var cookedHistorySummary: String? {
+        guard recipe.hasBeenCooked else { return nil }
+        let dateText = recipe.lastCookedAt.map { Self.lastCookedFormatter.string(from: $0) } ?? "unknown"
+        return "Cooked \(recipe.cookedCount)x • Last cooked \(dateText)"
+    }
+
+    private static let lastCookedFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .medium
+        formatter.timeStyle = .none
+        return formatter
+    }()
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -1609,26 +1972,106 @@ struct RecipeDetailView: View {
                     Text(recipe.title)
                         .font(.system(size: 28, weight: .heavy, design: .rounded))
 
-                    HStack(spacing: 10) {
-                        StatBadge(icon: "clock", label: recipe.cookTime, color: .orange)
-                        StatBadge(icon: "person.2", label: recipe.servings, color: .blue)
-                        StatBadge(icon: "flame", label: recipe.calories.isEmpty ? "—" : recipe.calories, color: .red)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            StatBadge(icon: "clock", label: recipe.cookTime, color: .orange)
+                            StatBadge(icon: "person.2", label: recipe.servings, color: .blue)
+                            StatBadge(icon: "flame", label: recipe.calories.isEmpty ? "—" : recipe.calories, color: .red)
 
-                        Spacer()
-
-                        Text(recipe.difficulty)
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(difficultyColor)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(difficultyColor.opacity(0.12))
-                            .clipShape(Capsule())
+                            Text(recipe.difficulty)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(difficultyColor)
+                                .lineLimit(1)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(difficultyColor.opacity(0.12))
+                                .clipShape(Capsule())
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
                     }
 
                     Text(recipe.description)
                         .font(.system(size: 15))
                         .foregroundStyle(.secondary)
                         .lineSpacing(4)
+
+                    if let cookedHistorySummary {
+                        Label(cookedHistorySummary, systemImage: "clock.arrow.circlepath")
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 10) {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            showAssistantSheet = true
+                        }) {
+                            Label("AI Assistant", systemImage: "sparkles")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(
+                                    LinearGradient(
+                                        colors: [.orange, .green.opacity(0.85)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+
+                        if let onLiveHelp {
+                            Button(action: {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                dismiss()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                    onLiveHelp()
+                                }
+                            }) {
+                                Label("Live AI Help", systemImage: "video.fill")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 10)
+                                    .background(
+                                        LinearGradient(
+                                            colors: [.blue.opacity(0.9), .cyan.opacity(0.8)],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    if let onMarkCooked {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            dismiss()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                onMarkCooked()
+                            }
+                        }) {
+                            Label("Mark as Cooked", systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                                .background(
+                                    LinearGradient(
+                                        colors: [.green, .green.opacity(0.8)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 14))
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     if !recipe.tags.filter({ !$0.isEmpty }).isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -1659,6 +2102,7 @@ struct RecipeDetailView: View {
                         let label = ["Ingredients", "Instructions"][i]
 
                         Button(action: {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             withAnimation(.spring(response: 0.3)) {
                                 activeTab = i
                             }
@@ -1700,14 +2144,24 @@ struct RecipeDetailView: View {
             }
             Button("Cancel", role: .cancel) { }
         }
+        .sheet(isPresented: $showAssistantSheet) {
+            RecipeAssistantSheet(recipe: recipe, assistant: assistant, onApplyRecipe: onRecipeUpdated)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
     }
 }
 
 struct SuggestedRecipeDetailView: View {
     let recipe: Recipe
+    @ObservedObject var assistant: CookingAssistant
     let onSave: () -> Void
+    var onDislike: (() -> Void)? = nil
+    var onRecipeUpdated: ((Recipe) -> Void)? = nil
+    var onLiveHelp: (() -> Void)? = nil
 
     @State private var activeTab = 0
+    @State private var showAssistantSheet = false
     @Environment(\.dismiss) var dismiss
 
     var difficultyColor: Color {
@@ -1748,6 +2202,7 @@ struct SuggestedRecipeDetailView: View {
                         Spacer()
 
                         Button(action: {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                             onSave()
                         }) {
                             HStack(spacing: 6) {
@@ -1776,26 +2231,97 @@ struct SuggestedRecipeDetailView: View {
                     Text(recipe.title)
                         .font(.system(size: 28, weight: .heavy, design: .rounded))
 
-                    HStack(spacing: 10) {
-                        StatBadge(icon: "clock", label: recipe.cookTime, color: .orange)
-                        StatBadge(icon: "person.2", label: recipe.servings, color: .blue)
-                        StatBadge(icon: "flame", label: recipe.calories.isEmpty ? "—" : recipe.calories, color: .red)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 10) {
+                            StatBadge(icon: "clock", label: recipe.cookTime, color: .orange)
+                            StatBadge(icon: "person.2", label: recipe.servings, color: .blue)
+                            StatBadge(icon: "flame", label: recipe.calories.isEmpty ? "—" : recipe.calories, color: .red)
 
-                        Spacer()
-
-                        Text(recipe.difficulty)
-                            .font(.system(size: 12, weight: .bold))
-                            .foregroundStyle(difficultyColor)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 5)
-                            .background(difficultyColor.opacity(0.12))
-                            .clipShape(Capsule())
+                            Text(recipe.difficulty)
+                                .font(.system(size: 12, weight: .bold))
+                                .foregroundStyle(difficultyColor)
+                                .lineLimit(1)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 5)
+                                .background(difficultyColor.opacity(0.12))
+                                .clipShape(Capsule())
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
                     }
 
                     Text(recipe.description)
                         .font(.system(size: 15))
                         .foregroundStyle(.secondary)
                         .lineSpacing(4)
+
+                    HStack(spacing: 10) {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            showAssistantSheet = true
+                        }) {
+                            Label("AI Assistant", systemImage: "sparkles")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(
+                                    LinearGradient(
+                                        colors: [.orange, .green.opacity(0.85)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+
+                        if let onLiveHelp {
+                            Button(action: {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                dismiss()
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                                    onLiveHelp()
+                                }
+                            }) {
+                                Label("Live AI Help", systemImage: "video.fill")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 10)
+                                    .background(
+                                        LinearGradient(
+                                            colors: [.blue.opacity(0.9), .cyan.opacity(0.8)],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 12))
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+
+                    if let onDislike {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            onDislike()
+                        }) {
+                            Label("Not for me", systemImage: "hand.thumbsdown.fill")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 10)
+                                .background(
+                                    LinearGradient(
+                                        colors: [.red.opacity(0.9), .pink.opacity(0.8)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 12))
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     if !recipe.tags.filter({ !$0.isEmpty }).isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
@@ -1817,11 +2343,15 @@ struct SuggestedRecipeDetailView: View {
                 .padding(.top, 20)
                 .padding(.bottom, 16)
 
+                NutritionBreakdownCard(nutrition: recipe.nutrition, calories: recipe.calories)
+                    .padding(.bottom, 8)
+
                 HStack(spacing: 0) {
                     ForEach(["Ingredients", "Instructions"].indices, id: \.self) { i in
                         let label = ["Ingredients", "Instructions"][i]
 
                         Button(action: {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             withAnimation(.spring(response: 0.3)) {
                                 activeTab = i
                             }
@@ -1857,6 +2387,244 @@ struct SuggestedRecipeDetailView: View {
             }
         }
         .ignoresSafeArea(edges: .top)
+        .sheet(isPresented: $showAssistantSheet) {
+            RecipeAssistantSheet(recipe: recipe, assistant: assistant, onApplyRecipe: onRecipeUpdated)
+                .presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+        }
+    }
+}
+
+private struct RecipeAssistantMessage: Identifiable {
+    let id = UUID()
+    let isUser: Bool
+    let text: String
+}
+
+private struct RecipeAssistantSheet: View {
+    let recipe: Recipe
+    @ObservedObject var assistant: CookingAssistant
+    var onApplyRecipe: ((Recipe) -> Void)? = nil
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var input = ""
+    @State private var isLoading = false
+    @State private var workingRecipe: Recipe
+    @State private var messages: [RecipeAssistantMessage] = [
+        RecipeAssistantMessage(
+            isUser: false,
+            text: "Ask me what to change. I will update this recipe directly."
+        )
+    ]
+
+    init(recipe: Recipe, assistant: CookingAssistant, onApplyRecipe: ((Recipe) -> Void)? = nil) {
+        self.recipe = recipe
+        self.assistant = assistant
+        self.onApplyRecipe = onApplyRecipe
+        _workingRecipe = State(initialValue: recipe)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color(.systemBackground).ignoresSafeArea()
+                Circle().fill(Color.orange.opacity(0.10)).blur(radius: 80).offset(x: -160, y: -200).ignoresSafeArea()
+                Circle().fill(Color.green.opacity(0.08)).blur(radius: 80).offset(x: 160, y: 300).ignoresSafeArea()
+
+                VStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Recipe AI Assistant")
+                            .font(.system(size: 24, weight: .heavy, design: .rounded))
+                        Text(workingRecipe.title)
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+
+                    if isLoading {
+                        HStack(spacing: 12) {
+                            ProgressView()
+                                .tint(.orange)
+                                .controlSize(.large)
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Applying recipe changes...")
+                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                Text("Updating ingredients and detailed instructions")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            Spacer(minLength: 0)
+                        }
+                        .padding(12)
+                        .background(
+                            LinearGradient(
+                                colors: [Color.orange.opacity(0.10), Color.green.opacity(0.08)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.orange.opacity(0.22), lineWidth: 1)
+                        )
+                        .padding(.horizontal, 16)
+                    }
+
+                    ScrollView(showsIndicators: false) {
+                        VStack(spacing: 10) {
+                            ForEach(messages) { message in
+                                HStack {
+                                    if message.isUser { Spacer() }
+                                    Text(message.text)
+                                        .font(.system(size: 14))
+                                        .foregroundStyle(message.isUser ? .white : .primary)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 10)
+                                        .background(
+                                            message.isUser
+                                            ? AnyView(LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing))
+                                            : AnyView(Color(.systemGray6))
+                                        )
+                                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                                        .frame(maxWidth: 320, alignment: message.isUser ? .trailing : .leading)
+                                    if !message.isUser { Spacer() }
+                                }
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+
+                    HStack(spacing: 10) {
+                        TextField("What should be improved?", text: $input, axis: .vertical)
+                            .font(.system(size: 14))
+                            .lineLimit(3)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 10)
+                            .background(Color(.systemGray6))
+                            .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                        Button(action: sendMessage) {
+                            if isLoading {
+                                ProgressView()
+                                    .tint(.white)
+                                    .frame(width: 42, height: 42)
+                                    .background(
+                                        LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                                    )
+                                    .clipShape(Circle())
+                            } else {
+                                Image(systemName: "arrow.up")
+                                    .font(.system(size: 16, weight: .bold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 42, height: 42)
+                                    .background(
+                                        LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                                    )
+                                    .clipShape(Circle())
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isLoading || input.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 12)
+                }
+            }
+            .navigationTitle("Recipe Assistant")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+    }
+
+    private func sendMessage() {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !isLoading else { return }
+
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        input = ""
+        messages.append(.init(isUser: true, text: trimmed))
+        isLoading = true
+
+        Task {
+            do {
+                try await assistant.waitUntilReady()
+                let ingredientList = workingRecipe.ingredients.map { "- \($0)" }.joined(separator: "\n")
+                let stepList = workingRecipe.steps.enumerated().map { "\($0.offset + 1). \($0.element)" }.joined(separator: "\n")
+                let prompt = """
+                You are revising this recipe according to the user's request.
+                Return ONLY in this exact format, no extra commentary:
+                Title: [recipe name]
+                Emoji: [single relevant emoji]
+                Description: [one sentence about the dish]
+                Cook Time: [e.g. 25 mins]
+                Servings: [e.g. 2 people]
+                Difficulty: [Easy / Medium / Hard]
+                Calories: [e.g. 420 kcal]
+                Carbs: [e.g. 42g]
+                Protein: [e.g. 35g]
+                Fat: [e.g. 12g]
+                Saturated Fat: [e.g. 4g]
+                Sugar: [e.g. 8g]
+                Fiber: [e.g. 5g]
+                Sodium: [e.g. 620mg]
+                Tags: [comma-separated]
+
+                Ingredients:
+                \(ingredientList)
+                Instructions:
+                \(stepList)
+
+                User request: \(trimmed)
+
+                Rules for quality:
+                - include precise ingredient amounts/units
+                - include prep details where relevant (washing, dicing, preheating, marinating)
+                - include timing and doneness cues in instructions
+                - keep instructions detailed and easy to follow
+                - include at least one cuisine tag
+                """
+                let raw = try await assistant.getHelp(question: prompt)
+                var revised = RecipesViewModel.parseRecipe(from: raw)
+
+                revised.id = workingRecipe.id
+                revised.createdAt = workingRecipe.createdAt
+                revised.isFavorite = workingRecipe.isFavorite
+                revised.cookedCount = workingRecipe.cookedCount
+                revised.lastCookedAt = workingRecipe.lastCookedAt
+
+                if revised.tags.isEmpty { revised.tags = workingRecipe.tags }
+                if revised.calories.isEmpty { revised.calories = workingRecipe.calories }
+                if revised.nutrition.carbs.isEmpty { revised.nutrition.carbs = workingRecipe.nutrition.carbs }
+                if revised.nutrition.protein.isEmpty { revised.nutrition.protein = workingRecipe.nutrition.protein }
+                if revised.nutrition.fat.isEmpty { revised.nutrition.fat = workingRecipe.nutrition.fat }
+                if revised.nutrition.saturatedFat.isEmpty { revised.nutrition.saturatedFat = workingRecipe.nutrition.saturatedFat }
+                if revised.nutrition.sugar.isEmpty { revised.nutrition.sugar = workingRecipe.nutrition.sugar }
+                if revised.nutrition.fiber.isEmpty { revised.nutrition.fiber = workingRecipe.nutrition.fiber }
+                if revised.nutrition.sodium.isEmpty { revised.nutrition.sodium = workingRecipe.nutrition.sodium }
+
+                await MainActor.run {
+                    workingRecipe = revised
+                    onApplyRecipe?(revised)
+                    messages.append(.init(isUser: false, text: "Applied update. The recipe card and details are now updated."))
+                    isLoading = false
+                }
+            } catch {
+                await MainActor.run {
+                    messages.append(.init(isUser: false, text: "I hit an error while generating help. Please try again."))
+                    isLoading = false
+                }
+            }
+        }
     }
 }
 
@@ -2287,7 +3055,11 @@ struct RecipeReviewView: View {
                                             RecipeBouncingDotsView(step: scanAnimationStep, color: .white)
                                         } else {
                                             Image(systemName: "sparkles")
-                                            Text(improvementText.trimmingCharacters(in: .whitespaces).isEmpty ? "Save & Mark as Cooked" : "Revise Recipe with AI")
+                                            Text(
+                                                improvementText.trimmingCharacters(in: .whitespaces).isEmpty
+                                                ? "Save & Mark as Cooked"
+                                                : "Revise Recipe with AI & Mark as Cooked"
+                                            )
                                                 .font(.system(size: 17, weight: .bold, design: .rounded))
                                         }
                                     }
@@ -2305,6 +3077,7 @@ struct RecipeReviewView: View {
                                 // Save revised recipe
                                 Button(action: {
                                     if let revised = revisedRecipe {
+                                        UINotificationFeedbackGenerator().notificationOccurred(.success)
                                         onComplete(revised, selectedLiked, likedNote, improvementText)
                                     }
                                 }) {
@@ -2325,6 +3098,7 @@ struct RecipeReviewView: View {
 
                                 // Keep original, just mark cooked
                                 Button(action: {
+                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                                     var cooked = recipe
                                     cooked.cookedCount = recipe.cookedCount + 1
                                     cooked.lastCookedAt = Date()
@@ -2341,7 +3115,10 @@ struct RecipeReviewView: View {
                             }
 
                             // Skip without changes
-                            Button(action: { dismiss() }) {
+                            Button(action: {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                dismiss()
+                            }) {
                                 Text("Skip for Now")
                                     .font(.system(size: 14, weight: .medium))
                                     .foregroundStyle(.tertiary)
@@ -2354,7 +3131,7 @@ struct RecipeReviewView: View {
                     .padding(.top, 8)
                 }
             }
-            .navigationTitle("Leave a Review")
+            .navigationTitle("Mark as Cooked")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -2365,6 +3142,7 @@ struct RecipeReviewView: View {
     }
 
     private func generateRevision() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let hasImprovements = !improvementText.trimmingCharacters(in: .whitespaces).isEmpty
         guard hasImprovements else {
             // No improvements — just mark as cooked with original
@@ -2376,8 +3154,7 @@ struct RecipeReviewView: View {
         }
 
         isRegenerating = true
-        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        
+
         timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             scanAnimationStep += 1
         }
@@ -2430,6 +3207,13 @@ struct RecipeReviewView: View {
                 Instructions:
                 1. [step one]
                 2. [step two]
+
+                Rules for quality:
+                - include precise ingredient amounts/units
+                - include prep details where relevant (washing, dicing, preheating, marinating)
+                - include timing and doneness cues in instructions
+                - keep instructions detailed and easy to follow
+                - include at least one cuisine tag
                 """
 
                 let raw = try await assistant.getHelp(question: prompt)
