@@ -742,7 +742,6 @@ struct RecipesView: View {
                                             }
                                             if isLoadingMoreSuggestion {
                                                 SuggestionCookingCard()
-                                                    .frame(width: 180)
                                             }
                                         }
                                         .padding(.horizontal, 16)
@@ -869,56 +868,39 @@ struct RecipesView: View {
             if vm.isGenerating {
                 VStack {
                     Spacer()
-
-                    VStack(spacing: 10) {
-                        HStack(spacing: 12) {
-                            ProgressView()
-                                .tint(.white)
-
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(vm.recipes.count < 3 ? "Building your starter recipes..." : "ChefBuddy is cooking...")
-                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(.white)
-
-                                if vm.recipes.count < 3 {
-                                    Text("Recipe \(vm.recipes.count + 1) of 3")
-                                        .font(.system(size: 12, weight: .medium, design: .rounded))
-                                        .foregroundStyle(.white.opacity(0.75))
-                                }
-                            }
-
-                            Spacer()
-
-                            Text(timeString(vm.elapsedSeconds))
-                                .font(.system(size: 14, weight: .bold, design: .monospaced))
-                                .foregroundStyle(.white.opacity(0.85))
+                    
+                    HStack(alignment: .center, spacing: 14) {
+                        ZStack {
+                            Circle().fill(Color.white.opacity(0.2)).frame(width: 48, height: 48)
+                            Text("🍳")
+                                .font(.system(size: 24))
+                                .scaleEffect(vm.elapsedSeconds % 2 == 0 ? 1.0 : 1.08)
+                                .animation(.spring(response: 0.35, dampingFraction: 0.65), value: vm.elapsedSeconds)
                         }
-
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule()
-                                    .fill(.white.opacity(0.2))
-                                    .frame(height: 4)
-
-                                Capsule()
-                                    .fill(.white)
-                                    .frame(
-                                        width: geo.size.width * min(Double(vm.elapsedSeconds) / 20.0, 0.95),
-                                        height: 4
-                                    )
-                                    .animation(.linear(duration: 1), value: vm.elapsedSeconds)
+                        
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(vm.recipes.count < 3 ? "Building your starter recipes..." : "ChefBuddy is cooking...")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                            
+                            HStack(spacing: 5) {
+                                Text(vm.recipes.count < 3 ? "Recipe \(vm.recipes.count + 1) of 3" : "Generating")
+                                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.white.opacity(0.8))
+                                
+                                RecipeBouncingDotsView(step: vm.elapsedSeconds, color: .white)
                             }
                         }
-                        .frame(height: 4)
+                        
+                        Spacer()
+                        
+                        Text(timeString(vm.elapsedSeconds))
+                            .font(.system(size: 14, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.white.opacity(0.9))
                     }
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 14)
+                    .padding(16)
                     .background(
-                        LinearGradient(
-                            colors: [.orange, .green.opacity(0.85)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
+                        LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
                     )
                     .clipShape(RoundedRectangle(cornerRadius: 18))
                     .shadow(color: .orange.opacity(0.4), radius: 12, y: 6)
@@ -1025,6 +1007,25 @@ struct RecipesView: View {
             )
             .presentationDetents([.large])
             .presentationDragIndicator(.visible)
+        }
+    }
+}
+
+// MARK: - Helper Views
+
+struct RecipeBouncingDotsView: View {
+    let step: Int
+    let color: Color
+    
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(0..<3, id: \.self) { index in
+                Circle()
+                    .fill(index <= (step % 3) ? color : color.opacity(0.35))
+                    .frame(width: 6, height: 6)
+                    .offset(y: index == (step % 3) ? -2 : 0)
+                    .animation(.easeInOut(duration: 0.2), value: step)
+            }
         }
     }
 }
@@ -1182,7 +1183,8 @@ private struct RecipeCardButtonStyle: ButtonStyle {
 // MARK: - Suggestions Loading UI
 
 private struct SuggestionsLoadingSection: View {
-    @State private var animate = false
+    @State private var scanAnimationStep: Int = 0
+    @State private var timer: Timer?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
@@ -1193,44 +1195,70 @@ private struct SuggestionsLoadingSection: View {
             }
             .padding(.horizontal, 20)
 
-            VStack(spacing: 14) {
-                HStack(spacing: 12) {
-                    ProgressView().tint(.white)
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("ChefBuddy is cooking...")
-                            .font(.system(size: 15, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                        Text("Generating recipe ideas for you")
-                            .font(.system(size: 12, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.78))
-                    }
-                    Spacer()
+            HStack(alignment: .center, spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.orange.opacity(0.18), Color.pink.opacity(0.14)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 54, height: 54)
+                    
+                    Text("🍳")
+                        .font(.system(size: 28))
+                        .scaleEffect(scanAnimationStep % 2 == 0 ? 1.0 : 1.08)
+                        .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
                 }
-                Capsule()
-                    .fill(.white.opacity(0.22))
-                    .frame(height: 5)
-                    .overlay(alignment: .leading) {
-                        Capsule()
-                            .fill(.white)
-                            .frame(width: animate ? 220 : 90, height: 5)
-                            .animation(.easeInOut(duration: 1.2).repeatForever(autoreverses: true), value: animate)
+                
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("ChefBuddy is cooking...")
+                            .font(.callout.weight(.semibold))
+                            .foregroundStyle(.primary)
                     }
+                    
+                    Text("Generating recipe ideas for you...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    
+                    HStack(spacing: 5) {
+                        Text("Generating")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        
+                        RecipeBouncingDotsView(step: scanAnimationStep, color: .orange)
+                    }
+                }
+                Spacer()
             }
-            .padding(.horizontal, 18)
-            .padding(.vertical, 16)
+            .padding(16)
             .background(
-                LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                RoundedRectangle(cornerRadius: 18)
+                    .fill(.ultraThinMaterial)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 20))
-            .shadow(color: .orange.opacity(0.25), radius: 10, y: 5)
+            .overlay(
+                RoundedRectangle(cornerRadius: 18)
+                    .stroke(Color.orange.opacity(0.16), lineWidth: 1)
+            )
             .padding(.horizontal, 16)
         }
-        .onAppear { animate = true }
+        .onAppear {
+            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+                scanAnimationStep += 1
+            }
+        }
+        .onDisappear {
+            timer?.invalidate()
+        }
     }
 }
 
 private struct SuggestionCookingCard: View {
-    @State private var animate = false
+    @State private var scanAnimationStep: Int = 0
+    @State private var timer: Timer?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -1242,32 +1270,46 @@ private struct SuggestionCookingCard: View {
                 .frame(height: 110)
                 .clipShape(RoundedRectangle(cornerRadius: 16))
 
-                VStack(spacing: 8) {
-                    ProgressView().tint(.orange)
-                    Text("🍳")
-                        .font(.system(size: 34))
-                        .scaleEffect(animate ? 1.06 : 0.94)
-                        .animation(.easeInOut(duration: 0.9).repeatForever(autoreverses: true), value: animate)
-                }
+                Text("🍳")
+                    .font(.system(size: 40))
+                    .scaleEffect(scanAnimationStep % 2 == 0 ? 1.0 : 1.08)
+                    .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
             }
-            VStack(alignment: .leading, spacing: 6) {
+            
+            VStack(alignment: .leading, spacing: 8) {
                 Text("ChefBuddy is cooking...")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(.primary).lineLimit(2)
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                
                 Text("Making your next recipe idea")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary).lineLimit(2)
-                Text("Please wait")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                
+                HStack(spacing: 4) {
+                    Text("Generating")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.orange)
+                    
+                    RecipeBouncingDotsView(step: scanAnimationStep, color: .orange)
+                }
             }
             .padding(12)
         }
+        .frame(width: 180)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.05), lineWidth: 1))
         .shadow(color: .black.opacity(0.06), radius: 8, y: 4)
-        .onAppear { animate = true }
+        .onAppear {
+            timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+                scanAnimationStep += 1
+            }
+        }
+        .onDisappear {
+            timer?.invalidate()
+        }
     }
 }
 
@@ -2058,6 +2100,8 @@ struct RecipeReviewView: View {
     @State private var isRegenerating = false
     @State private var revisedRecipe: Recipe? = nil
     @State private var showConfirmation = false
+    @State private var scanAnimationStep = 0
+    @State private var timer: Timer?
     @FocusState private var focusedField: Bool
 
     let likedOptions = [
@@ -2233,8 +2277,14 @@ struct RecipeReviewView: View {
                                 Button(action: generateRevision) {
                                     HStack(spacing: 10) {
                                         if isRegenerating {
-                                            ProgressView().tint(.white).scaleEffect(0.85)
-                                            Text("ChefBuddy is revising...").font(.system(size: 17, weight: .bold, design: .rounded))
+                                            Text("🍳")
+                                                .scaleEffect(scanAnimationStep % 2 == 0 ? 0.9 : 1.1)
+                                                .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
+                                            
+                                            Text("ChefBuddy is revising...")
+                                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                            
+                                            RecipeBouncingDotsView(step: scanAnimationStep, color: .white)
                                         } else {
                                             Image(systemName: "sparkles")
                                             Text(improvementText.trimmingCharacters(in: .whitespaces).isEmpty ? "Save & Mark as Cooked" : "Revise Recipe with AI")
@@ -2327,6 +2377,10 @@ struct RecipeReviewView: View {
 
         isRegenerating = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        
+        timer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            scanAnimationStep += 1
+        }
 
         Task {
             do {
@@ -2387,12 +2441,14 @@ struct RecipeReviewView: View {
                 revised.lastCookedAt = Date()
 
                 await MainActor.run {
+                    self.timer?.invalidate()
                     self.revisedRecipe = revised
                     self.isRegenerating = false
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
                 }
             } catch {
                 await MainActor.run {
+                    self.timer?.invalidate()
                     self.isRegenerating = false
                     UINotificationFeedbackGenerator().notificationOccurred(.error)
                 }
