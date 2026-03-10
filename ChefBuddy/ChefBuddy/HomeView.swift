@@ -182,7 +182,7 @@ struct HomeView: View {
             .fullScreenCover(isPresented: $showLiveCooking) {
                 if let recipe = selectedLiveRecipe,
                    let uid = authVM.userSession?.uid {
-                    LiveCookingView(recipe: recipe, assistant: assistant, uid: uid)
+                    LiveCookingView(recipe: recipe, assistant: assistant, userId: uid)
                 }
             }
             .onAppear {

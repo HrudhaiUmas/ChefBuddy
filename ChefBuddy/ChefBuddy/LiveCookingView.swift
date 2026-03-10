@@ -313,6 +313,7 @@ struct RecipePickerSheet: View {
 struct LiveCookingView: View {
     let recipe: Recipe
     @ObservedObject var assistant: CookingAssistant
+    let userId: String
     @Environment(\.dismiss) var dismiss
 
     @StateObject private var camera = CameraManager()
@@ -320,6 +321,7 @@ struct LiveCookingView: View {
 
     @State private var questionText = ""
     @State private var showStepList = false
+    @State private var showReview = false
     @FocusState private var questionFocused: Bool
     @State private var flashCapture = false
 
@@ -350,10 +352,35 @@ struct LiveCookingView: View {
                             .font(.system(size: 12)).foregroundStyle(.white.opacity(0.6))
                     }
                     Spacer()
-                    Button(action: { showStepList = true }) {
-                        Image(systemName: "list.number")
-                            .font(.system(size: 22))
-                            .foregroundStyle(.white.opacity(0.8))
+                    HStack(spacing: 12) {
+                        Button(action: { showStepList = true }) {
+                            Image(systemName: "list.number")
+                                .font(.system(size: 22))
+                                .foregroundStyle(.white.opacity(0.8))
+                        }
+
+                        if vm.currentStepIndex == recipe.steps.count - 1 {
+                            Button(action: {
+                                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                                showReview = true
+                            }) {
+                                HStack(spacing: 6) {
+                                    Image(systemName: "checkmark.circle.fill")
+                                        .font(.system(size: 14, weight: .bold))
+                                    Text("Done!")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                }
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .background(
+                                    LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                                )
+                                .clipShape(Capsule())
+                            }
+                            .transition(.scale.combined(with: .opacity))
+                            .animation(.spring(response: 0.4), value: vm.currentStepIndex)
+                        }
                     }
                 }
                 .padding(.horizontal, 20)
@@ -531,6 +558,38 @@ struct LiveCookingView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .fullScreenCover(isPresented: $showReview) {
+            RecipeReviewView(
+                recipe: recipe,
+                assistant: assistant,
+                userId: userId,
+                onComplete: { updatedRecipe, liked, likedNote, improvement in
+                    // Dismiss review then live cooking
+                    showReview = false
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        dismiss()
+                    }
+                    // Build a single cooked snapshot and write once to Firestore
+                    var cooked = updatedRecipe
+                    cooked.cookedCount = max(updatedRecipe.cookedCount, recipe.cookedCount + 1)
+                    cooked.lastCookedAt = Date()
+                    let db = Firestore.firestore()
+                    if let id = cooked.id,
+                       let encoded = try? Firestore.Encoder().encode(cooked) {
+                        db.collection("users").document(userId).collection("recipes").document(id)
+                            .setData(encoded)
+                        let reviewData: [String: Any] = [
+                            "likedTags": Array(liked),
+                            "likedNote": likedNote,
+                            "improvement": improvement,
+                            "createdAt": Date()
+                        ]
+                        db.collection("users").document(userId).collection("recipes").document(id)
+                            .collection("reviews").addDocument(data: reviewData)
+                    }
+                }
+            )
         }
     }
 }

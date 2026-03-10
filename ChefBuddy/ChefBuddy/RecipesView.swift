@@ -230,12 +230,22 @@ class RecipesViewModel: ObservableObject {
     func markAsCooked(_ recipe: Recipe, userId: String) {
         guard let id = recipe.id, !userId.isEmpty else { return }
         let newCount = recipe.cookedCount + 1
+        let now = Date()
+        // Update local array immediately so UI reacts without waiting for Firestore
+        if let idx = recipes.firstIndex(where: { $0.id == id }) {
+            recipes[idx].cookedCount = newCount
+            recipes[idx].lastCookedAt = now
+        }
         db.collection("users").document(userId).collection("recipes").document(id)
-            .updateData(["cookedCount": newCount, "lastCookedAt": Date()])
+            .updateData(["cookedCount": newCount, "lastCookedAt": now])
     }
 
     func updateRecipeAfterReview(_ updatedRecipe: Recipe, userId: String) {
         guard let id = updatedRecipe.id, !userId.isEmpty else { return }
+        // Ensure cookedCount is reflected in local array too
+        if let idx = recipes.firstIndex(where: { $0.id == id }) {
+            recipes[idx] = updatedRecipe
+        }
         guard let encoded = try? Firestore.Encoder().encode(updatedRecipe) else { return }
         db.collection("users").document(userId).collection("recipes").document(id).setData(encoded)
     }
@@ -999,9 +1009,15 @@ struct RecipesView: View {
                 assistant: assistant,
                 userId: userId,
                 onComplete: { updatedRecipe, liked, likedNote, improvement in
-                    vm.markAsCooked(updatedRecipe, userId: userId)
-                    vm.updateRecipeAfterReview(updatedRecipe, userId: userId)
-                    if let recipeId = updatedRecipe.id {
+                    // Build a fully-cooked copy so a single setData is the source of truth
+                    var cooked = updatedRecipe
+                    if cooked.cookedCount == updatedRecipe.cookedCount {
+                        // cookedCount not yet incremented (Keep Original path) — bump it now
+                        cooked.cookedCount = max(updatedRecipe.cookedCount, recipe.cookedCount + 1)
+                    }
+                    cooked.lastCookedAt = Date()
+                    vm.updateRecipeAfterReview(cooked, userId: userId)
+                    if let recipeId = cooked.id {
                         vm.saveReview(recipeId: recipeId, liked: Array(liked), likedNote: likedNote, improvement: improvement, userId: userId)
                     }
                     recipeToReview = nil
@@ -1146,8 +1162,12 @@ private struct RecipeCard: View {
             .contentShape(RoundedRectangle(cornerRadius: 20))
         }
         .buttonStyle(RecipeCardButtonStyle())
-        .opacity(isCooked ? 0.85 : 1.0)
-        .saturation(isCooked ? 0.8 : 1.0)
+        .opacity(isCooked ? 0.82 : 1.0)
+        .saturation(isCooked ? 0.72 : 1.0)
+        .overlay(
+            RoundedRectangle(cornerRadius: 20)
+                .fill(Color.green.opacity(isCooked ? 0.10 : 0))
+        )
     }
 }
 
@@ -1329,9 +1349,11 @@ struct AllRecipesView: View {
                     assistant: assistant,
                     userId: userId,
                     onComplete: { updatedRecipe, liked, likedNote, improvement in
-                        vm.markAsCooked(updatedRecipe, userId: userId)
-                        vm.updateRecipeAfterReview(updatedRecipe, userId: userId)
-                        if let recipeId = updatedRecipe.id {
+                        var cooked = updatedRecipe
+                        cooked.cookedCount = max(updatedRecipe.cookedCount, recipe.cookedCount + 1)
+                        cooked.lastCookedAt = Date()
+                        vm.updateRecipeAfterReview(cooked, userId: userId)
+                        if let recipeId = cooked.id {
                             vm.saveReview(recipeId: recipeId, liked: Array(liked), likedNote: likedNote, improvement: improvement, userId: userId)
                         }
                         recipeToReview = nil
@@ -2252,7 +2274,12 @@ struct RecipeReviewView: View {
                                 }
 
                                 // Keep original, just mark cooked
-                                Button(action: { onComplete(recipe, selectedLiked, likedNote, improvementText) }) {
+                                Button(action: {
+                                    var cooked = recipe
+                                    cooked.cookedCount = recipe.cookedCount + 1
+                                    cooked.lastCookedAt = Date()
+                                    onComplete(cooked, selectedLiked, likedNote, improvementText)
+                                }) {
                                     Text("Keep Original & Mark Cooked")
                                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                                         .foregroundStyle(.secondary)
@@ -2291,7 +2318,10 @@ struct RecipeReviewView: View {
         let hasImprovements = !improvementText.trimmingCharacters(in: .whitespaces).isEmpty
         guard hasImprovements else {
             // No improvements — just mark as cooked with original
-            onComplete(recipe, selectedLiked, likedNote, "")
+            var cooked = recipe
+            cooked.cookedCount = recipe.cookedCount + 1
+            cooked.lastCookedAt = Date()
+            onComplete(cooked, selectedLiked, likedNote, "")
             return
         }
 
