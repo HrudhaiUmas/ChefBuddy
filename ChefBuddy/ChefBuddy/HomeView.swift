@@ -204,7 +204,11 @@ struct HomeView: View {
                             .padding(.horizontal, 24)
 
                             HStack(spacing: 12) {
-                                ToolButton(icon: "calendar", title: "Meal Plan", color: .green)
+                                NavigationLink(destination: WeeklyMealPlanView(assistant: assistant)) { 
+                                    ToolButton(icon: "calendar", title: "Meal Plan", color: .green)
+                                }
+                                .buttonStyle(.plain)
+
                                 Button(action: {
                                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                                     showGroceryList = true

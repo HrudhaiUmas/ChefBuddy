@@ -4,6 +4,10 @@
 <dict>
 	<key>NSCameraUsageDescription</key>
 	<string>ChefBuddy needs camera access to see your ingredients and provide real-time AI cooking guidance</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>ChefBuddy needs microphone access so you can ask cooking questions hands-free while you cook</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>ChefBuddy uses speech recognition to transcribe your voice questions while cooking</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

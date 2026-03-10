@@ -7,6 +7,7 @@ import SwiftUI
 import AVFoundation
 import FirebaseFirestore
 import Combine
+import Speech
 
 // MARK: - Camera Manager
 
@@ -82,6 +83,97 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         latestBuffer = sampleBuffer
+    }
+}
+
+
+// MARK: - Speech Manager
+
+class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
+    @Published var transcript: String = ""
+    @Published var isRecording: Bool = false
+    @Published var permissionGranted: Bool = false
+    @Published var errorMessage: String = ""
+
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private let audioEngine = AVAudioEngine()
+
+    override init() {
+        super.init()
+        recognizer?.delegate = self
+        requestPermissions()
+    }
+
+    func requestPermissions() {
+        SFSpeechRecognizer.requestAuthorization { [weak self] status in
+            DispatchQueue.main.async {
+                self?.permissionGranted = (status == .authorized)
+            }
+        }
+        AVAudioSession.sharedInstance().requestRecordPermission { [weak self] granted in
+            DispatchQueue.main.async {
+                if !granted { self?.errorMessage = "Microphone access denied" }
+            }
+        }
+    }
+
+    func startRecording() {
+        guard permissionGranted, !audioEngine.isRunning else { return }
+
+        transcript = ""
+        errorMessage = ""
+
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.record, mode: .measurement, options: .duckOthers)
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+        } catch {
+            errorMessage = "Audio session error"
+            return
+        }
+
+        recognitionRequest = SFSpeechAudioBufferRecognitionRequest()
+        guard let request = recognitionRequest else { return }
+        request.shouldReportPartialResults = true
+        request.taskHint = .dictation
+
+        let inputNode = audioEngine.inputNode
+        recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
+            if let result = result {
+                DispatchQueue.main.async {
+                    self?.transcript = result.bestTranscription.formattedString
+                }
+            }
+            if error != nil || (result?.isFinal == true) {
+                self?.stopRecording()
+            }
+        }
+
+        let recordingFormat = inputNode.outputFormat(forBus: 0)
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat) { buffer, _ in
+            self.recognitionRequest?.append(buffer)
+        }
+
+        audioEngine.prepare()
+        do {
+            try audioEngine.start()
+            DispatchQueue.main.async { self.isRecording = true }
+        } catch {
+            errorMessage = "Could not start recording"
+        }
+    }
+
+    func stopRecording() {
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        recognitionRequest?.endAudio()
+        recognitionRequest = nil
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        DispatchQueue.main.async { self.isRecording = false }
     }
 }
 
@@ -318,6 +410,7 @@ struct LiveCookingView: View {
 
     @StateObject private var camera = CameraManager()
     @StateObject private var vm = LiveCookingViewModel()
+    @StateObject private var speech = SpeechManager()
 
     @State private var questionText = ""
     @State private var showStepList = false
@@ -525,18 +618,60 @@ struct LiveCookingView: View {
 
                 // ── Question Input ────────────────────────────────────────
                 HStack(spacing: 10) {
-                    TextField("Ask ChefBuddy anything...", text: $questionText)
+                    TextField(speech.isRecording ? "Listening..." : "Ask ChefBuddy anything...", text: $questionText)
                         .font(.system(size: 15, design: .rounded))
                         .foregroundStyle(.white)
                         .padding(.horizontal, 16).padding(.vertical, 12)
-                        .background(.white.opacity(0.1))
+                        .background(speech.isRecording ? Color.red.opacity(0.18) : Color.white.opacity(0.10))
                         .clipShape(Capsule())
                         .focused($questionFocused)
+                        .onChange(of: speech.transcript) { text in
+                            questionText = text
+                        }
 
+                    // Mic button — tap to start, tap again to stop + send
+                    Button(action: {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        if speech.isRecording {
+                            speech.stopRecording()
+                            // Auto-send after a short pause so transcript settles
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+                                let q = questionText.trimmingCharacters(in: .whitespaces)
+                                guard !q.isEmpty else { return }
+                                questionText = ""
+                                questionFocused = false
+                                vm.askQuestion(question: q, recipe: recipe, assistant: assistant)
+                            }
+                        } else {
+                            questionFocused = false
+                            speech.startRecording()
+                        }
+                    }) {
+                        ZStack {
+                            Circle()
+                                .fill(speech.isRecording ? Color.red.opacity(0.85) : Color.white.opacity(0.12))
+                                .frame(width: 44, height: 44)
+                            if speech.isRecording {
+                                // Pulse ring when recording
+                                Circle()
+                                    .stroke(Color.red.opacity(0.5), lineWidth: 2)
+                                    .frame(width: 54, height: 54)
+                                    .scaleEffect(speech.isRecording ? 1.0 : 0.8)
+                                    .animation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true), value: speech.isRecording)
+                            }
+                            Image(systemName: speech.isRecording ? "stop.fill" : "mic.fill")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(speech.isRecording ? .white : .white.opacity(0.7))
+                        }
+                    }
+                    .disabled(!speech.permissionGranted && !speech.isRecording)
+
+                    // Send button
                     Button(action: {
                         let q = questionText
                         questionText = ""
                         questionFocused = false
+                        speech.stopRecording()
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         vm.askQuestion(question: q, recipe: recipe, assistant: assistant)
                     }) {
@@ -551,7 +686,10 @@ struct LiveCookingView: View {
             }
         }
         .onAppear { camera.start() }
-        .onDisappear { camera.stop() }
+        .onDisappear {
+            camera.stop()
+            speech.stopRecording()
+        }
         .sheet(isPresented: $showStepList) {
             StepListSheet(steps: recipe.steps, currentIndex: vm.currentStepIndex) { index in
                 vm.moveToStep(index, recipe: recipe)

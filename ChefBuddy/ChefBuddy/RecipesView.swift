@@ -964,8 +964,7 @@ struct RecipesView: View {
         await MainActor.run { isLoadingMoreSuggestion = false }
     }
 
-    /// Reads the last 10 reviews across all saved recipes and returns a summary string
-    /// the AI can use to avoid repeating things users didn't like.
+
     private func loadReviewFeedbackSummary() async -> String {
         guard !userId.isEmpty else { return "" }
         let db = Firestore.firestore()
@@ -1035,236 +1034,32 @@ struct RecipesView: View {
     }
 
     var body: some View {
-        ZStack {
-            Color(.systemBackground).ignoresSafeArea()
+        contentView
 
-            Circle()
-                .fill(Color.orange.opacity(0.10))
-                .blur(radius: 80)
-                .offset(x: -160, y: -320)
-                .ignoresSafeArea()
+            .onAppear {
+                vm.startListening(userId: userId)
+                startPantryListener()
 
-            Circle()
-                .fill(Color.green.opacity(0.08))
-                .blur(radius: 80)
-                .offset(x: 160, y: 320)
-                .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                HStack(alignment: .bottom) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Your Recipes")
-                            .font(.system(size: 32, weight: .heavy, design: .rounded))
-
-                        Text("\(vm.recipes.count) recipe\(vm.recipes.count == 1 ? "" : "s") saved")
-                            .font(.system(size: 14))
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer()
+                withAnimation(.spring(response: 0.55, dampingFraction: 0.8).delay(0.05)) {
+                    appeared = true
                 }
-                .padding(.horizontal, 24)
-                .padding(.top, 20)
-                .padding(.bottom, 16)
-                .opacity(appeared ? 1 : 0)
-                .offset(y: appeared ? 0 : -10)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        Spacer().frame(width: 16)
-
-                        ForEach(vm.filters, id: \.self) { filter in
-                            Button(action: {
-                                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                    vm.selectedFilter = filter
-                                }
-                            }) {
-                                Text(filter)
-                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                    .foregroundStyle(vm.selectedFilter == filter ? .white : .primary)
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 9)
-                                    .background(
-                                        vm.selectedFilter == filter
-                                        ? AnyView(
-                                            LinearGradient(
-                                                colors: [.orange, .green.opacity(0.85)],
-                                                startPoint: .leading,
-                                                endPoint: .trailing
-                                            )
-                                        )
-                                        : AnyView(Color(.systemGray6))
-                                    )
-                                    .clipShape(Capsule())
-                            }
-                            .buttonStyle(.plain)
-                        }
-
-                        Spacer().frame(width: 16)
-                    }
-                    .padding(.vertical, 4)
+            }
+            .onDisappear {
+                vm.stopListening()
+                stopPantryListener()
+            }
+            .task {
+                if assistant.suggestions.isEmpty {
+                    await loadInitialSuggestions()
                 }
-                .opacity(appeared ? 1 : 0)
-
-                if vm.filteredRecipes.isEmpty && vm.selectedFilter != "All" {
-                    RecipesEmptyState(filter: vm.selectedFilter) {
-                        showGenerateSheet = true
-                    }
-                } else {
-                    ScrollView(showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 18) {
-                            if isLoadingInitialSuggestions && unsavedSuggestions.isEmpty {
-                                SuggestionsLoadingSection()
-                                    .padding(.top, 10)
-                            } else if !unsavedSuggestions.isEmpty || isLoadingMoreSuggestion {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    HStack {
-                                        Text("AI Suggestions")
-                                            .font(.system(size: 20, weight: .bold, design: .rounded))
-                                        Spacer()
-                                    }
-                                    .padding(.horizontal, 20)
-
-                                    ScrollView(.horizontal, showsIndicators: false) {
-                                        HStack(spacing: 14) {
-                                            ForEach(unsavedSuggestions) { suggestion in
-                                                let suggestionRecipe = recipeFromSuggestion(suggestion)
-                                                RecipeCard(
-                                                    recipe: suggestionRecipe,
-                                                    onTap: { selectedSuggestionRecipe = suggestionRecipe },
-                                                    onFavorite: { },
-                                                    showFavorite: false
-                                                )
-                                                .frame(width: 180)
-                                            }
-                                            if isLoadingMoreSuggestion {
-                                                SuggestionCookingCard()
-                                            }
-                                        }
-                                        .padding(.horizontal, 16)
-                                    }
-                                }
-                                .padding(.top, 10)
-                            }
-
-                            if vm.selectedFilter == "All" {
-                                GenerateRecipeSpotlightCard(
-                                    onTap: { showGenerateSheet = true },
-                                    isGenerating: vm.isGenerating,
-                                    step: vm.elapsedSeconds
-                                )
-                                    .padding(.horizontal, 16)
-                            }
-
-                            if vm.filteredRecipes.isEmpty && vm.selectedFilter == "All" {
-                                RecipesEmptyState(filter: vm.selectedFilter) {
-                                    showGenerateSheet = true
-                                }
-                                .frame(maxWidth: .infinity)
-                                .padding(.top, 20)
-                            } else {
-                                VStack(alignment: .leading, spacing: 12) {
-                                    HStack {
-                                        Text("Your Recipes")
-                                            .font(.system(size: 20, weight: .bold, design: .rounded))
-
-                                        Spacer()
-
-                                        if vm.filteredRecipes.count > 4 {
-                                            Button(action: {
-                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                                showAllRecipesScreen = true
-                                            }) {
-                                                Text("See More")
-                                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                                    .foregroundStyle(.orange)
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                    .padding(.horizontal, 20)
-
-                                    LazyVGrid(
-                                        columns: [GridItem(.flexible()), GridItem(.flexible())],
-                                        spacing: 14
-                                    ) {
-                                        ForEach(vm.previewRecipes) { recipe in
-                                            RecipeCard(
-                                                recipe: recipe,
-                                                onTap: { selectedRecipe = recipe },
-                                                onFavorite: { toggleFavoriteEverywhere(recipe) },
-                                                isCooked: recipe.hasBeenCooked
-                                            )
-                                        }
-                                    }
-                                    .padding(.horizontal, 16)
-                                }
-                            }
-                        }
-                        .padding(.bottom, 40)
+            }
+            .onChange(of: vm.recipes) { recipes in
+                if recipes.count < 3 && !vm.isGenerating && assistant.isModelReady {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        vm.autoGenerateIfNeeded(assistant: assistant, userId: userId)
                     }
                 }
             }
-
-            if let err = vm.errorMessage {
-                VStack {
-                    Spacer()
-
-                    HStack(spacing: 10) {
-                        Image(systemName: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.white)
-
-                        Text(err)
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .lineLimit(2)
-
-                        Spacer()
-
-                        Button(action: { vm.errorMessage = nil }) {
-                            Image(systemName: "xmark")
-                                .foregroundStyle(.white.opacity(0.8))
-                        }
-                    }
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 14)
-                    .background(Color.red.gradient)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-                    .shadow(color: .red.opacity(0.3), radius: 10, y: 4)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 32)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-                .animation(.spring(response: 0.4), value: vm.errorMessage)
-            }
-
-        }
-        .onAppear {
-            vm.startListening(userId: userId)
-            startPantryListener()
-
-            withAnimation(.spring(response: 0.55, dampingFraction: 0.8).delay(0.05)) {
-                appeared = true
-            }
-        }
-        .onDisappear {
-            vm.stopListening()
-            stopPantryListener()
-        }
-        .task {
-            if assistant.suggestions.isEmpty {
-                await loadInitialSuggestions()
-            }
-        }
-        .onChange(of: vm.recipes) { recipes in
-            if recipes.count < 3 && !vm.isGenerating && assistant.isModelReady {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    vm.autoGenerateIfNeeded(assistant: assistant, userId: userId)
-                }
-            }
-        }
         .onChange(of: assistant.isModelReady) { ready in
             if ready && vm.recipes.count < 3 && !vm.isGenerating {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
@@ -1294,9 +1089,9 @@ struct RecipesView: View {
                     toggleFavoriteEverywhere(recipe)
                 },
                 onDelete: {
-                    vm.deleteRecipe(recipe, userId: userId)
-                    selectedRecipe = nil
+                    toggleFavoriteEverywhere(recipe)
                 },
+                userId: userId,
                 onRecipeUpdated: { updated in
                     vm.updateRecipeAfterReview(updated, userId: userId)
                     selectedRecipe = updated
@@ -1406,7 +1201,236 @@ struct RecipesView: View {
             LiveCookingView(recipe: recipe, assistant: assistant, userId: userId)
         }
     }
+    private func errorBanner(_ err: String) -> some View {
+        VStack {
+            Spacer()
+
+            HStack(spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.white)
+
+                Text(err)
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .lineLimit(2)
+
+                Spacer()
+
+                Button(action: { vm.errorMessage = nil }) {
+                    Image(systemName: "xmark")
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 14)
+            .background(Color.red.gradient)
+            .clipShape(RoundedRectangle(cornerRadius: 18))
+            .shadow(color: .red.opacity(0.3), radius: 10, y: 4)
+            .padding(.horizontal, 24)
+            .padding(.bottom, 32)
+        }
+    }
+    private var contentView: some View {
+        ZStack {
+            ChefBuddyBackground()
+
+            VStack(spacing: 0) {
+                headerView
+                filterBar
+                mainContent
+            }
+
+            if let err = vm.errorMessage {
+                errorBanner(err)
+            }
+        }
+    }
+    private var filterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                Spacer().frame(width: 16)
+
+                ForEach(vm.filters, id: \.self) { filter in
+                    Button {
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            vm.selectedFilter = filter
+                        }
+                    } label: {
+                        Text(filter)
+                            .font(.system(size: 14, weight: .semibold, design: .rounded))
+                            .foregroundStyle(vm.selectedFilter == filter ? .white : .primary)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 9)
+                            .background(
+                                vm.selectedFilter == filter
+                                ? AnyView(
+                                    LinearGradient(
+                                        colors: [.orange, .green.opacity(0.85)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                  )
+                                : AnyView(Color(.systemGray6))
+                            )
+                            .clipShape(Capsule())
+                    }
+                }
+
+                Spacer().frame(width: 16)
+            }
+        }
+        .opacity(appeared ? 1 : 0)
+    }
+    
+    private var headerView: some View {
+        HStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Your Recipes")
+                    .font(.system(size: 32, weight: .heavy, design: .rounded))
+
+                Text("\(vm.recipes.count) recipe\(vm.recipes.count == 1 ? "" : "s") saved")
+                    .font(.system(size: 14))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 24)
+        .padding(.top, 20)
+        .padding(.bottom, 16)
+        .opacity(appeared ? 1 : 0)
+        .offset(y: appeared ? 0 : -10)
+    }
+    
+    private var mainContent: some View {
+        Group {
+            if vm.filteredRecipes.isEmpty && vm.selectedFilter != "All" {
+                RecipesEmptyState(filter: vm.selectedFilter) {
+                    showGenerateSheet = true
+                }
+            } else {
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        suggestionsSection
+                        spotlightSection
+                        recipesGridSection
+                    }
+                    .padding(.bottom, 40)
+                }
+            }
+        }
+    }
+    private var suggestionsSection: some View {
+        Group {
+            if isLoadingInitialSuggestions && unsavedSuggestions.isEmpty {
+                SuggestionsLoadingSection()
+                    .padding(.top, 10)
+
+            } else if !unsavedSuggestions.isEmpty || isLoadingMoreSuggestion {
+
+                VStack(alignment: .leading, spacing: 12) {
+
+                    HStack {
+                        Text("AI Suggestions")
+                            .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                        Spacer()
+                    }
+                    .padding(.horizontal, 20)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 14) {
+
+                            ForEach(unsavedSuggestions) { suggestion in
+                                let suggestionRecipe = recipeFromSuggestion(suggestion)
+
+                                RecipeCard(
+                                    recipe: suggestionRecipe,
+                                    onTap: { selectedSuggestionRecipe = suggestionRecipe },
+                                    onFavorite: { },
+                                    showFavorite: false
+                                )
+                                .frame(width: 180)
+                            }
+
+                            if isLoadingMoreSuggestion {
+                                SuggestionCookingCard()
+                            }
+                        }
+                        .padding(.horizontal, 16)
+                    }
+                }
+                .padding(.top, 10)
+            }
+        }
+    }
+    
+    private var spotlightSection: some View {
+        Group {
+            if vm.selectedFilter == "All" {
+                GenerateRecipeSpotlightCard(
+                    onTap: { showGenerateSheet = true },
+                    isGenerating: vm.isGenerating,
+                    step: vm.elapsedSeconds
+                )
+                .padding(.horizontal, 16)
+            }
+        }
+    }
+    
+    private var recipesGridSection: some View {
+        Group {
+            if vm.filteredRecipes.isEmpty && vm.selectedFilter == "All" {
+                RecipesEmptyState(filter: vm.selectedFilter) {
+                    showGenerateSheet = true
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, 20)
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+
+                    HStack {
+                        Text("Your Recipes")
+                            .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                        Spacer()
+
+                        if vm.filteredRecipes.count > 4 {
+                            Button {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                showAllRecipesScreen = true
+                            } label: {
+                                Text("See More")
+                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.orange)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 20)
+
+                    LazyVGrid(
+                        columns: [GridItem(.flexible()), GridItem(.flexible())],
+                        spacing: 14
+                    ) {
+                        ForEach(vm.previewRecipes) { recipe in
+                            RecipeCard(
+                                recipe: recipe,
+                                onTap: { selectedRecipe = recipe },
+                                onFavorite: { toggleFavoriteEverywhere(recipe) },
+                                isCooked: recipe.hasBeenCooked
+                            )
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            }
+        }
+    }
 }
+
 
 // MARK: - Helper Views
 
@@ -1429,7 +1453,7 @@ struct RecipeBouncingDotsView: View {
 
 // MARK: - Recipe Card
 
-private struct RecipeCard: View {
+struct RecipeCard: View {
     let recipe: Recipe
     let onTap: () -> Void
     let onFavorite: () -> Void
@@ -1610,7 +1634,7 @@ private struct RecipeCard: View {
     }
 }
 
-private struct RecipeCardButtonStyle: ButtonStyle {
+struct RecipeCardButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
@@ -1618,7 +1642,7 @@ private struct RecipeCardButtonStyle: ButtonStyle {
     }
 }
 
-private struct GenerateRecipeSpotlightCard: View {
+struct GenerateRecipeSpotlightCard: View {
     let onTap: () -> Void
     var isGenerating: Bool = false
     var step: Int = 0
@@ -2080,6 +2104,7 @@ struct AllRecipesView: View {
                         vm.deleteRecipe(recipe, userId: userId)
                         selectedRecipe = nil
                     },
+                    userId: userId,
                     onRecipeUpdated: { updated in
                         vm.updateRecipeAfterReview(updated, userId: userId)
                         selectedRecipe = updated
@@ -2097,7 +2122,7 @@ struct AllRecipesView: View {
                         }
                     },
                     onAddMissingToGrocery: onAddMissingToGrocery,
-                    onOpenGroceryList: onOpenGroceryList
+                    onOpenGroceryList: onOpenGroceryList,
                 )
             }
             .sheet(item: $recipeToReview) { recipe in
@@ -2136,7 +2161,7 @@ struct GenerateRecipeSheet: View {
     @State private var prompt = ""
     @State private var selectedQuick: String? = nil
     @FocusState private var focused: Bool
-    @Environment(\.dismiss) var dismiss
+    @Environment(\.dismiss) private var dismiss
 
     let quickPrompts = [
         "Something quick & healthy",
@@ -2260,15 +2285,18 @@ struct RecipeDetailView: View {
     var pantryIngredients: [String] = []
     let onFavorite: () -> Void
     let onDelete: () -> Void
+    let userId: String
     var onRecipeUpdated: ((Recipe) -> Void)? = nil
     var onMarkCooked: (() -> Void)? = nil
     var onLiveHelp: (() -> Void)? = nil
     var onAddMissingToGrocery: ((Recipe, [String]) -> Void)? = nil
     var onOpenGroceryList: (() -> Void)? = nil
+    
 
     @State private var activeTab = 0
     @State private var showDeleteConfirm = false
     @State private var showAssistantSheet = false
+    @StateObject private var mealPlanVM = MealPlanViewModel()
     @Environment(\.dismiss) var dismiss
 
     var difficultyColor: Color {
@@ -2280,6 +2308,11 @@ struct RecipeDetailView: View {
         default:
             return .orange
         }
+    }
+    
+    private func saveToPlan(day: String, type: String) {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        mealPlanVM.addToPlan(recipe: recipe, day: day, mealType: type, userId: userId)
     }
 
     private var cookedHistorySummary: String? {
@@ -2326,9 +2359,9 @@ struct RecipeDetailView: View {
                                 .foregroundStyle(.secondary)
                                 .background(Circle().fill(.ultraThinMaterial))
                         }
-
+                        
                         Spacer()
-
+                        
                         Button(action: {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             onFavorite()
@@ -2339,7 +2372,7 @@ struct RecipeDetailView: View {
                                 .padding(10)
                                 .background(Circle().fill(.ultraThinMaterial))
                         }
-
+                        
                         Button(action: { showDeleteConfirm = true }) {
                             Image(systemName: "trash")
                                 .font(.system(size: 18, weight: .semibold))
@@ -2347,6 +2380,26 @@ struct RecipeDetailView: View {
                                 .padding(10)
                                 .background(Circle().fill(.ultraThinMaterial))
                         }
+                        Button(action: {}) {
+                            Menu {
+                                ForEach(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], id: \.self) { day in
+                                    Menu(day) {
+                                        Button("Breakfast") { saveToPlan(day: day, type: "Breakfast") }
+                                        Button("Lunch") { saveToPlan(day: day, type: "Lunch") }
+                                        Button("Dinner") { saveToPlan(day: day, type: "Dinner") }
+                                    }
+                                }
+                            } label: {
+                                Label("Add to Meal Plan", systemImage: "calendar.badge.plus")
+                                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity) // Added to match your original UI width
+                                    .padding(.vertical, 12)
+                                    .background(Color.blue.gradient)
+                                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                            }
+                        }
+                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 56)
@@ -2538,12 +2591,19 @@ struct RecipeDetailView: View {
             }
             Button("Cancel", role: .cancel) { }
         }
+
         .sheet(isPresented: $showAssistantSheet) {
             RecipeAssistantSheet(recipe: recipe, assistant: assistant, onApplyRecipe: onRecipeUpdated)
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
+        .alert("Added to Plan", isPresented: $mealPlanVM.showSuccessAlert) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("\(recipe.title) has been added to your meal plan.")
+        }
     }
+   
 }
 
 struct SuggestedRecipeDetailView: View {
@@ -3415,6 +3475,7 @@ struct GroceryListView: View {
     @State private var matchAnimationStep = 0
     @State private var matchTimer: Timer?
     @State private var listener: ListenerRegistration?
+    @State private var expandedRecipeId: String? = nil // for dropdown
 
     private var itemsCollection: CollectionReference {
         Firestore.firestore()
@@ -3481,15 +3542,15 @@ struct GroceryListView: View {
                             }
                             Spacer(minLength: 0)
                         }
-
+                        
                         HStack(spacing: 8) {
                             Image(systemName: "magnifyingglass")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(.secondary)
-
+                            
                             TextField("Search recipe or ingredient", text: $searchText)
                                 .font(.system(size: 14, design: .rounded))
-
+                            
                             if !searchText.isEmpty {
                                 Button(action: { searchText = "" }) {
                                     Image(systemName: "xmark.circle.fill")
@@ -3507,7 +3568,7 @@ struct GroceryListView: View {
                                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
                         )
                     }
-
+                    
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 8) {
                             ForEach(GroceryStore.allCases) { store in
@@ -3543,7 +3604,7 @@ struct GroceryListView: View {
                             }
                         }
                     }
-
+                    
                     HStack(spacing: 10) {
                         Button(action: {
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -3568,7 +3629,7 @@ struct GroceryListView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(isMatchingStoreProducts || filteredItems.isEmpty)
-
+                        
                         Button(action: removePurchasedItems) {
                             Label("Remove Purchased", systemImage: "trash")
                                 .font(.system(size: 13, weight: .semibold, design: .rounded))
@@ -3581,7 +3642,7 @@ struct GroceryListView: View {
                         .buttonStyle(.plain)
                         .disabled(purchasedCount == 0)
                     }
-
+                    
                     if isMatchingStoreProducts {
                         HStack(spacing: 10) {
                             ProgressView()
@@ -3603,7 +3664,7 @@ struct GroceryListView: View {
                         )
                         .transition(.move(edge: .top).combined(with: .opacity))
                     }
-
+                    
                     if groupedItems.isEmpty {
                         VStack(spacing: 8) {
                             Text("🧺")
@@ -3621,34 +3682,50 @@ struct GroceryListView: View {
                         VStack(spacing: 12) {
                             ForEach(groupedItems) { group in
                                 VStack(alignment: .leading, spacing: 10) {
-                                    HStack {
-                                        Text("\(group.recipeEmoji) \(group.recipeTitle)")
-                                            .font(.system(size: 16, weight: .bold, design: .rounded))
-                                            .lineLimit(2)
-                                        Spacer(minLength: 0)
-                                        Text("\(group.remainingCount) left")
-                                            .font(.system(size: 11, weight: .bold, design: .rounded))
-                                            .foregroundStyle(group.remainingCount == 0 ? .green : .orange)
-                                            .padding(.horizontal, 8)
-                                            .padding(.vertical, 5)
-                                            .background((group.remainingCount == 0 ? Color.green : Color.orange).opacity(0.14))
-                                            .clipShape(Capsule())
-                                    }
-
-                                    VStack(spacing: 8) {
-                                        ForEach(group.items) { item in
-                                            GroceryListItemRow(
-                                                item: item,
-                                                store: selectedStore,
-                                                isMatching: isMatchingStoreProducts,
-                                                onTogglePurchased: { togglePurchased(item) },
-                                                onFindMatch: {
-                                                    Task {
-                                                        await matchStoreProducts(targetItems: [item], force: true)
-                                                    }
-                                                }
-                                            )
+                                    Button(action: {
+                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+                                            if expandedRecipeId == group.id {
+                                                expandedRecipeId = nil
+                                            } else {
+                                                expandedRecipeId = group.id
+                                            }
                                         }
+                                    }) {
+                                        HStack {
+                                            Text("\(group.recipeEmoji) \(group.recipeTitle)")
+                                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                                .lineLimit(2)
+                                                .multilineTextAlignment(.leading)
+                                            
+                                            Spacer()
+                                            
+                                            // Add a chevron to indicate it's a dropdown
+                                            Image(systemName: "chevron.right")
+                                                .font(.system(size: 14, weight: .bold))
+                                                .rotationEffect(.degrees(expandedRecipeId == group.id ? 90 : 0))
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                    
+                                    // 2. Only show items if this recipe is the one expanded
+                                    if expandedRecipeId == group.id {
+                                        VStack(spacing: 8) {
+                                            ForEach(group.items) { item in
+                                                GroceryListItemRow(
+                                                    item: item,
+                                                    store: selectedStore,
+                                                    isMatching: isMatchingStoreProducts,
+                                                    onTogglePurchased: { togglePurchased(item) },
+                                                    onFindMatch: {
+                                                        Task {
+                                                            await matchStoreProducts(targetItems: [item], force: true)
+                                                        }
+                                                    }
+                                                )
+                                            }
+                                        }
+                                        .transition(.opacity.combined(with: .move(edge: .top)))
                                     }
                                 }
                                 .padding(14)
@@ -3656,12 +3733,13 @@ struct GroceryListView: View {
                                 .clipShape(RoundedRectangle(cornerRadius: 16))
                                 .overlay(
                                     RoundedRectangle(cornerRadius: 16)
-                                        .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-                                )
+                                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                                    )
                             }
                         }
                     }
                 }
+
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
                 .padding(.bottom, 30)
