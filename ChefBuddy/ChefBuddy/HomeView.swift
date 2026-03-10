@@ -27,6 +27,7 @@ struct HomeView: View {
     @State private var appearAnimation = false
     @State private var showRecipePicker = false
     @State private var showVirtualPantry = false
+    @State private var showGroceryList = false
     @State private var selectedLiveRecipe: Recipe? = nil
     @State private var showLiveCooking = false
 
@@ -204,7 +205,13 @@ struct HomeView: View {
 
                             HStack(spacing: 12) {
                                 ToolButton(icon: "calendar", title: "Meal Plan", color: .green)
-                                ToolButton(icon: "cart.fill", title: "Grocery List", color: .orange)
+                                Button(action: {
+                                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                    showGroceryList = true
+                                }) {
+                                    ToolButton(icon: "cart.fill", title: "Grocery List", color: .orange)
+                                }
+                                .buttonStyle(.plain)
                             }
                             .padding(.horizontal, 24)
                         }
@@ -259,6 +266,17 @@ struct HomeView: View {
                 VirtualPantryView(assistant: assistant)
                     .environmentObject(authVM)
             }
+            .navigationDestination(isPresented: $showGroceryList) {
+                if let uid = authVM.userSession?.uid {
+                    GroceryListView(
+                        userId: uid,
+                        assistant: assistant,
+                        budgetPreference: authVM.currentUserProfile?.budget ?? "💵 $$ (Standard)"
+                    )
+                } else {
+                    Text("Sign in to view your grocery list.")
+                }
+            }
             .sheet(isPresented: $showRecipePicker) {
                 RecipePickerSheet(recipes: savedRecipes) { recipe in
                     selectedLiveRecipe = recipe
@@ -277,6 +295,7 @@ struct HomeView: View {
                 SuggestedRecipeDetailView(
                     recipe: recipe,
                     assistant: assistant,
+                    pantryIngredients: availablePantries.first(where: { $0.id == selectedPantryId })?.ingredients ?? [],
                     onSave: {
                         saveGeneratedPantryRecipe(recipe)
                         if let pantry = availablePantries.first(where: { $0.id == selectedPantryId }) {

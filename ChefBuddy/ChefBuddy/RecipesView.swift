@@ -82,6 +82,141 @@ struct Recipe: Identifiable, Codable, Equatable {
     var hasBeenCooked: Bool { cookedCount > 0 }
 }
 
+enum GroceryStore: String, CaseIterable, Codable, Identifiable {
+    case safeway = "Safeway"
+    case walmart = "Walmart"
+    case costco = "Costco"
+    case traderJoes = "Trader Joe's"
+
+    var id: String { rawValue }
+
+    var emoji: String {
+        switch self {
+        case .safeway: return "🛒"
+        case .walmart: return "🏬"
+        case .costco: return "📦"
+        case .traderJoes: return "🥕"
+        }
+    }
+}
+
+struct GroceryStoreProduct: Codable, Equatable, Identifiable {
+    var name: String
+    var brand: String
+    var size: String
+    var price: String
+    var section: String
+    var note: String
+
+    var id: String {
+        "\(name)|\(brand)|\(size)|\(price)"
+    }
+}
+
+struct GroceryListItem: Identifiable, Codable, Equatable {
+    @DocumentID var id: String?
+    var ingredientDisplay: String
+    var normalizedIngredient: String
+    var quantityHint: String
+    var recipeId: String?
+    var recipeTitle: String
+    var recipeEmoji: String
+    var isPurchased: Bool
+    var createdAt: Date
+    var matchesByStore: [String: [GroceryStoreProduct]]
+}
+
+private let ingredientStopWords: Set<String> = [
+    "a", "an", "and", "or", "of", "to", "taste", "for", "with", "from", "optional",
+    "cup", "cups", "tbsp", "tsp", "teaspoon", "teaspoons", "tablespoon", "tablespoons",
+    "oz", "ounce", "ounces", "g", "kg", "ml", "l", "lb", "lbs", "pound", "pounds",
+    "small", "medium", "large", "fresh", "dried", "minced", "diced", "chopped", "sliced",
+    "shredded", "grated", "ground", "crushed", "extra", "virgin", "boneless", "skinless",
+    "halved", "quartered", "rinsed", "washed", "peeled", "cubed", "thinly", "thickly",
+    "pinch", "handful", "dash", "pack", "packet", "can", "cans", "jar", "jars"
+]
+
+func normalizedIngredientKey(from raw: String) -> String {
+    let lowered = raw.lowercased()
+    let stripped = lowered.replacingOccurrences(of: "[^a-z0-9 ]", with: " ", options: .regularExpression)
+    let pieces = stripped
+        .split(separator: " ")
+        .map(String.init)
+        .filter { token in
+            guard token.count > 1 else { return false }
+            guard ingredientStopWords.contains(token) == false else { return false }
+            return Int(token) == nil
+        }
+
+    if pieces.isEmpty {
+        return stripped.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    return pieces.prefix(3).joined(separator: " ")
+}
+
+func quantityHint(from ingredientLine: String) -> String {
+    let trimmed = ingredientLine.trimmingCharacters(in: .whitespacesAndNewlines)
+    let components = trimmed.split(separator: " ")
+    guard !components.isEmpty else { return "" }
+    if components.count == 1 { return "" }
+
+    let first = String(components[0]).lowercased()
+    let second = String(components[1]).lowercased()
+    let looksNumeric = first.range(of: #"^\d+([./]\d+)?$"#, options: .regularExpression) != nil
+    let fraction = ["1/2", "1/3", "1/4", "2/3", "3/4", "¼", "½", "¾"].contains(first)
+    let unitLike = ["cup", "cups", "tbsp", "tsp", "oz", "g", "kg", "ml", "l", "lb", "lbs", "clove", "cloves", "can", "cans"]
+        .contains(second)
+
+    if looksNumeric || fraction {
+        return components.prefix(2).joined(separator: " ")
+    }
+    if unitLike {
+        return String(components[0])
+    }
+    return ""
+}
+
+private func ingredientTokenSet(_ raw: String) -> Set<String> {
+    let normalized = normalizedIngredientKey(from: raw)
+    return Set(normalized.split(separator: " ").map(String.init))
+}
+
+func pantryContainsIngredient(_ ingredient: String, pantryIngredients: [String]) -> Bool {
+    let key = normalizedIngredientKey(from: ingredient)
+    guard !key.isEmpty else { return true }
+    let keyTokens = ingredientTokenSet(key)
+
+    for pantryItem in pantryIngredients {
+        let pantryKey = normalizedIngredientKey(from: pantryItem)
+        guard !pantryKey.isEmpty else { continue }
+
+        if pantryKey == key || pantryKey.contains(key) || key.contains(pantryKey) {
+            return true
+        }
+
+        let pantryTokens = ingredientTokenSet(pantryKey)
+        let overlap = keyTokens.intersection(pantryTokens).count
+        if overlap >= 2 || (overlap == 1 && (keyTokens.count == 1 || pantryTokens.count == 1)) {
+            return true
+        }
+    }
+
+    return false
+}
+
+func missingIngredients(from ingredients: [String], pantryIngredients: [String]) -> [String] {
+    ingredients.filter { pantryContainsIngredient($0, pantryIngredients: pantryIngredients) == false }
+}
+
+func sanitizedDocumentId(_ raw: String) -> String {
+    let lowered = raw.lowercased()
+    let cleaned = lowered.replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
+    let trimmed = cleaned.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+    return trimmed.isEmpty ? UUID().uuidString : trimmed
+}
+
 func detectedCuisineTag(title: String, description: String, tags: [String]) -> String {
     let knownCuisines = [
         "Italian", "Mexican", "Indian", "Chinese", "Japanese", "Thai",
@@ -115,6 +250,108 @@ func detectedCuisineTag(title: String, description: String, tags: [String]) -> S
     }
 
     return "Fusion"
+}
+
+extension CookingAssistant {
+    func fetchStoreMatches(
+        ingredients: [String],
+        store: GroceryStore,
+        budgetPreference: String
+    ) async throws -> [String: [GroceryStoreProduct]] {
+        let uniqueIngredients = Array(Set(ingredients
+            .map { normalizedIngredientKey(from: $0) }
+            .filter { !$0.isEmpty }))
+            .sorted()
+
+        guard !uniqueIngredients.isEmpty else { return [:] }
+
+        let prompt = """
+        I need grocery product matches for \(store.rawValue).
+
+        Budget preference: \(budgetPreference)
+        Ingredients to match: \(uniqueIngredients.joined(separator: ", "))
+
+        Return ONLY valid JSON in this exact shape:
+        {
+          "items": [
+            {
+              "ingredient": "tofu",
+              "products": [
+                {
+                  "name": "Firm Tofu",
+                  "brand": "Nasoya",
+                  "size": "14 oz",
+                  "price": "$2.99",
+                  "section": "Produce",
+                  "note": "Best value for stir-fry"
+                }
+              ]
+            }
+          ]
+        }
+
+        Rules:
+        - Do not include markdown or backticks
+        - 2 to 3 products per ingredient
+        - price must be a string like $3.49
+        - products must be realistic for \(store.rawValue)
+        - prioritize options aligned with the budget preference
+        """
+
+        let response = try await getHelp(question: prompt)
+        guard let jsonString = Self.extractJSONObject(from: response),
+              let data = jsonString.data(using: .utf8),
+              let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = root["items"] as? [[String: Any]] else {
+            return [:]
+        }
+
+        var output: [String: [GroceryStoreProduct]] = [:]
+
+        for row in rows {
+            let ingredient = (row["ingredient"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let key = normalizedIngredientKey(from: ingredient)
+            guard !key.isEmpty else { continue }
+
+            let productsRaw = row["products"] as? [[String: Any]] ?? []
+            let products: [GroceryStoreProduct] = productsRaw.compactMap { product in
+                let name = (product["name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !name.isEmpty else { return nil }
+                return GroceryStoreProduct(
+                    name: name,
+                    brand: (product["brand"] as? String ?? "Store Brand").trimmingCharacters(in: .whitespacesAndNewlines),
+                    size: (product["size"] as? String ?? "Standard").trimmingCharacters(in: .whitespacesAndNewlines),
+                    price: (product["price"] as? String ?? "—").trimmingCharacters(in: .whitespacesAndNewlines),
+                    section: (product["section"] as? String ?? "Grocery").trimmingCharacters(in: .whitespacesAndNewlines),
+                    note: (product["note"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                )
+            }
+
+            if !products.isEmpty {
+                output[key] = products
+            }
+        }
+
+        return output
+    }
+
+    private static func extractJSONObject(from raw: String?) -> String? {
+        guard var json = raw else { return nil }
+
+        json = json
+            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let start = json.firstIndex(of: "{") {
+            json = String(json[start...])
+        }
+        if let end = json.lastIndex(of: "}") {
+            json = String(json[...end])
+        }
+
+        return json.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 // MARK: - ViewModel
@@ -545,8 +782,14 @@ struct RecipesView: View {
     @State private var isLoadingInitialSuggestions = false
     @State private var isLoadingMoreSuggestion = false
     @State private var liveHelpRecipe: Recipe? = nil
+    @State private var pantryIngredients: [String] = []
+    @State private var pantryListener: ListenerRegistration? = nil
+    @State private var showGroceryList = false
 
     private var userId: String { authVM.userSession?.uid ?? "" }
+    private var budgetPreference: String {
+        authVM.currentUserProfile?.budget ?? "💵 $$ (Standard)"
+    }
 
     private func timeString(_ seconds: Int) -> String {
         seconds < 60 ? "\(seconds)s" : "\(seconds / 60)m \(seconds % 60)s"
@@ -597,6 +840,98 @@ struct RecipesView: View {
 
     private var unsavedSuggestions: [RecipeSuggestion] {
         assistant.suggestions
+    }
+
+    private func startPantryListener() {
+        guard !userId.isEmpty else { return }
+
+        pantryListener?.remove()
+        pantryListener = Firestore.firestore()
+            .collection("users")
+            .document(userId)
+            .collection("pantrySpaces")
+            .addSnapshotListener { snap, _ in
+                guard let docs = snap?.documents else { return }
+
+                var all: [String] = []
+                for doc in docs {
+                    let data = doc.data()
+                    let virtualPantry = data["virtualPantry"] as? [String: [String]] ?? [:]
+                    all.append(contentsOf: virtualPantry.values.flatMap { $0 })
+                }
+
+                DispatchQueue.main.async {
+                    pantryIngredients = all
+                }
+            }
+    }
+
+    private func stopPantryListener() {
+        pantryListener?.remove()
+        pantryListener = nil
+    }
+
+    private func addMissingIngredientsToGroceryList(recipe: Recipe, missing: [String]) {
+        guard !userId.isEmpty else { return }
+        let trimmedMissing = missing
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !trimmedMissing.isEmpty else { return }
+
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        let collection = Firestore.firestore()
+            .collection("users")
+            .document(userId)
+            .collection("groceryList")
+            .document("active")
+            .collection("items")
+
+        let group = DispatchGroup()
+        let writeLock = NSLock()
+        var hasSuccessfulWrite = false
+
+        for ingredient in trimmedMissing {
+            let normalized = normalizedIngredientKey(from: ingredient)
+            guard !normalized.isEmpty else { continue }
+
+            let recipeIdentifier = recipe.id ?? recipe.title
+            let docId = sanitizedDocumentId("\(recipeIdentifier)-\(normalized)")
+            let payload = GroceryListItem(
+                id: nil,
+                ingredientDisplay: ingredient,
+                normalizedIngredient: normalized,
+                quantityHint: quantityHint(from: ingredient),
+                recipeId: recipe.id,
+                recipeTitle: recipe.title,
+                recipeEmoji: recipe.emoji,
+                isPurchased: false,
+                createdAt: Date(),
+                matchesByStore: [:]
+            )
+
+            group.enter()
+            do {
+                try collection.document(docId).setData(from: payload, merge: true) { error in
+                    if error == nil {
+                        writeLock.lock()
+                        hasSuccessfulWrite = true
+                        writeLock.unlock()
+                    }
+                    group.leave()
+                }
+            } catch {
+                group.leave()
+            }
+        }
+
+        group.notify(queue: .main) {
+            if hasSuccessfulWrite {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } else {
+                UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            }
+        }
     }
 
     private func loadInitialSuggestions() async {
@@ -908,6 +1243,7 @@ struct RecipesView: View {
         }
         .onAppear {
             vm.startListening(userId: userId)
+            startPantryListener()
 
             withAnimation(.spring(response: 0.55, dampingFraction: 0.8).delay(0.05)) {
                 appeared = true
@@ -915,6 +1251,7 @@ struct RecipesView: View {
         }
         .onDisappear {
             vm.stopListening()
+            stopPantryListener()
         }
         .task {
             if assistant.suggestions.isEmpty {
@@ -952,6 +1289,7 @@ struct RecipesView: View {
             RecipeDetailView(
                 recipe: recipe,
                 assistant: assistant,
+                pantryIngredients: pantryIngredients,
                 onFavorite: {
                     toggleFavoriteEverywhere(recipe)
                 },
@@ -974,6 +1312,12 @@ struct RecipesView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         liveHelpRecipe = recipe
                     }
+                },
+                onAddMissingToGrocery: { targetRecipe, missing in
+                    addMissingIngredientsToGroceryList(recipe: targetRecipe, missing: missing)
+                },
+                onOpenGroceryList: {
+                    showGroceryList = true
                 }
             )
         }
@@ -981,6 +1325,7 @@ struct RecipesView: View {
             SuggestedRecipeDetailView(
                     recipe: recipe,
                     assistant: assistant,
+                    pantryIngredients: pantryIngredients,
                     onSave: {
                         vm.saveSuggestedRecipe(recipe, userId: userId)
                         dislikeSuggestion(recipe)
@@ -1002,6 +1347,12 @@ struct RecipesView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         liveHelpRecipe = recipe
                     }
+                },
+                onAddMissingToGrocery: { targetRecipe, missing in
+                    addMissingIngredientsToGroceryList(recipe: targetRecipe, missing: missing)
+                },
+                onOpenGroceryList: {
+                    showGroceryList = true
                 }
             )
         }
@@ -1009,8 +1360,24 @@ struct RecipesView: View {
             AllRecipesView(
                 vm: vm,
                 userId: userId,
-                assistant: assistant
+                assistant: assistant,
+                pantryIngredients: pantryIngredients,
+                onAddMissingToGrocery: { recipe, missing in
+                    addMissingIngredientsToGroceryList(recipe: recipe, missing: missing)
+                },
+                onOpenGroceryList: {
+                    showGroceryList = true
+                }
             )
+        }
+        .sheet(isPresented: $showGroceryList) {
+            NavigationStack {
+                GroceryListView(
+                    userId: userId,
+                    assistant: assistant,
+                    budgetPreference: budgetPreference
+                )
+            }
         }
         .sheet(item: $recipeToReview) { recipe in
             RecipeReviewView(
@@ -1487,6 +1854,9 @@ struct AllRecipesView: View {
     @ObservedObject var vm: RecipesViewModel
     let userId: String
     let assistant: CookingAssistant
+    let pantryIngredients: [String]
+    var onAddMissingToGrocery: ((Recipe, [String]) -> Void)? = nil
+    var onOpenGroceryList: (() -> Void)? = nil
 
     @Environment(\.dismiss) private var dismiss
     @State private var selectedRecipe: Recipe? = nil
@@ -1704,6 +2074,7 @@ struct AllRecipesView: View {
                 RecipeDetailView(
                     recipe: recipe,
                     assistant: assistant,
+                    pantryIngredients: pantryIngredients,
                     onFavorite: { vm.toggleFavorite(recipe, userId: userId) },
                     onDelete: {
                         vm.deleteRecipe(recipe, userId: userId)
@@ -1724,7 +2095,9 @@ struct AllRecipesView: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                             liveHelpRecipe = recipe
                         }
-                    }
+                    },
+                    onAddMissingToGrocery: onAddMissingToGrocery,
+                    onOpenGroceryList: onOpenGroceryList
                 )
             }
             .sheet(item: $recipeToReview) { recipe in
@@ -1884,11 +2257,14 @@ struct GenerateRecipeSheet: View {
 struct RecipeDetailView: View {
     let recipe: Recipe
     @ObservedObject var assistant: CookingAssistant
+    var pantryIngredients: [String] = []
     let onFavorite: () -> Void
     let onDelete: () -> Void
     var onRecipeUpdated: ((Recipe) -> Void)? = nil
     var onMarkCooked: (() -> Void)? = nil
     var onLiveHelp: (() -> Void)? = nil
+    var onAddMissingToGrocery: ((Recipe, [String]) -> Void)? = nil
+    var onOpenGroceryList: (() -> Void)? = nil
 
     @State private var activeTab = 0
     @State private var showDeleteConfirm = false
@@ -1918,6 +2294,14 @@ struct RecipeDetailView: View {
         formatter.timeStyle = .none
         return formatter
     }()
+
+    private func dismissThenOpenGroceryListIfAvailable() {
+        guard let onOpenGroceryList else { return }
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            onOpenGroceryList()
+        }
+    }
 
     var body: some View {
         ScrollView(showsIndicators: false) {
@@ -2129,7 +2513,17 @@ struct RecipeDetailView: View {
                     .padding(.horizontal, 24)
 
                 if activeTab == 0 {
-                    IngredientsTab(ingredients: recipe.ingredients)
+                    IngredientsTab(
+                        ingredients: recipe.ingredients,
+                        pantryIngredients: pantryIngredients,
+                        onAddAllMissing: { missing in
+                            onAddMissingToGrocery?(recipe, missing)
+                            dismissThenOpenGroceryListIfAvailable()
+                        },
+                        onOpenGroceryList: {
+                            dismissThenOpenGroceryListIfAvailable()
+                        }
+                    )
                 } else {
                     InstructionsTab(steps: recipe.steps)
                 }
@@ -2155,10 +2549,13 @@ struct RecipeDetailView: View {
 struct SuggestedRecipeDetailView: View {
     let recipe: Recipe
     @ObservedObject var assistant: CookingAssistant
+    var pantryIngredients: [String] = []
     let onSave: () -> Void
     var onDislike: (() -> Void)? = nil
     var onRecipeUpdated: ((Recipe) -> Void)? = nil
     var onLiveHelp: (() -> Void)? = nil
+    var onAddMissingToGrocery: ((Recipe, [String]) -> Void)? = nil
+    var onOpenGroceryList: (() -> Void)? = nil
 
     @State private var activeTab = 0
     @State private var showAssistantSheet = false
@@ -2172,6 +2569,14 @@ struct SuggestedRecipeDetailView: View {
             return .red
         default:
             return .orange
+        }
+    }
+
+    private func dismissThenOpenGroceryListIfAvailable() {
+        guard let onOpenGroceryList else { return }
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            onOpenGroceryList()
         }
     }
 
@@ -2378,7 +2783,17 @@ struct SuggestedRecipeDetailView: View {
                     .padding(.horizontal, 24)
 
                 if activeTab == 0 {
-                    IngredientsTab(ingredients: recipe.ingredients)
+                    IngredientsTab(
+                        ingredients: recipe.ingredients,
+                        pantryIngredients: pantryIngredients,
+                        onAddAllMissing: { missing in
+                            onAddMissingToGrocery?(recipe, missing)
+                            dismissThenOpenGroceryListIfAvailable()
+                        },
+                        onOpenGroceryList: {
+                            dismissThenOpenGroceryListIfAvailable()
+                        }
+                    )
                 } else {
                     InstructionsTab(steps: recipe.steps)
                 }
@@ -2650,24 +3065,145 @@ private struct StatBadge: View {
     }
 }
 
+private struct MissingIngredientPanel: View {
+    let missingIngredients: [String]
+    var onAddAll: (() -> Void)? = nil
+    var onOpenList: (() -> Void)? = nil
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: missingIngredients.isEmpty ? "checkmark.seal.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(missingIngredients.isEmpty ? .green : .orange)
+
+                Text(
+                    missingIngredients.isEmpty
+                    ? "Everything for this recipe is already in your pantry"
+                    : "\(missingIngredients.count) ingredient\(missingIngredients.count == 1 ? "" : "s") missing from pantry"
+                )
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.primary)
+            }
+
+            if !missingIngredients.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 6) {
+                        ForEach(missingIngredients, id: \.self) { ingredient in
+                            Text(normalizedIngredientKey(from: ingredient))
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.orange)
+                                .padding(.horizontal, 9)
+                                .padding(.vertical, 5)
+                                .background(Color.orange.opacity(0.12))
+                                .clipShape(Capsule())
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    if let onAddAll {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            onAddAll()
+                        }) {
+                            Label("Add Missing to Grocery List", systemImage: "cart.badge.plus")
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(
+                                    LinearGradient(
+                                        colors: [.orange, .green.opacity(0.85)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    if let onOpenList {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            onOpenList()
+                        }) {
+                            Label("Open Grocery List", systemImage: "list.bullet.clipboard")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.primary.opacity(0.06))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14)
+                .stroke((missingIngredients.isEmpty ? Color.green : Color.orange).opacity(0.22), lineWidth: 1)
+        )
+    }
+}
+
 private struct IngredientsTab: View {
     let ingredients: [String]
+    var pantryIngredients: [String] = []
+    var onAddAllMissing: (([String]) -> Void)? = nil
+    var onOpenGroceryList: (() -> Void)? = nil
+
+    private var missingItems: [String] {
+        missingIngredients(from: ingredients, pantryIngredients: pantryIngredients)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            ForEach(Array(ingredients.enumerated()), id: \.offset) { _, item in
-                HStack(alignment: .top, spacing: 14) {
-                    Circle()
-                        .fill(Color.orange)
-                        .frame(width: 8, height: 8)
-                        .padding(.top, 6)
+            if !pantryIngredients.isEmpty {
+                MissingIngredientPanel(
+                    missingIngredients: missingItems,
+                    onAddAll: {
+                        guard !missingItems.isEmpty else { return }
+                        onAddAllMissing?(missingItems)
+                    },
+                    onOpenList: onOpenGroceryList
+                )
+            }
 
-                    Text(item)
-                        .font(.system(size: 15, design: .rounded))
-                        .lineSpacing(3)
+            ForEach(Array(ingredients.enumerated()), id: \.offset) { _, item in
+                let hasIngredient = pantryContainsIngredient(item, pantryIngredients: pantryIngredients)
+                HStack(alignment: .top, spacing: 14) {
+                    Image(systemName: pantryIngredients.isEmpty ? "circle.fill" : (hasIngredient ? "checkmark.circle.fill" : "xmark.circle.fill"))
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(
+                            pantryIngredients.isEmpty
+                            ? Color.orange
+                            : (hasIngredient ? Color.green : Color.orange)
+                        )
+                        .padding(.top, 2)
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(item)
+                            .font(.system(size: 15, design: .rounded))
+                            .lineSpacing(3)
+
+                        if !pantryIngredients.isEmpty {
+                            Text(hasIngredient ? "In pantry" : "Missing from pantry")
+                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                .foregroundStyle(hasIngredient ? .green : .orange)
+                        }
+                    }
 
                     Spacer()
                 }
+                .padding(.vertical, 2)
             }
         }
         .padding(.horizontal, 24)
@@ -2850,6 +3386,532 @@ struct NutritionBreakdownCard: View {
             .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.orange.opacity(0.15), lineWidth: 1))
             .padding(.horizontal, 24)
         }
+    }
+}
+
+// MARK: - Grocery List
+
+private struct GroceryRecipeGroup: Identifiable {
+    let id: String
+    let recipeTitle: String
+    let recipeEmoji: String
+    let items: [GroceryListItem]
+
+    var remainingCount: Int {
+        items.filter { !$0.isPurchased }.count
+    }
+}
+
+struct GroceryListView: View {
+    let userId: String
+    @ObservedObject var assistant: CookingAssistant
+    let budgetPreference: String
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var items: [GroceryListItem] = []
+    @State private var selectedStore: GroceryStore = .safeway
+    @State private var searchText = ""
+    @State private var isMatchingStoreProducts = false
+    @State private var matchAnimationStep = 0
+    @State private var matchTimer: Timer?
+    @State private var listener: ListenerRegistration?
+
+    private var itemsCollection: CollectionReference {
+        Firestore.firestore()
+            .collection("users")
+            .document(userId)
+            .collection("groceryList")
+            .document("active")
+            .collection("items")
+    }
+
+    private var filteredItems: [GroceryListItem] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !query.isEmpty else { return items }
+
+        return items.filter { item in
+            let text = "\(item.recipeTitle) \(item.ingredientDisplay) \(item.normalizedIngredient)".lowercased()
+            return text.contains(query)
+        }
+    }
+
+    private var groupedItems: [GroceryRecipeGroup] {
+        let grouped = Dictionary(grouping: filteredItems) { item in
+            item.recipeId ?? item.recipeTitle.lowercased()
+        }
+
+        return grouped.compactMap { id, values in
+            guard let first = values.first else { return nil }
+            return GroceryRecipeGroup(
+                id: id,
+                recipeTitle: first.recipeTitle,
+                recipeEmoji: first.recipeEmoji,
+                items: values.sorted { $0.createdAt > $1.createdAt }
+            )
+        }
+        .sorted { lhs, rhs in
+            lhs.recipeTitle.localizedCaseInsensitiveCompare(rhs.recipeTitle) == .orderedAscending
+        }
+    }
+
+    private var purchasedCount: Int {
+        items.filter { $0.isPurchased }.count
+    }
+
+    private var totalCount: Int {
+        items.count
+    }
+
+    var body: some View {
+        ZStack {
+            Color(.systemBackground).ignoresSafeArea()
+            Circle().fill(Color.orange.opacity(0.08)).blur(radius: 90).offset(x: -150, y: -260).ignoresSafeArea()
+            Circle().fill(Color.green.opacity(0.08)).blur(radius: 90).offset(x: 160, y: 320).ignoresSafeArea()
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Grocery List")
+                                    .font(.system(size: 28, weight: .heavy, design: .rounded))
+                                Text("\(totalCount) items • \(purchasedCount) purchased")
+                                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+
+                        HStack(spacing: 8) {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.secondary)
+
+                            TextField("Search recipe or ingredient", text: $searchText)
+                                .font(.system(size: 14, design: .rounded))
+
+                            if !searchText.isEmpty {
+                                Button(action: { searchText = "" }) {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                        )
+                    }
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(GroceryStore.allCases) { store in
+                                Button(action: {
+                                    guard selectedStore != store else { return }
+                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                                        selectedStore = store
+                                    }
+                                }) {
+                                    HStack(spacing: 6) {
+                                        Text(store.emoji)
+                                        Text(store.rawValue)
+                                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                    }
+                                    .foregroundStyle(selectedStore == store ? .white : .primary)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        selectedStore == store
+                                        ? AnyView(
+                                            LinearGradient(
+                                                colors: [.orange, .green.opacity(0.85)],
+                                                startPoint: .leading,
+                                                endPoint: .trailing
+                                            )
+                                        )
+                                        : AnyView(Color(.systemGray6))
+                                    )
+                                    .clipShape(Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+
+                    HStack(spacing: 10) {
+                        Button(action: {
+                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                            Task { await matchStoreProducts(force: true) }
+                        }) {
+                            HStack(spacing: 6) {
+                                Image(systemName: "sparkles")
+                                Text("Match Products")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(
+                                LinearGradient(
+                                    colors: [.orange, .green.opacity(0.85)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(isMatchingStoreProducts || filteredItems.isEmpty)
+
+                        Button(action: removePurchasedItems) {
+                            Label("Remove Purchased", systemImage: "trash")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.primary.opacity(0.06))
+                                .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(purchasedCount == 0)
+                    }
+
+                    if isMatchingStoreProducts {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                                .tint(.orange)
+                            Text("Finding \(selectedStore.rawValue) matches")
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                            RecipeBouncingDotsView(step: matchAnimationStep, color: .orange)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: 12)
+                                .fill(.ultraThinMaterial)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+                        )
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    if groupedItems.isEmpty {
+                        VStack(spacing: 8) {
+                            Text("🧺")
+                                .font(.system(size: 44))
+                            Text("No grocery items yet")
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                            Text("Add missing ingredients from any recipe to build a list here.")
+                                .font(.system(size: 13))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                    } else {
+                        VStack(spacing: 12) {
+                            ForEach(groupedItems) { group in
+                                VStack(alignment: .leading, spacing: 10) {
+                                    HStack {
+                                        Text("\(group.recipeEmoji) \(group.recipeTitle)")
+                                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                                            .lineLimit(2)
+                                        Spacer(minLength: 0)
+                                        Text("\(group.remainingCount) left")
+                                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                                            .foregroundStyle(group.remainingCount == 0 ? .green : .orange)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 5)
+                                            .background((group.remainingCount == 0 ? Color.green : Color.orange).opacity(0.14))
+                                            .clipShape(Capsule())
+                                    }
+
+                                    VStack(spacing: 8) {
+                                        ForEach(group.items) { item in
+                                            GroceryListItemRow(
+                                                item: item,
+                                                store: selectedStore,
+                                                isMatching: isMatchingStoreProducts,
+                                                onTogglePurchased: { togglePurchased(item) },
+                                                onFindMatch: {
+                                                    Task {
+                                                        await matchStoreProducts(targetItems: [item], force: true)
+                                                    }
+                                                }
+                                            )
+                                        }
+                                    }
+                                }
+                                .padding(14)
+                                .background(.ultraThinMaterial)
+                                .clipShape(RoundedRectangle(cornerRadius: 16))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16)
+                                        .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                                )
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, 30)
+            }
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarLeading) {
+                Button("Close") { dismiss() }
+            }
+        }
+        .onAppear {
+            startListening()
+            Task { await matchStoreProducts(force: false) }
+        }
+        .onDisappear {
+            listener?.remove()
+            listener = nil
+            stopMatchTimer()
+        }
+        .onChange(of: selectedStore) { _ in
+            Task { await matchStoreProducts(force: false) }
+        }
+        .onChange(of: items.map { ($0.id ?? "") + ($0.isPurchased ? "1" : "0") }.joined(separator: "|")) { _ in
+            Task { await matchStoreProducts(force: false) }
+        }
+    }
+
+    private func startListening() {
+        guard !userId.isEmpty else { return }
+
+        listener?.remove()
+        listener = itemsCollection
+            .order(by: "createdAt", descending: true)
+            .addSnapshotListener { snap, _ in
+                guard let docs = snap?.documents else { return }
+                let decoded = docs.compactMap { try? $0.data(as: GroceryListItem.self) }
+
+                DispatchQueue.main.async {
+                    items = decoded
+                }
+            }
+    }
+
+    private func togglePurchased(_ item: GroceryListItem) {
+        guard let id = item.id else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        itemsCollection.document(id).updateData(["isPurchased": !item.isPurchased])
+    }
+
+    private func removePurchasedItems() {
+        let purchased = items.filter { $0.isPurchased }
+        guard !purchased.isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        let batch = Firestore.firestore().batch()
+        for item in purchased {
+            guard let id = item.id else { continue }
+            batch.deleteDocument(itemsCollection.document(id))
+        }
+
+        batch.commit { error in
+            if error == nil {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } else {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+        }
+    }
+
+    private func startMatchTimer() {
+        stopMatchTimer()
+        matchTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            matchAnimationStep += 1
+        }
+    }
+
+    private func stopMatchTimer() {
+        matchTimer?.invalidate()
+        matchTimer = nil
+        matchAnimationStep = 0
+    }
+
+    private func matchStoreProducts(targetItems: [GroceryListItem]? = nil, force: Bool) async {
+        guard !isMatchingStoreProducts else { return }
+        let source = targetItems ?? filteredItems
+        let unresolved = source.filter { item in
+            guard !item.isPurchased else { return false }
+            if force { return true }
+            return (item.matchesByStore[selectedStore.rawValue] ?? []).isEmpty
+        }
+        guard !unresolved.isEmpty else { return }
+
+        await MainActor.run {
+            isMatchingStoreProducts = true
+            startMatchTimer()
+        }
+
+        do {
+            try await assistant.waitUntilReady()
+
+            let ingredients = unresolved.map { item in
+                item.normalizedIngredient.isEmpty
+                ? normalizedIngredientKey(from: item.ingredientDisplay)
+                : item.normalizedIngredient
+            }
+
+            let matches = try await assistant.fetchStoreMatches(
+                ingredients: ingredients,
+                store: selectedStore,
+                budgetPreference: budgetPreference
+            )
+
+            for item in unresolved {
+                guard let id = item.id else { continue }
+                let key = item.normalizedIngredient.isEmpty
+                    ? normalizedIngredientKey(from: item.ingredientDisplay)
+                    : item.normalizedIngredient
+                guard let products = matches[key], !products.isEmpty else { continue }
+
+                var updated = item
+                var allMatches = updated.matchesByStore
+                allMatches[selectedStore.rawValue] = products
+                updated.matchesByStore = allMatches
+                updated.id = nil
+                try itemsCollection.document(id).setData(from: updated, merge: true)
+            }
+
+            await MainActor.run {
+                isMatchingStoreProducts = false
+                stopMatchTimer()
+            }
+        } catch {
+            await MainActor.run {
+                isMatchingStoreProducts = false
+                stopMatchTimer()
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+        }
+    }
+}
+
+private struct GroceryListItemRow: View {
+    let item: GroceryListItem
+    let store: GroceryStore
+    let isMatching: Bool
+    let onTogglePurchased: () -> Void
+    let onFindMatch: () -> Void
+
+    private var selectedStoreMatches: [GroceryStoreProduct] {
+        item.matchesByStore[store.rawValue] ?? []
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .center, spacing: 10) {
+                Button(action: onTogglePurchased) {
+                    Image(systemName: item.isPurchased ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(item.isPurchased ? .green : .secondary)
+                }
+                .buttonStyle(.plain)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(item.ingredientDisplay)
+                        .font(.system(size: 14, weight: .semibold, design: .rounded))
+                        .foregroundStyle(item.isPurchased ? .secondary : .primary)
+                        .strikethrough(item.isPurchased, color: .secondary)
+                    if !item.quantityHint.isEmpty {
+                        Text("Qty: \(item.quantityHint)")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                if item.isPurchased {
+                    Text("Purchased")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.green.opacity(0.14))
+                        .clipShape(Capsule())
+                } else if selectedStoreMatches.isEmpty {
+                    Button(action: onFindMatch) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "sparkles")
+                            Text(isMatching ? "Matching..." : "Match")
+                        }
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.orange.opacity(0.14))
+                        .clipShape(Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isMatching)
+                } else {
+                    Text("Matched")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.blue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Color.blue.opacity(0.14))
+                        .clipShape(Capsule())
+                }
+            }
+
+            if !item.isPurchased, let best = selectedStoreMatches.first {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(best.name)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        Spacer(minLength: 0)
+                        Text(best.price)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(.orange)
+                    }
+                    Text("\(best.brand) • \(best.size) • \(best.section)")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+
+                    if !best.note.isEmpty {
+                        Text(best.note)
+                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                }
+                .padding(10)
+                .background(
+                    RoundedRectangle(cornerRadius: 10)
+                        .fill(Color.blue.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.blue.opacity(0.18), lineWidth: 1)
+                )
+            }
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(Color.primary.opacity(0.04))
+        )
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: item.isPurchased)
     }
 }
 
