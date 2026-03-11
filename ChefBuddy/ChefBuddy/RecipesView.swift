@@ -1033,6 +1033,34 @@ struct RecipesView: View {
         }
     }
 
+    private func openGroceryListSheetSafely() {
+        if selectedRecipe != nil {
+            selectedRecipe = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
+                showGroceryList = true
+            }
+            return
+        }
+
+        if selectedSuggestionRecipe != nil {
+            selectedSuggestionRecipe = nil
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) {
+                showGroceryList = true
+            }
+            return
+        }
+
+        if showAllRecipesScreen {
+            showAllRecipesScreen = false
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.34) {
+                showGroceryList = true
+            }
+            return
+        }
+
+        showGroceryList = true
+    }
+
     var body: some View {
         contentView
 
@@ -1089,7 +1117,8 @@ struct RecipesView: View {
                     toggleFavoriteEverywhere(recipe)
                 },
                 onDelete: {
-                    toggleFavoriteEverywhere(recipe)
+                    vm.deleteRecipe(recipe, userId: userId)
+                    selectedRecipe = nil
                 },
                 userId: userId,
                 onRecipeUpdated: { updated in
@@ -1112,7 +1141,7 @@ struct RecipesView: View {
                     addMissingIngredientsToGroceryList(recipe: targetRecipe, missing: missing)
                 },
                 onOpenGroceryList: {
-                    showGroceryList = true
+                    openGroceryListSheetSafely()
                 }
             )
         }
@@ -1147,7 +1176,7 @@ struct RecipesView: View {
                     addMissingIngredientsToGroceryList(recipe: targetRecipe, missing: missing)
                 },
                 onOpenGroceryList: {
-                    showGroceryList = true
+                    openGroceryListSheetSafely()
                 }
             )
         }
@@ -1161,7 +1190,7 @@ struct RecipesView: View {
                     addMissingIngredientsToGroceryList(recipe: recipe, missing: missing)
                 },
                 onOpenGroceryList: {
-                    showGroceryList = true
+                    openGroceryListSheetSafely()
                 }
             )
         }
@@ -1557,10 +1586,14 @@ struct RecipeCard: View {
                                 Text("Not Cooked")
                                     .font(.system(size: 10, weight: .bold, design: .rounded))
                             }
-                            .foregroundStyle(.white.opacity(0.86))
+                            .foregroundStyle(Color.primary.opacity(0.92))
                             .padding(.horizontal, 8)
                             .padding(.vertical, 3)
-                            .background(Color.white.opacity(0.10))
+                            .background(Color.primary.opacity(0.14))
+                            .overlay(
+                                Capsule()
+                                    .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+                            )
                             .clipShape(Capsule())
                         }
                         Spacer(minLength: 0)
@@ -1889,11 +1922,9 @@ struct AllRecipesView: View {
     @State private var searchText = ""
     @State private var selectedCuisine = "All Cuisines"
     @State private var selectedFocusFilter = "All"
+    @State private var showFilters = true
+    @State private var hasAppeared = false
     private let focusFilters = ["All", "Favorites", "Cooked"]
-
-    private var titleText: String {
-        vm.selectedFilter == "All" ? "All Recipes" : vm.selectedFilter
-    }
 
     private var availableCuisines: [String] {
         let values = vm.filteredRecipes.map {
@@ -1939,159 +1970,214 @@ struct AllRecipesView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 14, weight: .semibold))
-                                .foregroundStyle(.secondary)
+            ZStack {
+                ChefBuddyBackground()
 
-                            TextField("Search recipes, tags, cuisines...", text: $searchText)
-                                .font(.system(size: 15, design: .rounded))
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("All Recipes")
+                                        .font(.system(size: 30, weight: .heavy, design: .rounded))
 
-                            if !searchText.isEmpty {
-                                Button(action: { searchText = "" }) {
-                                    Image(systemName: "xmark.circle.fill")
+                                    Text("\(displayedRecipes.count) shown • \(vm.filteredRecipes.count) total")
+                                        .font(.system(size: 13, weight: .medium, design: .rounded))
                                         .foregroundStyle(.secondary)
                                 }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 11)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 14))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 14)
-                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-                        )
 
-                        HStack {
-                            Label("Filters", systemImage: "line.3.horizontal.decrease.circle")
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.secondary)
+                                Spacer()
 
-                            Spacer()
-
-                            Text("\(displayedRecipes.count)")
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .foregroundStyle(.secondary)
-
-                            if hasActiveFilters {
-                                Button("Reset") {
-                                    searchText = ""
-                                    selectedCuisine = "All Cuisines"
-                                    selectedFocusFilter = "All"
+                                Button(action: {
+                                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
+                                        showFilters.toggle()
+                                    }
+                                }) {
+                                    Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                                        .font(.system(size: 20, weight: .semibold))
+                                        .foregroundStyle(.orange, .green)
+                                        .padding(6)
+                                        .background(.ultraThinMaterial, in: Circle())
                                 }
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .foregroundStyle(.orange)
                                 .buttonStyle(.plain)
                             }
-                        }
 
-                        ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 8) {
-                                ForEach(focusFilters, id: \.self) { filter in
-                                    Button(action: {
-                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                        selectedFocusFilter = filter
-                                    }) {
-                                        Text(filter)
-                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                            .foregroundStyle(selectedFocusFilter == filter ? .white : .primary)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                            .background(
-                                                selectedFocusFilter == filter
-                                                ? AnyView(
-                                                    LinearGradient(
-                                                        colors: [.orange, .green.opacity(0.85)],
-                                                        startPoint: .leading,
-                                                        endPoint: .trailing
-                                                    )
-                                                )
-                                                : AnyView(Color(.systemGray6))
-                                            )
-                                            .clipShape(Capsule())
+                                Image(systemName: "magnifyingglass")
+                                    .font(.system(size: 14, weight: .semibold))
+                                    .foregroundStyle(.secondary)
+
+                                TextField("Search recipes, tags, cuisines...", text: $searchText)
+                                    .font(.system(size: 15, design: .rounded))
+
+                                if !searchText.isEmpty {
+                                    Button(action: { searchText = "" }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundStyle(.secondary)
                                     }
                                     .buttonStyle(.plain)
                                 }
                             }
-                            .padding(.horizontal, 1)
-                        }
-
-                        ScrollView(.horizontal, showsIndicators: false) {
-                            HStack(spacing: 8) {
-                                ForEach(availableCuisines, id: \.self) { cuisine in
-                                    Button(action: {
-                                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                        selectedCuisine = cuisine
-                                    }) {
-                                        Text(cuisine)
-                                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                            .foregroundStyle(selectedCuisine == cuisine ? .white : .primary)
-                                            .lineLimit(1)
-                                            .padding(.horizontal, 12)
-                                            .padding(.vertical, 8)
-                                            .background(
-                                                selectedCuisine == cuisine
-                                                ? AnyView(
-                                                    LinearGradient(
-                                                        colors: [.blue.opacity(0.85), .cyan.opacity(0.85)],
-                                                        startPoint: .leading,
-                                                        endPoint: .trailing
-                                                    )
-                                                )
-                                                : AnyView(Color(.systemGray6))
-                                            )
-                                            .clipShape(Capsule())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .padding(.horizontal, 1)
-                        }
-                    }
-                    .padding(.horizontal, 16)
-
-                    if displayedRecipes.isEmpty {
-                        VStack(spacing: 10) {
-                            Text("No recipes match your filters")
-                                .font(.system(size: 17, weight: .bold, design: .rounded))
-                            Text("Try clearing filters or searching with broader keywords.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 28)
-                    } else {
-                        LazyVGrid(
-                            columns: [GridItem(.flexible()), GridItem(.flexible())],
-                            spacing: 14
-                        ) {
-                            ForEach(displayedRecipes) { recipe in
-                                RecipeCard(
-                                    recipe: recipe,
-                                    onTap: { selectedRecipe = recipe },
-                                    onFavorite: { vm.toggleFavorite(recipe, userId: userId) },
-                                    isCooked: recipe.hasBeenCooked
-                                )
-                            }
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 11)
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                            )
                         }
                         .padding(.horizontal, 16)
+                        .padding(.top, 10)
+                        .opacity(hasAppeared ? 1 : 0)
+                        .offset(y: hasAppeared ? 0 : -10)
+
+                        if showFilters {
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text("Focus")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    if hasActiveFilters {
+                                        Button("Reset All") {
+                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                            searchText = ""
+                                            selectedCuisine = "All Cuisines"
+                                            selectedFocusFilter = "All"
+                                        }
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.orange)
+                                        .buttonStyle(.plain)
+                                    }
+                                }
+
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(focusFilters, id: \.self) { filter in
+                                            Button(action: {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                                                    selectedFocusFilter = filter
+                                                }
+                                            }) {
+                                                Text(filter)
+                                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                                    .foregroundStyle(selectedFocusFilter == filter ? .white : .primary)
+                                                    .padding(.horizontal, 12)
+                                                    .padding(.vertical, 8)
+                                                    .background(
+                                                        selectedFocusFilter == filter
+                                                        ? AnyView(
+                                                            LinearGradient(
+                                                                colors: [.orange, .green.opacity(0.85)],
+                                                                startPoint: .leading,
+                                                                endPoint: .trailing
+                                                            )
+                                                        )
+                                                        : AnyView(Color.primary.opacity(0.08))
+                                                    )
+                                                    .clipShape(Capsule())
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                }
+
+                                HStack {
+                                    Text("Cuisine")
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                }
+
+                                ScrollView(.horizontal, showsIndicators: false) {
+                                    HStack(spacing: 8) {
+                                        ForEach(availableCuisines, id: \.self) { cuisine in
+                                            Button(action: {
+                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                                                    selectedCuisine = cuisine
+                                                }
+                                            }) {
+                                                Text(cuisine)
+                                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                                    .foregroundStyle(selectedCuisine == cuisine ? .white : .primary)
+                                                    .lineLimit(1)
+                                                    .padding(.horizontal, 12)
+                                                    .padding(.vertical, 8)
+                                                    .background(
+                                                        selectedCuisine == cuisine
+                                                        ? AnyView(
+                                                            LinearGradient(
+                                                                colors: [.blue.opacity(0.85), .cyan.opacity(0.85)],
+                                                                startPoint: .leading,
+                                                                endPoint: .trailing
+                                                            )
+                                                        )
+                                                        : AnyView(Color.primary.opacity(0.08))
+                                                    )
+                                                    .clipShape(Capsule())
+                                            }
+                                            .buttonStyle(.plain)
+                                        }
+                                    }
+                                }
+                            }
+                            .padding(12)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                            )
+                            .padding(.horizontal, 16)
+                            .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
+                        }
+
+                        if displayedRecipes.isEmpty {
+                            VStack(spacing: 10) {
+                                Text("No recipes match your filters")
+                                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                                Text("Try clearing filters or searching with broader keywords.")
+                                    .font(.system(size: 13))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 24)
+                        } else {
+                            LazyVGrid(
+                                columns: [GridItem(.flexible()), GridItem(.flexible())],
+                                spacing: 14
+                            ) {
+                                ForEach(displayedRecipes) { recipe in
+                                    RecipeCard(
+                                        recipe: recipe,
+                                        onTap: { selectedRecipe = recipe },
+                                        onFavorite: { vm.toggleFavorite(recipe, userId: userId) },
+                                        isCooked: recipe.hasBeenCooked
+                                    )
+                                    .transition(.opacity.combined(with: .scale(scale: 0.98)))
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .animation(.spring(response: 0.34, dampingFraction: 0.84), value: displayedRecipes.map(\.id))
+                        }
                     }
+                    .padding(.bottom, 30)
                 }
-                .padding(.top, 8)
-                .padding(.bottom, 30)
             }
-            .navigationTitle(titleText)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("Close") {
                         dismiss()
                     }
+                }
+            }
+            .onAppear {
+                withAnimation(.spring(response: 0.45, dampingFraction: 0.85).delay(0.04)) {
+                    hasAppeared = true
                 }
             }
             .sheet(item: $selectedRecipe) { recipe in
@@ -2122,7 +2208,7 @@ struct AllRecipesView: View {
                         }
                     },
                     onAddMissingToGrocery: onAddMissingToGrocery,
-                    onOpenGroceryList: onOpenGroceryList,
+                    onOpenGroceryList: onOpenGroceryList
                 )
             }
             .sheet(item: $recipeToReview) { recipe in
@@ -2380,34 +2466,46 @@ struct RecipeDetailView: View {
                                 .padding(10)
                                 .background(Circle().fill(.ultraThinMaterial))
                         }
-                        Button(action: {}) {
-                            Menu {
-                                ForEach(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], id: \.self) { day in
-                                    Menu(day) {
-                                        Button("Breakfast") { saveToPlan(day: day, type: "Breakfast") }
-                                        Button("Lunch") { saveToPlan(day: day, type: "Lunch") }
-                                        Button("Dinner") { saveToPlan(day: day, type: "Dinner") }
-                                    }
-                                }
-                            } label: {
-                                Label("Add to Meal Plan", systemImage: "calendar.badge.plus")
-                                    .font(.system(size: 15, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.white)
-                                    .frame(maxWidth: .infinity) // Added to match your original UI width
-                                    .padding(.vertical, 12)
-                                    .background(Color.blue.gradient)
-                                    .clipShape(RoundedRectangle(cornerRadius: 14))
-                            }
-                        }
-                        .buttonStyle(.plain)
                     }
                     .padding(.horizontal, 20)
                     .padding(.top, 56)
                 }
 
                 VStack(alignment: .leading, spacing: 12) {
-                    Text(recipe.title)
-                        .font(.system(size: 28, weight: .heavy, design: .rounded))
+                    HStack(alignment: .top, spacing: 10) {
+                        Text(recipe.title)
+                            .font(.system(size: 28, weight: .heavy, design: .rounded))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+
+                        Menu {
+                            ForEach(["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"], id: \.self) { day in
+                                Menu(day) {
+                                    Button("Breakfast") { saveToPlan(day: day, type: "Breakfast") }
+                                    Button("Lunch") { saveToPlan(day: day, type: "Lunch") }
+                                    Button("Dinner") { saveToPlan(day: day, type: "Dinner") }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 5) {
+                                Image(systemName: "calendar.badge.plus")
+                                    .font(.system(size: 13, weight: .bold))
+                                Text("Plan")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(
+                                LinearGradient(
+                                    colors: [.blue.opacity(0.92), .cyan.opacity(0.86)],
+                                    startPoint: .leading,
+                                    endPoint: .trailing
+                                )
+                            )
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                    }
 
                     ScrollView(.horizontal, showsIndicators: false) {
                         HStack(spacing: 10) {
@@ -3476,6 +3574,8 @@ struct GroceryListView: View {
     @State private var matchTimer: Timer?
     @State private var listener: ListenerRegistration?
     @State private var expandedRecipeId: String? = nil // for dropdown
+    @State private var hasAppeared = false
+    @State private var heroPulse = false
 
     private var itemsCollection: CollectionReference {
         Firestore.firestore()
@@ -3523,227 +3623,18 @@ struct GroceryListView: View {
         items.count
     }
 
+    private var recipeGroupCount: Int {
+        groupedItems.count
+    }
+
+    private var itemStateSignature: String {
+        items.map { ($0.id ?? "") + ($0.isPurchased ? "1" : "0") }.joined(separator: "|")
+    }
+
     var body: some View {
         ZStack {
-            Color(.systemBackground).ignoresSafeArea()
-            Circle().fill(Color.orange.opacity(0.08)).blur(radius: 90).offset(x: -150, y: -260).ignoresSafeArea()
-            Circle().fill(Color.green.opacity(0.08)).blur(radius: 90).offset(x: 160, y: 320).ignoresSafeArea()
-
-            ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        HStack {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Grocery List")
-                                    .font(.system(size: 28, weight: .heavy, design: .rounded))
-                                Text("\(totalCount) items • \(purchasedCount) purchased")
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer(minLength: 0)
-                        }
-                        
-                        HStack(spacing: 8) {
-                            Image(systemName: "magnifyingglass")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            
-                            TextField("Search recipe or ingredient", text: $searchText)
-                                .font(.system(size: 14, design: .rounded))
-                            
-                            if !searchText.isEmpty {
-                                Button(action: { searchText = "" }) {
-                                    Image(systemName: "xmark.circle.fill")
-                                        .foregroundStyle(.secondary)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(.ultraThinMaterial)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-                        )
-                    }
-                    
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(GroceryStore.allCases) { store in
-                                Button(action: {
-                                    guard selectedStore != store else { return }
-                                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
-                                        selectedStore = store
-                                    }
-                                }) {
-                                    HStack(spacing: 6) {
-                                        Text(store.emoji)
-                                        Text(store.rawValue)
-                                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                    }
-                                    .foregroundStyle(selectedStore == store ? .white : .primary)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        selectedStore == store
-                                        ? AnyView(
-                                            LinearGradient(
-                                                colors: [.orange, .green.opacity(0.85)],
-                                                startPoint: .leading,
-                                                endPoint: .trailing
-                                            )
-                                        )
-                                        : AnyView(Color(.systemGray6))
-                                    )
-                                    .clipShape(Capsule())
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                    
-                    HStack(spacing: 10) {
-                        Button(action: {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            Task { await matchStoreProducts(force: true) }
-                        }) {
-                            HStack(spacing: 6) {
-                                Image(systemName: "sparkles")
-                                Text("Match Products")
-                                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                            }
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 8)
-                            .background(
-                                LinearGradient(
-                                    colors: [.orange, .green.opacity(0.85)],
-                                    startPoint: .leading,
-                                    endPoint: .trailing
-                                )
-                            )
-                            .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(isMatchingStoreProducts || filteredItems.isEmpty)
-                        
-                        Button(action: removePurchasedItems) {
-                            Label("Remove Purchased", systemImage: "trash")
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(Color.primary.opacity(0.06))
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(purchasedCount == 0)
-                    }
-                    
-                    if isMatchingStoreProducts {
-                        HStack(spacing: 10) {
-                            ProgressView()
-                                .tint(.orange)
-                            Text("Finding \(selectedStore.rawValue) matches")
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                            RecipeBouncingDotsView(step: matchAnimationStep, color: .orange)
-                            Spacer(minLength: 0)
-                        }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 10)
-                        .background(
-                            RoundedRectangle(cornerRadius: 12)
-                                .fill(.ultraThinMaterial)
-                        )
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 12)
-                                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
-                        )
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                    }
-                    
-                    if groupedItems.isEmpty {
-                        VStack(spacing: 8) {
-                            Text("🧺")
-                                .font(.system(size: 44))
-                            Text("No grocery items yet")
-                                .font(.system(size: 17, weight: .bold, design: .rounded))
-                            Text("Add missing ingredients from any recipe to build a list here.")
-                                .font(.system(size: 13))
-                                .foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 40)
-                    } else {
-                        VStack(spacing: 12) {
-                            ForEach(groupedItems) { group in
-                                VStack(alignment: .leading, spacing: 10) {
-                                    Button(action: {
-                                        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
-                                            if expandedRecipeId == group.id {
-                                                expandedRecipeId = nil
-                                            } else {
-                                                expandedRecipeId = group.id
-                                            }
-                                        }
-                                    }) {
-                                        HStack {
-                                            Text("\(group.recipeEmoji) \(group.recipeTitle)")
-                                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                                .lineLimit(2)
-                                                .multilineTextAlignment(.leading)
-                                            
-                                            Spacer()
-                                            
-                                            // Add a chevron to indicate it's a dropdown
-                                            Image(systemName: "chevron.right")
-                                                .font(.system(size: 14, weight: .bold))
-                                                .rotationEffect(.degrees(expandedRecipeId == group.id ? 90 : 0))
-                                                .foregroundStyle(.secondary)
-                                        }
-                                    }
-                                    .buttonStyle(.plain)
-                                    
-                                    // 2. Only show items if this recipe is the one expanded
-                                    if expandedRecipeId == group.id {
-                                        VStack(spacing: 8) {
-                                            ForEach(group.items) { item in
-                                                GroceryListItemRow(
-                                                    item: item,
-                                                    store: selectedStore,
-                                                    isMatching: isMatchingStoreProducts,
-                                                    onTogglePurchased: { togglePurchased(item) },
-                                                    onFindMatch: {
-                                                        Task {
-                                                            await matchStoreProducts(targetItems: [item], force: true)
-                                                        }
-                                                    }
-                                                )
-                                            }
-                                        }
-                                        .transition(.opacity.combined(with: .move(edge: .top)))
-                                    }
-                                }
-                                .padding(14)
-                                .background(.ultraThinMaterial)
-                                .clipShape(RoundedRectangle(cornerRadius: 16))
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 16)
-                                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-                                    )
-                            }
-                        }
-                    }
-                }
-
-                .padding(.horizontal, 16)
-                .padding(.top, 8)
-                .padding(.bottom, 30)
-            }
+            backgroundLayer
+            scrollContent
         }
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
@@ -3753,6 +3644,10 @@ struct GroceryListView: View {
         }
         .onAppear {
             startListening()
+            heroPulse = true
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.84).delay(0.05)) {
+                hasAppeared = true
+            }
             Task { await matchStoreProducts(force: false) }
         }
         .onDisappear {
@@ -3763,9 +3658,327 @@ struct GroceryListView: View {
         .onChange(of: selectedStore) { _ in
             Task { await matchStoreProducts(force: false) }
         }
-        .onChange(of: items.map { ($0.id ?? "") + ($0.isPurchased ? "1" : "0") }.joined(separator: "|")) { _ in
+        .onChange(of: itemStateSignature) { _ in
             Task { await matchStoreProducts(force: false) }
         }
+    }
+
+    private var backgroundLayer: some View {
+        ZStack {
+            ChefBuddyBackground()
+            Circle()
+                .fill(Color.orange.opacity(heroPulse ? 0.12 : 0.07))
+                .blur(radius: 90)
+                .offset(x: -170, y: -260)
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 2.0).repeatForever(autoreverses: true), value: heroPulse)
+            Circle()
+                .fill(Color.green.opacity(heroPulse ? 0.11 : 0.06))
+                .blur(radius: 90)
+                .offset(x: 170, y: 320)
+                .ignoresSafeArea()
+                .animation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true), value: heroPulse)
+        }
+    }
+
+    private var scrollContent: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 16) {
+                headerMetricsCard
+                searchBarCard
+                storeControlsCard
+
+                if isMatchingStoreProducts {
+                    matchingBanner
+                }
+
+                groupedListContent
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 30)
+        }
+    }
+
+    private var headerMetricsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Grocery List")
+                    .font(.system(size: 30, weight: .heavy, design: .rounded))
+                Spacer()
+                Text("\(purchasedCount)/\(totalCount)")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.green.opacity(0.14))
+                    .clipShape(Capsule())
+            }
+
+            HStack(spacing: 12) {
+                GroceryStatTile(icon: "fork.knife", value: "\(recipeGroupCount)", label: "Recipes", color: .blue)
+                GroceryStatTile(icon: "cart.fill", value: "\(totalCount)", label: "Items", color: .orange)
+                GroceryStatTile(icon: "checkmark.circle.fill", value: "\(purchasedCount)", label: "Purchased", color: .green)
+            }
+        }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+        .opacity(hasAppeared ? 1 : 0)
+        .offset(y: hasAppeared ? 0 : -12)
+    }
+
+    private var searchBarCard: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+
+            TextField("Search recipe or ingredient", text: $searchText)
+                .font(.system(size: 14, design: .rounded))
+
+            if !searchText.isEmpty {
+                Button(action: { searchText = "" }) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+        .opacity(hasAppeared ? 1 : 0)
+        .offset(y: hasAppeared ? 0 : -8)
+    }
+
+    private var storeControlsCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Store")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(GroceryStore.allCases) { store in
+                        let selected = selectedStore == store
+                        Button(action: {
+                            guard !selected else { return }
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                                selectedStore = store
+                            }
+                        }) {
+                            HStack(spacing: 6) {
+                                Text(store.emoji)
+                                Text(store.rawValue)
+                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            }
+                            .foregroundStyle(selected ? .white : .primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(
+                                selected
+                                ? AnyView(
+                                    LinearGradient(
+                                        colors: [.orange, .green.opacity(0.85)],
+                                        startPoint: .leading,
+                                        endPoint: .trailing
+                                    )
+                                )
+                                : AnyView(Color.primary.opacity(0.08))
+                            )
+                            .clipShape(Capsule())
+                            .scaleEffect(selected ? 1.02 : 1.0)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            HStack(spacing: 10) {
+                Button(action: {
+                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    Task { await matchStoreProducts(force: true) }
+                }) {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                        Text("Match Products")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 8)
+                    .background(
+                        LinearGradient(
+                            colors: [.orange, .green.opacity(0.85)],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(isMatchingStoreProducts || filteredItems.isEmpty)
+
+                Button(action: removePurchasedItems) {
+                    Label("Remove Purchased", systemImage: "trash")
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(purchasedCount == 0)
+            }
+        }
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+        .opacity(hasAppeared ? 1 : 0)
+        .offset(y: hasAppeared ? 0 : -6)
+    }
+
+    private var matchingBanner: some View {
+        HStack(spacing: 10) {
+            ProgressView()
+                .tint(.orange)
+            Text("Finding \(selectedStore.rawValue) matches")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+            RecipeBouncingDotsView(step: matchAnimationStep, color: .orange)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12)
+                .fill(.ultraThinMaterial)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(Color.orange.opacity(0.2), lineWidth: 1)
+        )
+        .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    @ViewBuilder
+    private var groupedListContent: some View {
+        if groupedItems.isEmpty {
+            VStack(spacing: 8) {
+                Text("🧺")
+                    .font(.system(size: 44))
+                Text("No grocery items yet")
+                    .font(.system(size: 17, weight: .bold, design: .rounded))
+                Text("Add missing ingredients from any recipe to build a list here.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 40)
+        } else {
+            VStack(spacing: 12) {
+                ForEach(groupedItems) { group in
+                    groupCard(group)
+                }
+            }
+        }
+    }
+
+    private func toggleGroupExpansion(_ group: GroceryRecipeGroup) {
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) {
+            if expandedRecipeId == group.id {
+                expandedRecipeId = nil
+            } else {
+                expandedRecipeId = group.id
+            }
+        }
+    }
+
+    private func groupCard(_ group: GroceryRecipeGroup) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button(action: { toggleGroupExpansion(group) }) {
+                HStack {
+                    Text("\(group.recipeEmoji) \(group.recipeTitle)")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+
+                    Spacer()
+
+                    Text("\(group.remainingCount) left")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(group.remainingCount == 0 ? .green : .orange)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background((group.remainingCount == 0 ? Color.green : Color.orange).opacity(0.14))
+                        .clipShape(Capsule())
+
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 14, weight: .bold))
+                        .rotationEffect(.degrees(expandedRecipeId == group.id ? 90 : 0))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+
+            HStack {
+                Button(role: .destructive) {
+                    removeRecipeGroup(group)
+                } label: {
+                    Label("Remove Recipe", systemImage: "trash.fill")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.red)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(Color.red.opacity(0.12))
+                        .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                Spacer()
+            }
+
+            if expandedRecipeId == group.id {
+                VStack(spacing: 8) {
+                    ForEach(group.items) { item in
+                        GroceryListItemRow(
+                            item: item,
+                            store: selectedStore,
+                            isMatching: isMatchingStoreProducts,
+                            onTogglePurchased: { togglePurchased(item) },
+                            onFindMatch: {
+                                Task {
+                                    await matchStoreProducts(targetItems: [item], force: true)
+                                }
+                            }
+                        )
+                    }
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+            }
+        }
+        .padding(14)
+        .background(.ultraThinMaterial)
+        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+        .opacity(hasAppeared ? 1 : 0)
+        .offset(y: hasAppeared ? 0 : 8)
     }
 
     private func startListening() {
@@ -3797,6 +4010,25 @@ struct GroceryListView: View {
 
         let batch = Firestore.firestore().batch()
         for item in purchased {
+            guard let id = item.id else { continue }
+            batch.deleteDocument(itemsCollection.document(id))
+        }
+
+        batch.commit { error in
+            if error == nil {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+            } else {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+            }
+        }
+    }
+
+    private func removeRecipeGroup(_ group: GroceryRecipeGroup) {
+        guard !group.items.isEmpty else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        let batch = Firestore.firestore().batch()
+        for item in group.items {
             guard let id = item.id else { continue }
             batch.deleteDocument(itemsCollection.document(id))
         }
@@ -3879,6 +4111,31 @@ struct GroceryListView: View {
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
             }
         }
+    }
+}
+
+private struct GroceryStatTile: View {
+    let icon: String
+    let value: String
+    let label: String
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(color)
+            Text(value)
+                .font(.system(size: 14, weight: .heavy, design: .rounded))
+                .foregroundStyle(.primary)
+            Text(label)
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 10)
+        .background(color.opacity(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 }
 
