@@ -8,6 +8,10 @@
 	<string>ChefBuddy needs microphone access so you can ask cooking questions hands-free while you cook</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>ChefBuddy uses speech recognition to transcribe your voice questions while cooking</string>
+	<key>GOOGLE_TTS_API_KEY</key>
+	<string>AIzaSyB9GLbyt9fy8h35fQy-VsaNof-PZPPqJGA</string>
+	<key>GOOGLE_TTS_VOICE</key>
+	<string>en-US-Journey-D</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

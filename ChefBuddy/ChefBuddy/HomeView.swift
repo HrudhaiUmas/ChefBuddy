@@ -29,7 +29,6 @@ struct HomeView: View {
     @State private var showVirtualPantry = false
     @State private var showGroceryList = false
     @State private var selectedLiveRecipe: Recipe? = nil
-    @State private var showLiveCooking = false
 
     @State private var savedRecipes: [Recipe] = []
     @State private var dailyPrompt = "What are we cooking today? 🍳"
@@ -284,15 +283,15 @@ struct HomeView: View {
             .sheet(isPresented: $showRecipePicker) {
                 RecipePickerSheet(recipes: savedRecipes) { recipe in
                     selectedLiveRecipe = recipe
-                    showLiveCooking = true
                 }
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
             }
-            .fullScreenCover(isPresented: $showLiveCooking) {
-                if let recipe = selectedLiveRecipe,
-                   let uid = authVM.userSession?.uid {
+            .fullScreenCover(item: $selectedLiveRecipe) { recipe in
+                if let uid = authVM.userSession?.uid {
                     LiveCookingView(recipe: recipe, assistant: assistant, userId: uid)
+                } else {
+                    Text("Sign in to use Live Cooking Help.")
                 }
             }
             .sheet(item: $selectedGeneratedPantryRecipe) { recipe in
@@ -329,8 +328,9 @@ struct HomeView: View {
                     },
                     onLiveHelp: {
                         selectedGeneratedPantryRecipe = nil
-                        selectedLiveRecipe = recipe
-                        showLiveCooking = true
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                            selectedLiveRecipe = recipe
+                        }
                     }
                 )
             }
