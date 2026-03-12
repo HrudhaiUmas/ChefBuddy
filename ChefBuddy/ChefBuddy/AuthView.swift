@@ -1,12 +1,16 @@
-//
-//  AuthView.swift
-//  ChefBuddy
-//
-//  Created by Hrudhai Umas on 3/4/26.
-//
+// AuthView.swift
+// The login and sign-up screen. Handles both email/password auth and Google Sign-In.
+// Validates input locally before calling AuthViewModel so the user gets instant
+// feedback (password strength, email format, password match) without a network round trip.
+// Calls onAuthSuccess() when Firebase confirms sign-in so the parent (OnboardingFlowView
+// or ContentView) can decide where to navigate next without this view knowing about routing.
 
 import SwiftUI
 
+import SwiftUI
+
+// Root view for authentication. Toggles between sign-up and log-in modes
+// in place so the form fields animate smoothly without a sheet transition.
 struct AuthView: View {
     @EnvironmentObject var authVM: AuthViewModel
 
@@ -17,25 +21,31 @@ struct AuthView: View {
     @State private var isSignUp = true
     @State private var showPassword = false
 
-    // Animation States
+
     @State private var appearAnimation = false
     @State private var backgroundRotation: Double = 0.0
 
     let onAuthSuccess: () -> Void
 
-    // MARK: - Validation Logic
 
+    // Regex check run on every keystroke so the email field icon gives
+    // real-time green/orange feedback without waiting for a submit tap.
     func isValidEmail(_ email: String) -> Bool {
         let emailRegEx = "[A-Z0-9a-z._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,64}"
         let emailPred = NSPredicate(format:"SELF MATCHES %@", emailRegEx)
         return emailPred.evaluate(with: email)
     }
 
+    // Enforces minimum 6 chars, at least one digit, and at least one symbol.
+    // These requirements are shown live in RequirementRow so the user knows
+    // exactly what to fix before the submit button enables.
     func isValidPassword(_ pass: String) -> Bool {
         let passwordRegex = "^(?=.*[0-9])(?=.*[!@#$%^&*()_+\\-=\\[\\]{};':\"\\\\|,.<>\\/?]).{6,}$"
         return NSPredicate(format: "SELF MATCHES %@", passwordRegex).evaluate(with: pass)
     }
 
+    // Gates the submit button. Computed so it re-evaluates on every state
+    // change — no manual calls needed to enable/disable the button.
     var isFormValid: Bool {
         if !isValidEmail(email) { return false }
         if !isValidPassword(password) { return false }
@@ -45,7 +55,7 @@ struct AuthView: View {
 
     var body: some View {
         ZStack {
-            // MARK: - Animated Ambient Background
+
             Color(.systemBackground).ignoresSafeArea()
 
             ZStack {
@@ -68,11 +78,11 @@ struct AuthView: View {
                 }
             }
 
-            // MARK: - Form Content
+
             ScrollView(showsIndicators: false) {
                 VStack(spacing: 28) {
 
-                    // Header
+
                     VStack(spacing: 8) {
                         Text(isSignUp ? "Join ChefBuddy" : "Welcome Back")
                             .font(.system(size: 32, weight: .bold, design: .rounded))
@@ -86,9 +96,9 @@ struct AuthView: View {
                     .offset(y: appearAnimation ? 0 : 20)
                     .opacity(appearAnimation ? 1 : 0)
 
-                    // Input Fields
+
                     VStack(spacing: 16) {
-                        // Email Field
+
                         HStack {
                             Image(systemName: "envelope.fill")
                                 .foregroundColor(email.isEmpty ? .secondary : (isValidEmail(email) ? .green : .orange))
@@ -106,7 +116,7 @@ struct AuthView: View {
                                 .stroke(isValidEmail(email) || email.isEmpty ? Color.clear : Color.orange.opacity(0.5), lineWidth: 1)
                         )
 
-                        // Password Section
+
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Image(systemName: "lock.fill")
@@ -145,7 +155,7 @@ struct AuthView: View {
                             }
                         }
 
-                        // Confirm Password
+
                         if isSignUp {
                             VStack(spacing: 8) {
                                 HStack {
@@ -187,7 +197,7 @@ struct AuthView: View {
                     .offset(y: appearAnimation ? 0 : 20)
                     .opacity(appearAnimation ? 1 : 0)
 
-                    // Error Message
+
                     if !authVM.errorMessage.isEmpty {
                         Text(authVM.errorMessage)
                             .foregroundColor(.red)
@@ -196,7 +206,7 @@ struct AuthView: View {
                             .padding(.horizontal)
                     }
 
-                    // Main Auth Button
+
                     Button(action: {
                         UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
                         if isSignUp {
@@ -218,7 +228,7 @@ struct AuthView: View {
                     .offset(y: appearAnimation ? 0 : 20)
                     .opacity(appearAnimation ? 1 : 0)
 
-                    // Toggle Login/Signup
+
                     Button(action: {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
@@ -232,7 +242,7 @@ struct AuthView: View {
                             .foregroundColor(.secondary)
                     }
 
-                    // Divider
+
                     HStack {
                         VStack { Divider() }
                         Text("OR").font(.caption.bold()).foregroundStyle(.tertiary)
@@ -240,7 +250,7 @@ struct AuthView: View {
                     }
                     .padding(.vertical, 8)
 
-                    // MARK: - Google Button (custom made this cause the Google one they provide is old)
+
                     ModernGoogleButton {
                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                         authVM.signInWithGoogle()
@@ -259,6 +269,9 @@ struct AuthView: View {
                 appearAnimation = true
             }
         }
+        // Watches for Firebase to confirm a successful sign-in and calls
+        // onAuthSuccess() so the parent can handle routing. Doing it here means
+        // AuthView never needs to import or know about navigation state.
         .onChange(of: authVM.userSession) { _, newValue in
             if newValue != nil {
                 onAuthSuccess()
@@ -267,6 +280,9 @@ struct AuthView: View {
     }
 }
 
+// A single password requirement indicator — checkmark when met, empty
+// circle when not. Shown below the password field only during sign-up
+// so sign-in mode stays clean and uncluttered.
 private struct RequirementRow: View {
     let isMet: Bool
     let text: String
@@ -284,8 +300,11 @@ private struct RequirementRow: View {
     }
 }
 
-// MARK: - Modern Google Button
 
+// Custom Google Sign-In button built from scratch because the official
+// Google Sign-In SDK button hasn't been updated for SwiftUI and looks dated.
+// Uses a multicolour gradient "G" to match Google's brand without importing
+// any Google UI assets.
 private struct ModernGoogleButton: View {
     let action: () -> Void
 
@@ -348,8 +367,10 @@ private struct ModernGoogleButton: View {
     }
 }
 
-// MARK: - Tiny press helper
 
+// Adds a subtle scale-down press animation to any view.
+// Applied to the Google button so it feels physically responsive,
+// matching the haptic feedback that fires on tap.
 private extension View {
     func pressableScale(_ isPressed: Binding<Bool>) -> some View {
         self.simultaneousGesture(

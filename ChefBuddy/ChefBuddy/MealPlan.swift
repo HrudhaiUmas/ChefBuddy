@@ -1,9 +1,18 @@
+// MealPlan.swift
+// Meal planning feature — lets users schedule recipes across a week.
+// Persists plan data to Firestore so it survives app restarts and can
+// later be used to auto-generate a grocery list from planned meals.
+
 import SwiftUI
 import FirebaseFirestore
 import FirebaseAuth
 import Combine
 
-// MARK: - Models
+import SwiftUI
+import FirebaseFirestore
+import FirebaseAuth
+import Combine
+
 
 struct MealPlanSlot: Identifiable, Codable {
     var id: String?
@@ -13,8 +22,6 @@ struct MealPlanSlot: Identifiable, Codable {
     var recipeTitle: String?
 }
 
-
-// MARK: - ViewModel
 
 class MealPlanViewModel: ObservableObject {
 
@@ -42,7 +49,7 @@ class MealPlanViewModel: ObservableObject {
                     }
                 }
             }
-        
+
     }
     @Published var showSuccessAlert = false
 
@@ -63,7 +70,7 @@ class MealPlanViewModel: ObservableObject {
             if error == nil {
                 DispatchQueue.main.async {
                     UINotificationFeedbackGenerator().notificationOccurred(.success)
-                    self.showSuccessAlert = true // This triggers your confirmation alert
+                    self.showSuccessAlert = true
                 }
             } else {
                 print("Error adding to plan: \(error?.localizedDescription ?? "Unknown error")")
@@ -93,13 +100,6 @@ class MealPlanViewModel: ObservableObject {
     }
 
 
-    // MARK: - Manual Add
-
-
-
-
-    // MARK: - AI Plan Generator
-
     func generateWeeklyPlan(
         assistant: CookingAssistant,
         userId: String
@@ -112,7 +112,7 @@ class MealPlanViewModel: ObservableObject {
 
         do {
 
-            // Fetch user preferences
+
             let userDoc = try await db.collection("users")
                 .document(userId)
                 .getDocument()
@@ -141,7 +141,7 @@ class MealPlanViewModel: ObservableObject {
             context += "Cook time preference: \(cookTime). "
             context += "Budget: \(budget). "
             context += "Serving size: \(servings)."
-            
+
 
             let existingSnap = try await db.collection("users")
                 .document(userId)
@@ -170,7 +170,7 @@ class MealPlanViewModel: ObservableObject {
             [
               {"day":"Monday","mealType":"Breakfast","recipeTitle":"Example"}
             ]
-            
+
             Generate a 7-day meal plan including Breakfast, Lunch, and Dinner for ONLY empty slots.
 
             Do not skip any meals.
@@ -227,13 +227,12 @@ class MealPlanViewModel: ObservableObject {
                 generated[i].id = "\(generated[i].day)-\(generated[i].mealType)"
             }
 
-            // Ensure IDs exist
+
             for i in generated.indices {
                 generated[i].id = "\(generated[i].day)-\(generated[i].mealType)"
             }
 
 
-            // Batch write
             let batch = db.batch()
 
             let collection = db.collection("users")
@@ -274,8 +273,6 @@ class MealPlanViewModel: ObservableObject {
     }
 
 
-    // Extract JSON array safely
-
     private func extractJSONArray(from raw: String) -> String? {
 
         guard let start = raw.firstIndex(of: "["),
@@ -286,8 +283,6 @@ class MealPlanViewModel: ObservableObject {
     }
 }
 
-
-// MARK: - Main View
 
 struct WeeklyMealPlanView: View {
 
@@ -589,7 +584,6 @@ struct WeeklyMealPlanView: View {
     }
 }
 
-// MARK: - UI Components
 
 struct DayButton: View {
     let day: String

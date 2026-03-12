@@ -1,9 +1,13 @@
-//
-//  VirtualPantryView.swift
-//  ChefBuddy
-//
-//  Created by Hrudhai Umas on 3/9/26.
-//
+// VirtualPantryView.swift
+// Lets users manage a persistent pantry of ingredients stored in Firestore.
+// Supports manual entry and AI-powered fridge scanning (photo → ingredient list).
+// The pantry feeds into recipe generation so ChefBuddy can suggest meals
+// based on what the user actually has at home rather than generic suggestions.
+
+import SwiftUI
+import FirebaseFirestore
+import FirebaseAuth
+import Combine
 
 import SwiftUI
 import PhotosUI
@@ -23,53 +27,53 @@ struct VirtualPantryView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var authVM: AuthViewModel
     @ObservedObject var assistant: CookingAssistant
-    
-    // Selected pantry data
+
+
     @State private var pantryCategories: [String: [String]] = [:]
     @State private var pantrySpaces: [PantrySpace] = []
     @State private var selectedPantryId: String? = nil
     @State private var selectedPantryName: String = ""
-    
-    // Create/Edit pantry flow
+
+
     @State private var showCreatePantrySheet = false
     @State private var editingPantryId: String? = nil
     @State private var newPantryName: String = ""
     @State private var newPantryEmoji: String = "🥑"
     @State private var newPantryColorTheme: String = "Orange"
-    
-    // Delete pantry flow
+
+
     @State private var pantryToDelete: PantrySpace? = nil
     @State private var showDeletePantryAlert = false
-    
-    // Ingredient input
+
+
     @State private var newIngredient: String = ""
     @State private var isScanning = false
     @State private var isFetchingDB = true
-    
+
     @State private var selectedPhotos: [PhotosPickerItem] = []
     @State private var showCamera = false
     @State private var cameraImage: UIImage?
     @State private var showClearAllConfirmation = false
-    
-    // Last scanned message
+
+
     @State private var lastScannedDate: Date? = nil
-    
-    // Edit item flow
+
+
     @State private var editingOriginalItem: String? = nil
     @State private var editingOriginalCategory: String? = nil
     @State private var editedIngredientName: String = ""
     @State private var editedIngredientCategory: String = "Other"
     @State private var showEditIngredientSheet = false
-    
-    // Drag and drop state
+
+
     @State private var draggedItem: String? = nil
     @State private var draggedFromCategory: String? = nil
-    
-    // Live relative time refresh
+
+
     let relativeTimeTimer = Timer.publish(every: 30.0, on: .main, in: .common).autoconnect()
     @State private var relativeTimeRefresh = Date()
-    
-    // Simulated scan progress
+
+
     @State private var scanProgressTimer: Timer? = nil
     @State private var scanStatusText: String = "Waking up ChefBuddy..."
     @State private var scanAnimationStep: Int = 0
@@ -81,42 +85,42 @@ struct VirtualPantryView: View {
         "Checking what belongs in the fridge...",
         "Finishing the pantry magic..."
     ]
-    
-    // UI Helpers for splitting Fridge vs Pantry
+
+
     let fridgeCategories = ["Produce", "Protein", "Dairy", "Condiments", "Beverages"]
     let pantryCategoriesList = ["Pantry", "Spices", "Snacks", "Other"]
-    
+
     var hasIngredients: Bool {
         !pantryCategories.values.flatMap { $0 }.isEmpty
     }
-    
+
     var totalIngredientCount: Int {
         pantryCategories.values.reduce(0) { $0 + $1.count }
     }
-    
+
     var allCategories: [String] {
         fridgeCategories + pantryCategoriesList
     }
-    
+
     var currentSpace: PantrySpace? {
         pantrySpaces.first(where: { $0.id == selectedPantryId })
     }
-    
+
     var activeColor: Color {
         colorForTheme(currentSpace?.colorTheme ?? "Orange")
     }
-    
+
     var lastScannedRelativeText: String? {
         guard let lastScannedDate else { return nil }
         let seconds = Int(Date().timeIntervalSince(lastScannedDate))
-        
+
         if seconds < 10 { return "Scanned just now" }
         else if seconds < 60 { return "Scanned \(seconds) sec ago" }
         else if seconds < 3600 { return "Scanned \(seconds / 60) min ago" }
         else if seconds < 86400 { let h = seconds / 3600; return "Scanned \(h) hr\(h == 1 ? "" : "s") ago" }
         else { let d = seconds / 86400; return "Scanned \(d) day\(d == 1 ? "" : "s") ago" }
     }
-    
+
     var body: some View {
         ZStack {
             LinearGradient(
@@ -125,12 +129,12 @@ struct VirtualPantryView: View {
                 endPoint: .bottom
             )
             .ignoresSafeArea()
-            
+
             if isFetchingDB {
                 ProgressView("Opening Pantry...")
                     .scaleEffect(1.2)
             } else if pantrySpaces.isEmpty {
-                // MARK: - Initial Onboarding / Creation Flow
+
                 PantryCardCreatorView(
                     name: $newPantryName,
                     emoji: $newPantryEmoji,
@@ -144,24 +148,24 @@ struct VirtualPantryView: View {
                 )
                 .transition(.opacity.combined(with: .scale))
             } else {
-                // MARK: - Main Pantry Interface
+
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 28) {
-                        
-                        // Header
+
+
                         VStack(spacing: 12) {
                             Text(currentSpace?.emoji ?? "🥑")
                                 .font(.system(size: 64))
                                 .padding(.top, 10)
                                 .shadow(color: activeColor.opacity(0.3), radius: 10, y: 5)
-                            
+
                             Text("Virtual Pantry")
                                 .font(.system(size: 34, weight: .heavy, design: .rounded))
-                            
+
                             Text(selectedPantryName)
                                 .font(.headline)
                                 .foregroundStyle(activeColor)
-                            
+
                             Text(hasIngredients
                                  ? "You’ve got \(totalIngredientCount) ingredient\(totalIngredientCount == 1 ? "" : "s") stocked in \(selectedPantryName)."
                                  : "\(selectedPantryName) is ready for its first haul.")
@@ -170,14 +174,14 @@ struct VirtualPantryView: View {
                                 .multilineTextAlignment(.center)
                                 .padding(.horizontal, 30)
                         }
-                        
+
                         pantrySwitcher
                             .padding(.horizontal, 24)
-                        
-                        // Action Bar
+
+
                         actionBar
                             .padding(.horizontal, 24)
-                        
+
                         if isScanning {
                             ScanStatusCard(
                                 pantryName: selectedPantryName,
@@ -188,17 +192,17 @@ struct VirtualPantryView: View {
                             )
                             .padding(.horizontal, 24)
                         }
-                        
+
                         if let lastScannedRelativeText, !isScanning {
                             HStack(spacing: 10) {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.green)
-                                
+
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(lastScannedRelativeText)
                                         .font(.callout.weight(.semibold))
                                         .foregroundStyle(.primary)
-                                    
+
                                     Text("\(selectedPantryName) was scanned successfully.")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -215,16 +219,16 @@ struct VirtualPantryView: View {
                             )
                             .padding(.horizontal, 24)
                         }
-                        
+
                         if !hasIngredients && !isScanning {
                             VStack(spacing: 10) {
                                 Image(systemName: "basket")
                                     .font(.system(size: 40))
                                     .foregroundStyle(.tertiary)
-                                
+
                                 Text("A little shelf-control goes a long way.")
                                     .font(.headline)
-                                
+
                                 Text("Scan groceries or add a few ingredients manually to fill up \(selectedPantryName).")
                                     .multilineTextAlignment(.center)
                                     .font(.subheadline)
@@ -233,8 +237,8 @@ struct VirtualPantryView: View {
                             }
                             .padding(.top, 4)
                         }
-                        
-                        // Fridge
+
+
                         StorageUnitView(
                             title: "The Fridge",
                             icon: "snowflake",
@@ -249,8 +253,8 @@ struct VirtualPantryView: View {
                             draggedItem: $draggedItem,
                             draggedFromCategory: $draggedFromCategory
                         )
-                        
-                        // Pantry
+
+
                         StorageUnitView(
                             title: "The Pantry",
                             icon: "door.french.closed",
@@ -282,7 +286,7 @@ struct VirtualPantryView: View {
                             .textInputAutocapitalization(.never)
                             .autocorrectionDisabled()
                     }
-                    
+
                     Section("Category") {
                         Picker("Category", selection: $editedIngredientCategory) {
                             ForEach(allCategories, id: \.self) { category in
@@ -361,9 +365,8 @@ struct VirtualPantryView: View {
             loadPantrySpaces()
         }
     }
-    
-    // MARK: - Subviews
-    
+
+
     private var pantrySwitcher: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
@@ -386,13 +389,13 @@ struct VirtualPantryView: View {
                     .clipShape(Capsule())
                 }
             }
-            
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
                     ForEach(pantrySpaces) { space in
                         let isSelected = selectedPantryId == space.id
                         let spaceColor = colorForTheme(space.colorTheme)
-                        
+
                         Button(action: {
                             switchToPantry(space)
                         }) {
@@ -433,7 +436,7 @@ struct VirtualPantryView: View {
                             } label: {
                                 Label("Edit Space", systemImage: "pencil")
                             }
-                            
+
                             Button(role: .destructive) {
                                 pantryToDelete = space
                                 showDeletePantryAlert = true
@@ -445,14 +448,14 @@ struct VirtualPantryView: View {
                 }
                 .padding(.vertical, 2)
             }
-            
+
             Text("Tip: Press and hold a space to edit or delete it.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .padding(.top, -4)
         }
     }
-    
+
     private var actionBar: some View {
         VStack(spacing: 16) {
             HStack(spacing: 12) {
@@ -469,7 +472,7 @@ struct VirtualPantryView: View {
                     .submitLabel(.done)
                     .disabled(isScanning || selectedPantryId == nil)
                     .onSubmit(addManualIngredient)
-                
+
                 Button(action: addManualIngredient) {
                     Image(systemName: "plus")
                         .font(.system(size: 20, weight: .bold))
@@ -485,7 +488,7 @@ struct VirtualPantryView: View {
                 }
                 .disabled(newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isScanning || selectedPantryId == nil)
             }
-            
+
             HStack(spacing: 12) {
                 PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 5, matching: .images) {
                     ActionButton(icon: "photo.on.rectangle.angled", title: "Scan Gallery", color: .blue, isDisabled: isScanning || selectedPantryId == nil)
@@ -494,13 +497,13 @@ struct VirtualPantryView: View {
                 .onChange(of: selectedPhotos) { newItems in
                     Task { await processSelectedPhotos(newItems) }
                 }
-                
+
                 Button(action: { showCamera = true }) {
                     ActionButton(icon: "camera.viewfinder", title: "Use Camera", color: .green, isDisabled: isScanning || selectedPantryId == nil)
                 }
                 .disabled(isScanning || selectedPantryId == nil)
             }
-            
+
             if hasIngredients {
                 Button(role: .destructive) {
                     showClearAllConfirmation = true
@@ -524,16 +527,15 @@ struct VirtualPantryView: View {
             }
         }
     }
-    
-    // MARK: - Logic Helpers
-    
+
+
     private func resetNewPantryForm() {
         newPantryName = ""
         newPantryEmoji = "🥑"
         newPantryColorTheme = "Orange"
         editingPantryId = nil
     }
-    
+
     private func colorForTheme(_ theme: String) -> Color {
         switch theme {
         case "Blue": return .blue
@@ -547,7 +549,7 @@ struct VirtualPantryView: View {
         default: return .orange
         }
     }
-    
+
     private func pantrySpacesCollection() -> CollectionReference? {
         guard let uid = authVM.userSession?.uid else { return nil }
         return Firestore.firestore()
@@ -555,18 +557,18 @@ struct VirtualPantryView: View {
             .document(uid)
             .collection("pantrySpaces")
     }
-    
+
     private func loadPantrySpaces() {
         guard let collection = pantrySpacesCollection() else { return }
-        
+
         isFetchingDB = true
-        
+
         collection.getDocuments { snapshot, error in
             guard let docs = snapshot?.documents else {
                 self.isFetchingDB = false
                 return
             }
-            
+
             if docs.isEmpty {
                 withAnimation {
                     self.pantrySpaces = []
@@ -574,7 +576,7 @@ struct VirtualPantryView: View {
                 }
                 return
             }
-            
+
             let spaces = docs.map { doc in
                 PantrySpace(
                     id: doc.documentID,
@@ -584,11 +586,11 @@ struct VirtualPantryView: View {
                 )
             }
             .sorted { $0.name < $1.name }
-            
+
             withAnimation {
                 self.pantrySpaces = spaces
             }
-            
+
             if let currentSelected = self.selectedPantryId,
                let existing = spaces.first(where: { $0.id == currentSelected }) {
                 self.selectedPantryName = existing.name
@@ -602,13 +604,13 @@ struct VirtualPantryView: View {
             }
         }
     }
-    
+
     private func savePantrySpace() {
         let cleanName = newPantryName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanName.isEmpty, let collection = pantrySpacesCollection() else { return }
-        
+
         if let editId = editingPantryId {
-            // Update Existing Space
+
             collection.document(editId).updateData([
                 "name": cleanName,
                 "emoji": newPantryEmoji,
@@ -622,7 +624,7 @@ struct VirtualPantryView: View {
                         self.pantrySpaces[idx].emoji = newPantryEmoji
                         self.pantrySpaces[idx].colorTheme = newPantryColorTheme
                         self.pantrySpaces.sort { $0.name < $1.name }
-                        
+
                         if self.selectedPantryId == editId {
                             self.selectedPantryName = cleanName
                         }
@@ -632,7 +634,7 @@ struct VirtualPantryView: View {
                 self.resetNewPantryForm()
             }
         } else {
-            // Create New Space
+
             let doc = collection.document()
             let payload: [String: Any] = [
                 "name": cleanName,
@@ -642,7 +644,7 @@ struct VirtualPantryView: View {
                 "createdAt": FieldValue.serverTimestamp(),
                 "updatedAt": FieldValue.serverTimestamp()
             ]
-            
+
             doc.setData(payload) { error in
                 guard error == nil else { return }
                 let newSpace = PantrySpace(id: doc.documentID, name: cleanName, emoji: newPantryEmoji, colorTheme: newPantryColorTheme)
@@ -660,14 +662,14 @@ struct VirtualPantryView: View {
             }
         }
     }
-    
+
     private func deletePantrySpace(_ space: PantrySpace) {
         guard let collection = pantrySpacesCollection() else { return }
-        
+
         collection.document(space.id).delete() { _ in
             withAnimation(.spring()) {
                 self.pantrySpaces.removeAll(where: { $0.id == space.id })
-                
+
                 if self.selectedPantryId == space.id {
                     if let first = self.pantrySpaces.first {
                         self.switchToPantry(first)
@@ -680,7 +682,7 @@ struct VirtualPantryView: View {
             }
         }
     }
-    
+
     private func switchToPantry(_ space: PantrySpace) {
         guard selectedPantryId != space.id else { return }
         withAnimation {
@@ -689,14 +691,14 @@ struct VirtualPantryView: View {
         }
         loadPantry(spaceId: space.id, spaceName: space.name)
     }
-    
+
     private func loadPantry(spaceId: String, spaceName: String) {
         guard let collection = pantrySpacesCollection() else { return }
-        
+
         collection.document(spaceId).getDocument { snapshot, error in
             var newCategories: [String: [String]] = [:]
             var newLastScannedDate: Date? = nil
-            
+
             if let data = snapshot?.data() {
                 if let savedPantry = data["virtualPantry"] as? [String: [String]] {
                     newCategories = savedPantry
@@ -705,7 +707,7 @@ struct VirtualPantryView: View {
                     newLastScannedDate = timestamp.dateValue()
                 }
             }
-            
+
             withAnimation(.easeIn(duration: 0.25)) {
                 self.pantryCategories = newCategories
                 self.lastScannedDate = newLastScannedDate
@@ -715,30 +717,30 @@ struct VirtualPantryView: View {
             }
         }
     }
-    
+
     private func savePantry(isScan: Bool = false) {
         guard let collection = pantrySpacesCollection(),
               let selectedPantryId else { return }
-        
+
         var cleanedPantry = pantryCategories
         for (key, value) in cleanedPantry {
             if value.isEmpty {
                 cleanedPantry.removeValue(forKey: key)
             }
         }
-        
+
         var payload: [String: Any] = [
             "virtualPantry": cleanedPantry,
             "updatedAt": FieldValue.serverTimestamp()
         ]
-        
+
         if isScan {
             payload["lastScannedAt"] = FieldValue.serverTimestamp()
         }
-        
+
         collection.document(selectedPantryId).setData(payload, merge: true)
     }
-    
+
     private func clearAllIngredients() {
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             pantryCategories.removeAll()
@@ -746,13 +748,13 @@ struct VirtualPantryView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         savePantry(isScan: false)
     }
-    
+
     private func addManualIngredient() {
         let clean = newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !clean.isEmpty else { return }
-        
+
         let itemToAdd = normalizeIngredientItem(clean)
-        
+
         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
             var items = pantryCategories["Other"] ?? []
             if !items.contains(itemToAdd) {
@@ -760,19 +762,19 @@ struct VirtualPantryView: View {
                 pantryCategories["Other"] = items
             }
         }
-        
+
         newIngredient = ""
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         savePantry(isScan: false)
     }
-    
+
     private func processSelectedPhotos(_ items: [PhotosPickerItem]) async {
         guard !items.isEmpty else { return }
-        
+
         await MainActor.run {
             startScanAnimation()
         }
-        
+
         var images: [UIImage] = []
         for item in items {
             if let data = try? await item.loadTransferable(type: Data.self),
@@ -780,10 +782,10 @@ struct VirtualPantryView: View {
                 images.append(image)
             }
         }
-        
+
         do {
             let scannedCategories = try await assistant.scanMultipleImages(images: images)
-            
+
             await MainActor.run {
                 mergeIngredients(scannedCategories)
                 finishScanAnimation()
@@ -794,20 +796,20 @@ struct VirtualPantryView: View {
                 stopScanAnimation(resetProgress: true)
             }
         }
-        
+
         await MainActor.run {
             selectedPhotos.removeAll()
         }
     }
-    
+
     private func processCameraImage(_ image: UIImage) async {
         await MainActor.run {
             startScanAnimation()
         }
-        
+
         do {
             let scannedCategories = try await assistant.scanMultipleImages(images: [image])
-            
+
             await MainActor.run {
                 mergeIngredients(scannedCategories)
                 finishScanAnimation()
@@ -818,63 +820,63 @@ struct VirtualPantryView: View {
                 stopScanAnimation(resetProgress: true)
             }
         }
-        
+
         await MainActor.run {
             cameraImage = nil
         }
     }
-    
+
     private func mergeIngredients(_ newCategories: [String: [String]]) {
         withAnimation(.spring()) {
             for (category, items) in newCategories {
                 var currentItems = pantryCategories[category] ?? []
-                
+
                 for item in items {
                     let cleanedItem = normalizeIngredientItem(item)
                     if !currentItems.contains(cleanedItem) {
                         currentItems.append(cleanedItem)
                     }
                 }
-                
+
                 if !currentItems.isEmpty {
                     pantryCategories[category] = currentItems
                 }
             }
         }
-        
+
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         savePantry(isScan: true)
         lastScannedDate = Date()
     }
-    
+
     private func openEditSheet(item: String, category: String) {
         editingOriginalItem = item
         editingOriginalCategory = category
-        
+
         let parts = item.split(separator: " ", maxSplits: 1)
         if parts.count == 2 {
             editedIngredientName = String(parts[1])
         } else {
             editedIngredientName = item
         }
-        
+
         editedIngredientCategory = category
         showEditIngredientSheet = true
     }
-    
+
     private func saveEditedIngredient() {
         guard let originalItem = editingOriginalItem,
               let originalCategory = editingOriginalCategory else {
             return
         }
-        
+
         let cleanedName = editedIngredientName
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased()
-        
+
         guard !cleanedName.isEmpty else { return }
-        
-        // Preserve original emoji if one exists, otherwise generate one
+
+
         let updatedItem: String
         let oldParts = originalItem.split(separator: " ", maxSplits: 1)
         if oldParts.count == 2 {
@@ -882,60 +884,60 @@ struct VirtualPantryView: View {
         } else {
             updatedItem = normalizeIngredientItem(cleanedName)
         }
-        
+
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             removeItem(originalItem, from: originalCategory)
-            
+
             var targetItems = pantryCategories[editedIngredientCategory] ?? []
             if !targetItems.contains(updatedItem) {
                 targetItems.insert(updatedItem, at: 0)
                 pantryCategories[editedIngredientCategory] = targetItems
             }
         }
-        
+
         savePantry(isScan: false)
-        
+
         showEditIngredientSheet = false
         editingOriginalItem = nil
         editingOriginalCategory = nil
         editedIngredientName = ""
         editedIngredientCategory = "Other"
     }
-    
+
     private func removeItem(_ item: String, from category: String) {
         pantryCategories[category]?.removeAll(where: { $0 == item })
         if pantryCategories[category]?.isEmpty == true {
             pantryCategories.removeValue(forKey: category)
         }
     }
-    
+
     private func moveIngredient(_ item: String, from sourceCategory: String, to destinationCategory: String) {
         guard sourceCategory != destinationCategory else { return }
-        
+
         withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
             pantryCategories[sourceCategory]?.removeAll(where: { $0 == item })
-            
+
             if pantryCategories[sourceCategory]?.isEmpty == true {
                 pantryCategories.removeValue(forKey: sourceCategory)
             }
-            
+
             var destinationItems = pantryCategories[destinationCategory] ?? []
             if !destinationItems.contains(item) {
                 destinationItems.insert(item, at: 0)
                 pantryCategories[destinationCategory] = destinationItems
             }
         }
-        
+
         draggedItem = nil
         draggedFromCategory = nil
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         savePantry(isScan: false)
     }
-    
+
     private func normalizeIngredientItem(_ item: String) -> String {
         let trimmed = item.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let parts = trimmed.split(separator: " ", maxSplits: 1)
-        
+
         if parts.count == 2 {
             return "\(parts[0]) \(parts[1])"
         } else {
@@ -944,15 +946,15 @@ struct VirtualPantryView: View {
             return "\(randomEmoji) \(trimmed)"
         }
     }
-    
+
     private func startScanAnimation() {
         stopScanAnimation(resetProgress: true)
-        
+
         isScanning = true
         scanAnimationStep = 0
         scanStatusText = scanStatusMessages[0]
-        
-        // Endless loop animating until the API returns
+
+
         scanProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: true) { _ in
             let nextStep = (scanAnimationStep + 1) % scanStatusMessages.count
             withAnimation(.easeInOut(duration: 0.5)) {
@@ -961,25 +963,25 @@ struct VirtualPantryView: View {
             }
         }
     }
-    
+
     private func finishScanAnimation() {
         scanProgressTimer?.invalidate()
         scanProgressTimer = nil
-        
+
         withAnimation(.easeInOut(duration: 0.25)) {
             scanStatusText = "Done stocking \(selectedPantryName)."
         }
-        
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
             stopScanAnimation(resetProgress: true)
         }
     }
-    
+
     private func stopScanAnimation(resetProgress: Bool) {
         scanProgressTimer?.invalidate()
         scanProgressTimer = nil
         isScanning = false
-        
+
         if resetProgress {
             scanStatusText = "Waking up ChefBuddy..."
             scanAnimationStep = 0
@@ -987,20 +989,20 @@ struct VirtualPantryView: View {
     }
 }
 
-// MARK: - Pantry Card Creator View
+
 struct PantryCardCreatorView: View {
     @Binding var name: String
     @Binding var emoji: String
     @Binding var colorTheme: String
-    
+
     let isFirstPantry: Bool
     let isEditing: Bool
     let onSave: () -> Void
     let onCancel: (() -> Void)?
-    
+
     let colorThemes = ["Orange", "Blue", "Green", "Pink", "Purple", "Red", "Cyan", "Yellow", "Mint"]
     let emojis = ["🥑", "🥩", "🧀", "🥦", "🥛", "🥕", "🍗", "🍅", "🍞", "🌶️", "🥐", "🧊", "🍔", "🍕", "🧁"]
-    
+
     var activeColor: Color {
         switch colorTheme {
         case "Blue": return .blue
@@ -1014,15 +1016,15 @@ struct PantryCardCreatorView: View {
         default: return .orange
         }
     }
-    
+
     var body: some View {
         NavigationStack {
             ZStack {
                 Color(.systemGroupedBackground).ignoresSafeArea()
-                
+
                 ScrollView {
                     VStack(spacing: 32) {
-                        
+
                         if isFirstPantry {
                             VStack(spacing: 8) {
                                 Text("Welcome to ChefBuddy")
@@ -1034,8 +1036,8 @@ struct PantryCardCreatorView: View {
                             }
                             .padding(.top, 20)
                         }
-                        
-                        // Contact Card Preview
+
+
                         ZStack {
                             RoundedRectangle(cornerRadius: 30, style: .continuous)
                                 .fill(
@@ -1046,14 +1048,14 @@ struct PantryCardCreatorView: View {
                                     )
                                 )
                                 .shadow(color: activeColor.opacity(0.3), radius: 15, y: 8)
-                            
+
                             VStack(spacing: 20) {
                                 Text(emoji)
                                     .font(.system(size: 80))
                                     .shadow(color: .black.opacity(0.2), radius: 10, y: 5)
                                     .scaleEffect(1.05)
                                     .animation(.spring(response: 0.3, dampingFraction: 0.5), value: emoji)
-                                
+
                                 TextField("Pantry Name", text: $name)
                                     .font(.system(size: 30, weight: .heavy, design: .rounded))
                                     .foregroundColor(.white)
@@ -1066,17 +1068,17 @@ struct PantryCardCreatorView: View {
                         }
                         .frame(width: 260, height: 320)
                         .padding(.top, isFirstPantry ? 10 : 30)
-                        
-                        // Customization Controls
+
+
                         VStack(spacing: 28) {
-                            
-                            // Color Picker
+
+
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("Background Theme")
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 24)
-                                
+
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 16) {
                                         ForEach(colorThemes, id: \.self) { theme in
@@ -1100,14 +1102,14 @@ struct PantryCardCreatorView: View {
                                     .padding(.vertical, 8)
                                 }
                             }
-                            
-                            // Emoji Picker
+
+
                             VStack(alignment: .leading, spacing: 12) {
                                 Text("Pantry Icon")
                                     .font(.subheadline.weight(.semibold))
                                     .foregroundStyle(.secondary)
                                     .padding(.horizontal, 24)
-                                
+
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 16) {
                                         ForEach(emojis, id: \.self) { e in
@@ -1131,12 +1133,12 @@ struct PantryCardCreatorView: View {
                                 }
                             }
                         }
-                        
+
                         Spacer(minLength: 40)
                     }
                 }
-                
-                // Bottom Sticky Button
+
+
                 VStack {
                     Spacer()
                     Button(action: {
@@ -1169,7 +1171,7 @@ struct PantryCardCreatorView: View {
             }
         }
     }
-    
+
     private func themeColor(for name: String) -> Color {
         switch name {
         case "Blue": return .blue
@@ -1185,7 +1187,6 @@ struct PantryCardCreatorView: View {
     }
 }
 
-// MARK: - Custom UI Components
 
 struct StorageUnitView: View {
     let title: String
@@ -1200,17 +1201,17 @@ struct StorageUnitView: View {
     let onMove: (String, String, String) -> Void
     @Binding var draggedItem: String?
     @Binding var draggedFromCategory: String?
-    
+
     private var totalCount: Int {
         categories.reduce(0) { result, category in
             result + (data[category]?.count ?? 0)
         }
     }
-    
+
     private var hasItems: Bool {
         totalCount > 0
     }
-    
+
     var body: some View {
         VStack(spacing: 0) {
             HStack {
@@ -1218,13 +1219,13 @@ struct StorageUnitView: View {
                     Image(systemName: icon)
                         .foregroundStyle(color)
                         .font(.title2)
-                    
+
                     Text(title)
                         .font(.system(size: 22, weight: .bold, design: .rounded))
                 }
-                
+
                 Spacer()
-                
+
                 Text("\(totalCount)")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(color)
@@ -1235,13 +1236,13 @@ struct StorageUnitView: View {
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 16)
-            
+
             VStack(spacing: 24) {
-                // Fix for empty states: If the user is dragging something, force categories to render as drop zones
+
                 if hasItems || draggedItem != nil {
                     ForEach(categories, id: \.self) { category in
                         let validDropTarget = draggedItem != nil && draggedFromCategory != category
-                        
+
                         CategoryDropSection(
                             categoryName: category,
                             items: data[category] ?? [],
@@ -1299,10 +1300,10 @@ struct CategoryDropSection: View {
     let onDelete: (String) -> Void
     let onDragStart: (String) -> Void
     let onDropItem: () -> Void
-    
-    // Automatically flips cleanly on hover when dragging!
+
+
     @State private var isTargeted: Bool = false
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(categoryName)
@@ -1310,7 +1311,7 @@ struct CategoryDropSection: View {
                 .fontWeight(.bold)
                 .foregroundStyle(.secondary)
                 .padding(.horizontal, 20)
-            
+
             if items.isEmpty {
                 RoundedRectangle(cornerRadius: 14)
                     .fill(isTargeted ? accentColor.opacity(0.14) : Color.clear)
@@ -1350,8 +1351,8 @@ struct CategoryDropSection: View {
                     .padding(.vertical, 2)
                 }
             }
-            
-            // Bottom Highlight Line
+
+
             Rectangle()
                 .fill(
                     isTargeted
@@ -1404,7 +1405,7 @@ struct EmptyStorageView: View {
     let color: Color
     let title: String
     let subtitle: String
-    
+
     var body: some View {
         VStack(spacing: 12) {
             Image(systemName: icon)
@@ -1413,11 +1414,11 @@ struct EmptyStorageView: View {
                 .padding(14)
                 .background(color.opacity(0.12))
                 .clipShape(Circle())
-            
+
             Text(title)
                 .font(.system(size: 17, weight: .bold, design: .rounded))
                 .multilineTextAlignment(.center)
-            
+
             Text(subtitle)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -1435,35 +1436,35 @@ struct IngredientCard: View {
     let onTap: () -> Void
     let onDelete: () -> Void
     let onDragStart: () -> Void
-    
+
     var parsedEmoji: String {
         let parts = fullText.split(separator: " ", maxSplits: 1)
         return parts.count == 2 ? String(parts[0]) : "🥘"
     }
-    
+
     var parsedTitle: String {
         let parts = fullText.split(separator: " ", maxSplits: 1)
         return parts.count == 2 ? String(parts[1]) : fullText
     }
-    
+
     var body: some View {
         HStack(spacing: 8) {
             Button(action: onTap) {
                 HStack(spacing: 8) {
                     Text(parsedEmoji)
                         .font(.system(size: 16))
-                    
+
                     Text(parsedTitle.capitalized)
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
-                    
+
                     Image(systemName: "pencil")
                         .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(.secondary.opacity(0.4))
                 }
             }
             .buttonStyle(.plain)
-            
+
             Button(action: {
                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                 onDelete()
@@ -1496,7 +1497,7 @@ struct ActionButton: View {
     let title: String
     let color: Color
     var isDisabled: Bool = false
-    
+
     var body: some View {
         HStack {
             Image(systemName: icon)
@@ -1522,7 +1523,7 @@ struct ScanStatusCard: View {
     let animationStep: Int
     let funEmoji: String
     let accentColor: Color
-    
+
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
             ZStack {
@@ -1535,29 +1536,29 @@ struct ScanStatusCard: View {
                         )
                     )
                     .frame(width: 54, height: 54)
-                
+
                 Text(funEmoji)
                     .font(.system(size: 28))
                     .scaleEffect(animationStep % 2 == 0 ? 1.0 : 1.08)
                     .animation(.spring(response: 0.35, dampingFraction: 0.65), value: animationStep)
             }
-            
+
             VStack(alignment: .leading, spacing: 6) {
                 HStack(alignment: .firstTextBaseline) {
                     Text("ChefBuddy is organizing \(pantryName)")
                         .font(.callout.weight(.semibold))
                         .foregroundStyle(.primary)
                 }
-                
+
                 Text(statusText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                
+
                 HStack(spacing: 5) {
                     Text("Scanning")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    
+
                     BouncingDotsView(step: animationStep, color: accentColor)
                 }
             }
@@ -1578,7 +1579,7 @@ struct ScanStatusCard: View {
 struct BouncingDotsView: View {
     let step: Int
     let color: Color
-    
+
     var body: some View {
         HStack(spacing: 4) {
             ForEach(0..<3, id: \.self) { index in
@@ -1592,16 +1593,16 @@ struct BouncingDotsView: View {
     }
 }
 
-// iOS 16 Custom Layout for wrapping cards
+
 @available(iOS 16.0, *)
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
-    
+
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
         let result = FlowResult(in: proposal.width ?? 0, subviews: subviews, spacing: spacing)
         return result.size
     }
-    
+
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
         let result = FlowResult(in: bounds.width, subviews: subviews, spacing: spacing)
         for (index, subview) in subviews.enumerated() {
@@ -1612,60 +1613,60 @@ struct FlowLayout: Layout {
             )
         }
     }
-    
+
     struct FlowResult {
         var size: CGSize = .zero
         var frames: [CGRect] = []
-        
+
         init(in maxWidth: CGFloat, subviews: Subviews, spacing: CGFloat) {
             var currentX: CGFloat = 0
             var currentY: CGFloat = 0
             var rowHeight: CGFloat = 0
-            
+
             for subview in subviews {
                 let size = subview.sizeThatFits(.unspecified)
-                
+
                 if currentX + size.width > maxWidth && currentX > 0 {
                     currentX = 0
                     currentY += rowHeight + spacing
                     rowHeight = 0
                 }
-                
+
                 frames.append(CGRect(x: currentX, y: currentY, width: size.width, height: size.height))
                 rowHeight = max(rowHeight, size.height)
                 currentX += size.width + spacing
             }
-            
+
             self.size = CGSize(width: maxWidth, height: currentY + rowHeight)
         }
     }
 }
 
-// Inline Camera Picker
+
 struct CameraPicker: UIViewControllerRepresentable {
     @Binding var image: UIImage?
     @Environment(\.dismiss) var dismiss
-    
+
     func makeUIViewController(context: Context) -> UIImagePickerController {
         let picker = UIImagePickerController()
         picker.sourceType = .camera
         picker.delegate = context.coordinator
         return picker
     }
-    
+
     func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
-    
+
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
-    
+
     class Coordinator: NSObject, UINavigationControllerDelegate, UIImagePickerControllerDelegate {
         let parent: CameraPicker
-        
+
         init(_ parent: CameraPicker) {
             self.parent = parent
         }
-        
+
         func imagePickerController(
             _ picker: UIImagePickerController,
             didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey : Any]
@@ -1675,7 +1676,7 @@ struct CameraPicker: UIViewControllerRepresentable {
             }
             parent.dismiss()
         }
-        
+
         func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
             parent.dismiss()
         }

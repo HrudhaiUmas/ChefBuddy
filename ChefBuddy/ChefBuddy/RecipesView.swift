@@ -1,31 +1,51 @@
+// RecipesView.swift
+// The core recipe management screen and its supporting types.
 //
-//  RecipesView.swift
-//  ChefBuddy
-//
+// Recipe            — Firestore-backed data model for a saved recipe including
+//                     nutrition, cook history, and favourite state.
+// NutritionInfo     — Embedded nutrition struct stored inside each Recipe doc.
+// RecipesViewModel  — ObservableObject that owns the Firestore listener, drives
+//                     AI recipe generation, handles reviews, cooked-state tracking,
+//                     nutrition backfill for older recipes, and suggestion loading.
+// RecipesView       — The main grid UI: fresh recipes on top, cooked below,
+//                     AI suggestion carousel, filter pills, and generate sheet.
+// RecipeReviewView  — Post-cook review flow: liked tags, improvement prompt,
+//                     optional AI recipe revision, and cooked-count update.
+// NutritionBreakdownCard — Reusable macro display used in detail and review views.
+
+import SwiftUI
+import FirebaseFirestore
+import Combine
 
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 import Combine
 
-// MARK: - Model
 
+// Embeds as a sub-document inside each Recipe. Stored separately from the
+// top-level calories field so the detail view can show a full macro breakdown.
 struct NutritionInfo: Codable, Equatable {
-    var calories: String   // total kcal (mirrors Recipe.calories for convenience)
-    var carbs: String      // e.g. "42g"
-    var protein: String    // e.g. "35g"
-    var fat: String        // e.g. "12g"
-    var saturatedFat: String // e.g. "4g"
-    var sugar: String      // e.g. "8g"
-    var fiber: String      // e.g. "5g"
-    var sodium: String     // e.g. "620mg"
+    var calories: String
+    var carbs: String
+    var protein: String
+    var fat: String
+    var saturatedFat: String
+    var sugar: String
+    var fiber: String
+    var sodium: String
 
+    // Sentinel value used when a recipe was saved before nutrition backfill ran.
+    // Lets the UI safely check if nutrition data exists without optional unwrapping.
     static var empty: NutritionInfo {
         NutritionInfo(calories: "", carbs: "", protein: "", fat: "",
                       saturatedFat: "", sugar: "", fiber: "", sodium: "")
     }
 }
 
+// The core data model stored in Firestore at users/{uid}/recipes/{id}.
+// @DocumentID auto-populates id from the Firestore doc key so we never
+// manually manage the primary key.
 struct Recipe: Identifiable, Codable, Equatable {
     @DocumentID var id: String?
     var title: String
@@ -41,7 +61,7 @@ struct Recipe: Identifiable, Codable, Equatable {
     var nutrition: NutritionInfo
     var createdAt: Date
     var isFavorite: Bool
-    // Cooking history
+
     var cookedCount: Int
     var lastCookedAt: Date?
 
@@ -79,7 +99,9 @@ struct Recipe: Identifiable, Codable, Equatable {
         self.lastCookedAt = lastCookedAt
     }
 
-    var hasBeenCooked: Bool { cookedCount > 0 }
+    // Computed from cookedCount so the UI never gets out of sync with the
+// actual cook history — there's no separate boolean that could drift.
+var hasBeenCooked: Bool { cookedCount > 0 }
 }
 
 enum GroceryStore: String, CaseIterable, Codable, Identifiable {
@@ -354,8 +376,10 @@ extension CookingAssistant {
     }
 }
 
-// MARK: - ViewModel
 
+// Central controller for all recipe operations: Firestore CRUD, AI generation,
+// suggestion loading, review saving, and nutrition backfill.
+// Owned by RecipesView and kept alive as long as that view is on screen.
 class RecipesViewModel: ObservableObject {
     @Published var recipes: [Recipe] = []
     @Published var isGenerating = false
@@ -399,6 +423,8 @@ class RecipesViewModel: ObservableObject {
         Array(filteredRecipes.prefix(4))
     }
 
+    // Opens a real-time Firestore snapshot listener so the recipe grid updates
+    // the moment any recipe is added, changed, or deleted — no manual refresh needed.
     func startListening(userId: String) {
         guard !userId.isEmpty else { return }
 
@@ -416,11 +442,16 @@ class RecipesViewModel: ObservableObject {
             }
     }
 
+    // Removes the snapshot listener when the view disappears to avoid holding
+    // an open connection and triggering spurious updates in the background.
     func stopListening() {
         listener?.remove()
         listener = nil
     }
 
+    // Generates recipes one-by-one until the user has 3, sequentially.
+    // Uses a wait-cycle loop so each generation finishes before the next starts,
+    // preventing the race condition where parallel requests duplicate recipes.
     func autoGenerateIfNeeded(assistant: CookingAssistant, userId: String) {
         guard recipes.count < 3, !isGenerating, !userId.isEmpty else { return }
 
@@ -499,11 +530,14 @@ class RecipesViewModel: ObservableObject {
             .delete()
     }
 
+    // Increments cookedCount and sets lastCookedAt both locally (for immediate
+    // UI response) and in Firestore (for persistence). Updating locally first
+    // means the green tint appears instantly without waiting for a round trip.
     func markAsCooked(_ recipe: Recipe, userId: String) {
         guard let id = recipe.id, !userId.isEmpty else { return }
         let newCount = recipe.cookedCount + 1
         let now = Date()
-        // Update local array immediately so UI reacts without waiting for Firestore
+
         if let idx = recipes.firstIndex(where: { $0.id == id }) {
             recipes[idx].cookedCount = newCount
             recipes[idx].lastCookedAt = now
@@ -512,9 +546,11 @@ class RecipesViewModel: ObservableObject {
             .updateData(["cookedCount": newCount, "lastCookedAt": now])
     }
 
+    // Replaces the entire recipe document so revised recipes (from the review
+    // flow AI rewrite) overwrite the old version atomically.
     func updateRecipeAfterReview(_ updatedRecipe: Recipe, userId: String) {
         guard let id = updatedRecipe.id, !userId.isEmpty else { return }
-        // Ensure cookedCount is reflected in local array too
+
         if let idx = recipes.firstIndex(where: { $0.id == id }) {
             recipes[idx] = updatedRecipe
         }
@@ -522,6 +558,9 @@ class RecipesViewModel: ObservableObject {
         db.collection("users").document(userId).collection("recipes").document(id).setData(encoded)
     }
 
+    // Writes a review to the reviews sub-collection at recipes/{id}/reviews.
+    // Kept as a sub-collection (not an array field) so it scales without
+    // hitting Firestore's 1 MB document limit.
     func saveReview(recipeId: String, liked: [String], likedNote: String, improvement: String, userId: String) {
         guard !userId.isEmpty else { return }
         let data: [String: Any] = [
@@ -766,7 +805,6 @@ class RecipesViewModel: ObservableObject {
     }
 }
 
-// MARK: - Main View
 
 struct RecipesView: View {
     @EnvironmentObject var authVM: AuthViewModel
@@ -939,7 +977,7 @@ struct RecipesView: View {
         await MainActor.run { isLoadingInitialSuggestions = true }
         do {
             try await assistant.waitUntilReady()
-            // Load any past review feedback so suggestions are personalised
+
             let feedback = await loadReviewFeedbackSummary()
             await assistant.fetchRecipeSuggestions(reviewFeedback: feedback)
         } catch {
@@ -972,7 +1010,7 @@ struct RecipesView: View {
         var liked: [String] = []
 
         do {
-            // Fetch all recipe IDs
+
             let recipeDocs = try await db.collection("users").document(userId)
                 .collection("recipes").getDocuments()
 
@@ -1209,10 +1247,10 @@ struct RecipesView: View {
                 assistant: assistant,
                 userId: userId,
                 onComplete: { updatedRecipe, liked, likedNote, improvement in
-                    // Build a fully-cooked copy so a single setData is the source of truth
+
                     var cooked = updatedRecipe
                     if cooked.cookedCount == updatedRecipe.cookedCount {
-                        // cookedCount not yet incremented (Keep Original path) — bump it now
+
                         cooked.cookedCount = max(updatedRecipe.cookedCount, recipe.cookedCount + 1)
                     }
                     cooked.lastCookedAt = Date()
@@ -1312,7 +1350,7 @@ struct RecipesView: View {
         }
         .opacity(appeared ? 1 : 0)
     }
-    
+
     private var headerView: some View {
         HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 2) {
@@ -1332,7 +1370,7 @@ struct RecipesView: View {
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : -10)
     }
-    
+
     private var mainContent: some View {
         Group {
             if vm.filteredRecipes.isEmpty && vm.selectedFilter != "All" {
@@ -1395,7 +1433,7 @@ struct RecipesView: View {
             }
         }
     }
-    
+
     private var spotlightSection: some View {
         Group {
             if vm.selectedFilter == "All" {
@@ -1408,7 +1446,7 @@ struct RecipesView: View {
             }
         }
     }
-    
+
     private var recipesGridSection: some View {
         Group {
             if vm.filteredRecipes.isEmpty && vm.selectedFilter == "All" {
@@ -1461,12 +1499,10 @@ struct RecipesView: View {
 }
 
 
-// MARK: - Helper Views
-
 struct RecipeBouncingDotsView: View {
     let step: Int
     let color: Color
-    
+
     var body: some View {
         HStack(spacing: 4) {
             ForEach(0..<3, id: \.self) { index in
@@ -1480,7 +1516,6 @@ struct RecipeBouncingDotsView: View {
     }
 }
 
-// MARK: - Recipe Card
 
 struct RecipeCard: View {
     let recipe: Recipe
@@ -1772,7 +1807,6 @@ struct GenerateRecipeSpotlightCard: View {
     }
 }
 
-// MARK: - Suggestions Loading UI
 
 private struct SuggestionsLoadingSection: View {
     @State private var scanAnimationStep: Int = 0
@@ -1798,29 +1832,29 @@ private struct SuggestionsLoadingSection: View {
                             )
                         )
                         .frame(width: 54, height: 54)
-                    
+
                     Text("🍳")
                         .font(.system(size: 28))
                         .scaleEffect(scanAnimationStep % 2 == 0 ? 1.0 : 1.08)
                         .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
                 }
-                
+
                 VStack(alignment: .leading, spacing: 6) {
                     HStack(alignment: .firstTextBaseline) {
                         Text("ChefBuddy is cooking...")
                             .font(.callout.weight(.semibold))
                             .foregroundStyle(.primary)
                     }
-                    
+
                     Text("Generating recipe ideas for you...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    
+
                     HStack(spacing: 5) {
                         Text("Generating")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
-                        
+
                         RecipeBouncingDotsView(step: scanAnimationStep, color: .orange)
                     }
                 }
@@ -1867,23 +1901,23 @@ private struct SuggestionCookingCard: View {
                     .scaleEffect(scanAnimationStep % 2 == 0 ? 1.0 : 1.08)
                     .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
             }
-            
+
             VStack(alignment: .leading, spacing: 8) {
                 Text("ChefBuddy is cooking...")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(.primary)
                     .lineLimit(2)
-                
+
                 Text("Making your next recipe idea")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
-                
+
                 HStack(spacing: 4) {
                     Text("Generating")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.orange)
-                    
+
                     RecipeBouncingDotsView(step: scanAnimationStep, color: .orange)
                 }
             }
@@ -1905,7 +1939,6 @@ private struct SuggestionCookingCard: View {
     }
 }
 
-// MARK: - All Recipes Screen
 
 struct AllRecipesView: View {
     @ObservedObject var vm: RecipesViewModel
@@ -2237,7 +2270,6 @@ struct AllRecipesView: View {
     }
 }
 
-// MARK: - Generate Sheet
 
 struct GenerateRecipeSheet: View {
     @ObservedObject var vm: RecipesViewModel
@@ -2363,7 +2395,6 @@ struct GenerateRecipeSheet: View {
     }
 }
 
-// MARK: - Detail View
 
 struct RecipeDetailView: View {
     let recipe: Recipe
@@ -2377,7 +2408,7 @@ struct RecipeDetailView: View {
     var onLiveHelp: (() -> Void)? = nil
     var onAddMissingToGrocery: ((Recipe, [String]) -> Void)? = nil
     var onOpenGroceryList: (() -> Void)? = nil
-    
+
 
     @State private var activeTab = 0
     @State private var showDeleteConfirm = false
@@ -2395,7 +2426,7 @@ struct RecipeDetailView: View {
             return .orange
         }
     }
-    
+
     private func saveToPlan(day: String, type: String) {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         mealPlanVM.addToPlan(recipe: recipe, day: day, mealType: type, userId: userId)
@@ -2445,9 +2476,9 @@ struct RecipeDetailView: View {
                                 .foregroundStyle(.secondary)
                                 .background(Circle().fill(.ultraThinMaterial))
                         }
-                        
+
                         Spacer()
-                        
+
                         Button(action: {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             onFavorite()
@@ -2458,7 +2489,7 @@ struct RecipeDetailView: View {
                                 .padding(10)
                                 .background(Circle().fill(.ultraThinMaterial))
                         }
-                        
+
                         Button(action: { showDeleteConfirm = true }) {
                             Image(systemName: "trash")
                                 .font(.system(size: 18, weight: .semibold))
@@ -2701,7 +2732,7 @@ struct RecipeDetailView: View {
             Text("\(recipe.title) has been added to your meal plan.")
         }
     }
-   
+
 }
 
 struct SuggestedRecipeDetailView: View {
@@ -3459,8 +3490,9 @@ private struct RecipesEmptyState: View {
     }
 }
 
-// MARK: - Nutrition Breakdown Card
 
+// Reusable macro display card. Only renders if at least one macro field is
+// populated, so it's safe to show on recipes that predate nutrition tracking.
 struct NutritionBreakdownCard: View {
     let nutrition: NutritionInfo
     let calories: String
@@ -3483,7 +3515,7 @@ struct NutritionBreakdownCard: View {
                         .font(.system(size: 15, weight: .bold, design: .rounded))
                 }
 
-                // Calories hero row
+
                 if !calories.isEmpty {
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
@@ -3499,7 +3531,7 @@ struct NutritionBreakdownCard: View {
                     .padding(.bottom, 2)
                 }
 
-                // Macro grid
+
                 let macros: [(String, String, Color)] = [
                     ("Carbs", nutrition.carbs, .blue),
                     ("Protein", nutrition.protein, .green),
@@ -3547,7 +3579,6 @@ struct NutritionBreakdownCard: View {
     }
 }
 
-// MARK: - Grocery List
 
 private struct GroceryRecipeGroup: Identifiable {
     let id: String
@@ -3573,7 +3604,7 @@ struct GroceryListView: View {
     @State private var matchAnimationStep = 0
     @State private var matchTimer: Timer?
     @State private var listener: ListenerRegistration?
-    @State private var expandedRecipeId: String? = nil // for dropdown
+    @State private var expandedRecipeId: String? = nil
     @State private var hasAppeared = false
     @State private var heroPulse = false
 
@@ -4250,7 +4281,6 @@ private struct GroceryListItemRow: View {
     }
 }
 
-// MARK: - Recipe Review View
 
 struct RecipeReviewView: View {
     let recipe: Recipe
@@ -4285,7 +4315,7 @@ struct RecipeReviewView: View {
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 28) {
 
-                        // Header
+
                         VStack(alignment: .leading, spacing: 8) {
                             HStack(spacing: 14) {
                                 Text(recipe.emoji).font(.system(size: 52))
@@ -4307,10 +4337,10 @@ struct RecipeReviewView: View {
                         .padding(.horizontal, 24)
                         .padding(.top, 8)
 
-                        // Nutrition breakdown
+
                         NutritionBreakdownCard(nutrition: recipe.nutrition, calories: recipe.calories)
 
-                        // What you liked chips
+
                         VStack(alignment: .leading, spacing: 14) {
                             Label("What did you love?", systemImage: "heart.fill")
                                 .font(.system(size: 17, weight: .bold, design: .rounded))
@@ -4356,7 +4386,7 @@ struct RecipeReviewView: View {
                                 .focused($focusedField)
                         }
 
-                        // Improvements
+
                         VStack(alignment: .leading, spacing: 12) {
                             Label("What would you improve?", systemImage: "wand.and.stars")
                                 .font(.system(size: 17, weight: .bold, design: .rounded))
@@ -4378,7 +4408,7 @@ struct RecipeReviewView: View {
                                 .focused($focusedField)
                         }
 
-                        // AI Revision Preview
+
                         if let revised = revisedRecipe {
                             VStack(alignment: .leading, spacing: 14) {
                                 HStack(spacing: 8) {
@@ -4435,20 +4465,20 @@ struct RecipeReviewView: View {
                             }
                         }
 
-                        // Action buttons
+
                         VStack(spacing: 12) {
                             if revisedRecipe == nil {
-                                // Generate improvement
+
                                 Button(action: generateRevision) {
                                     HStack(spacing: 10) {
                                         if isRegenerating {
                                             Text("🍳")
                                                 .scaleEffect(scanAnimationStep % 2 == 0 ? 0.9 : 1.1)
                                                 .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
-                                            
+
                                             Text("ChefBuddy is revising...")
                                                 .font(.system(size: 17, weight: .bold, design: .rounded))
-                                            
+
                                             RecipeBouncingDotsView(step: scanAnimationStep, color: .white)
                                         } else {
                                             Image(systemName: "sparkles")
@@ -4471,7 +4501,7 @@ struct RecipeReviewView: View {
                                 }
                                 .disabled(isRegenerating)
                             } else {
-                                // Save revised recipe
+
                                 Button(action: {
                                     if let revised = revisedRecipe {
                                         UINotificationFeedbackGenerator().notificationOccurred(.success)
@@ -4493,7 +4523,7 @@ struct RecipeReviewView: View {
                                     .shadow(color: .green.opacity(0.3), radius: 10, y: 4)
                                 }
 
-                                // Keep original, just mark cooked
+
                                 Button(action: {
                                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                                     var cooked = recipe
@@ -4511,7 +4541,7 @@ struct RecipeReviewView: View {
                                 }
                             }
 
-                            // Skip without changes
+
                             Button(action: {
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                                 dismiss()
@@ -4542,7 +4572,7 @@ struct RecipeReviewView: View {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         let hasImprovements = !improvementText.trimmingCharacters(in: .whitespaces).isEmpty
         guard hasImprovements else {
-            // No improvements — just mark as cooked with original
+
             var cooked = recipe
             cooked.cookedCount = recipe.cookedCount + 1
             cooked.lastCookedAt = Date()

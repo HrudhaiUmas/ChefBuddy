@@ -1,9 +1,13 @@
-//
-//  HomeView.swift
-//  ChefBuddy
-//
-//  Created by Hrudhai Umas on 3/5/26.
-//
+// HomeView.swift
+// The main hub screen users land on after logging in.
+// Shows a personalised greeting, quick-access cards for fridge scanning and live
+// cooking help, the AI recipe list, and kitchen tool shortcuts.
+// Also owns the CookingAssistant instance and the saved-recipes Firestore listener
+// so both RecipesView and LiveCookingView share the same model and data.
+
+import SwiftUI
+import FirebaseAuth
+import FirebaseFirestore
 
 import SwiftUI
 import FirebaseAuth
@@ -18,6 +22,8 @@ struct SimplePantrySpace: Identifiable, Equatable {
     let colorTheme: String
 }
 
+// Root screen of the logged-in app. Owns the CookingAssistant so the model
+// stays alive across RecipesView and LiveCookingView without re-initialising.
 struct HomeView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @StateObject private var assistant = CookingAssistant()
@@ -42,6 +48,8 @@ struct HomeView: View {
     @State private var pantrySuggestionsById: [String: [RecipeSuggestion]] = [:]
     @State private var selectedGeneratedPantryRecipe: Recipe? = nil
 
+    // Derives a friendly first name from the Firebase Auth display name or email.
+    // Falls back to "Chef" so the greeting always makes sense even for email accounts.
     var displayName: String {
         if let name = authVM.userSession?.displayName, !name.isEmpty {
             return String(name.split(separator: " ").first ?? "")
@@ -203,7 +211,7 @@ struct HomeView: View {
                             .padding(.horizontal, 24)
 
                             HStack(spacing: 12) {
-                                NavigationLink(destination: WeeklyMealPlanView(assistant: assistant)) { 
+                                NavigationLink(destination: WeeklyMealPlanView(assistant: assistant)) {
                                     ToolButton(icon: "calendar", title: "Meal Plan", color: .green)
                                 }
                                 .buttonStyle(.plain)
@@ -334,6 +342,9 @@ struct HomeView: View {
                     }
                 )
             }
+            // Initialises the AI model with the user's profile and opens the Firestore
+            // recipe listener. Both happen once here so child views don't each set up
+            // their own connections.
             .onAppear {
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.8).delay(0.1)) {
                     appearAnimation = true
@@ -749,7 +760,6 @@ struct HomeView: View {
     }
 }
 
-// MARK: - Subviews
 
 struct PantryRecipeLoadingView: View {
     @State private var scanAnimationStep: Int = 0

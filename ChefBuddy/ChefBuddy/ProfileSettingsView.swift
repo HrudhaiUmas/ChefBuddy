@@ -1,88 +1,89 @@
-//
-//  ProfileSettingsView.swift
-//  ChefBuddy
-//
-//  Created by Hrudhai Umas on 3/5/26.
-//
+// ProfileSettingsView.swift
+// Lets users view and update all their cooking preferences after onboarding.
+// Changes are written back to Firestore via AuthViewModel so the AI assistant
+// immediately picks them up on the next model setup call.
+
+import SwiftUI
+import FirebaseFirestore
 
 import SwiftUI
 import Combine
 import FirebaseAuth
 
-// MARK: - Shared State Model & Form Logic
+
 class ProfileFormState: ObservableObject {
     @Published var chefLevel: String = "🍳 Beginner"
     @Published var dietTags: Set<String> = []
     @Published var allergies: Set<String> = []
     @Published var macroTags: Set<String> = []
-    
-    // Sliders use Doubles for UI, converted to Strings for DB
+
+
     @Published var age: Double = 25.0
-    @Published var heightInches: Double = 67.0 // 5'7" default for now
+    @Published var heightInches: Double = 67.0
     @Published var weight: Double = 150.0
     @Published var sex: String = "Male"
-    
+
     @Published var targetGoal: String = "⚖️ Maintain"
     @Published var activityLevel: String = "🛋️ Sedentary"
-    
+
     @Published var appliances: Set<String> = []
     @Published var cookTime: String = "⏱️ 15-30 mins"
-    
+
     @Published var cuisines: Set<String> = []
     @Published var customCuisineInput: String = ""
-    
+
     @Published var spiceTolerance: String = "🌶️ Medium"
-    
-    // Ingredients to Avoid logic
+
+
     @Published var dislikesList: Set<String> = []
     @Published var customDislikeInput: String = ""
-    
-    // Custom allergy + appliance inputs
+
+
     @Published var customAllergyInput: String = ""
     @Published var customApplianceInput: String = ""
-    
+
     @Published var servingSize: String = "👤 1 Person"
     @Published var budget: String = "💵 $$ (Standard)"
-    
+
     func load(from profile: DBUser?) {
         guard let profile = profile else { return }
         chefLevel = profile.chefLevel
         dietTags = Set(profile.dietTags)
         allergies = Set(profile.allergies)
         macroTags = Set(profile.macroTags)
-        
+
         age = Double(profile.age) ?? 25.0
         heightInches = Double(profile.height) ?? 67.0
         weight = Double(profile.weight) ?? 150.0
         sex = profile.sex.isEmpty ? "Male" : profile.sex
         targetGoal = profile.targetGoal.isEmpty ? "⚖️ Maintain" : profile.targetGoal
         activityLevel = profile.activityLevel.isEmpty ? "🛋️ Sedentary" : profile.activityLevel
-        
+
         appliances = Set(profile.appliances)
         cookTime = profile.cookTime.isEmpty ? "⏱️ 15-30 mins" : profile.cookTime
-        
+
         cuisines = Set(profile.cuisines)
         spiceTolerance = profile.spiceTolerance.isEmpty ? "🌶️ Medium" : profile.spiceTolerance
-        
-        // Convert comma string to Set
+
+
         dislikesList = Set(
             profile.dislikes
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespaces) }
                 .filter { !$0.isEmpty }
         )
-        
+
         servingSize = profile.servingSize.isEmpty ? "👤 1 Person" : profile.servingSize
         budget = profile.budget.isEmpty ? "💵 $$ (Standard)" : profile.budget
     }
 }
 
-// MARK: - View 1: First-Time Setup
+
 struct InitialPreferencesView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @StateObject private var formState = ProfileFormState()
     @State private var isSaving = false
-    
+
     var displayName: String {
         if let name = authVM.userSession?.displayName, !name.isEmpty {
             return String(name.split(separator: " ").first ?? "")
@@ -100,7 +101,7 @@ struct InitialPreferencesView: View {
                 title: "One last step, \(displayName)!",
                 subtitle: "Personalize your experience so ChefBuddy knows exactly what to suggest."
             )
-            
+
             VStack {
                 Spacer()
                 Button(action: finishSetup) {
@@ -131,7 +132,7 @@ struct InitialPreferencesView: View {
             }
         }
     }
-    
+
     private func finishSetup() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         isSaving = true
@@ -158,7 +159,7 @@ struct InitialPreferencesView: View {
     }
 }
 
-// MARK: - View 2: Edit Preferences (From Home)
+
 struct ProfileSettingsView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @Environment(\.dismiss) var dismiss
@@ -173,7 +174,7 @@ struct ProfileSettingsView: View {
                 title: "Your Kitchen Profile",
                 subtitle: "Tweak your preferences for better AI suggestions."
             )
-            
+
             VStack {
                 Spacer()
                 Button(action: saveChanges) {
@@ -217,7 +218,7 @@ struct ProfileSettingsView: View {
             formState.load(from: authVM.currentUserProfile)
         }
     }
-    
+
     private func saveChanges() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
         isSaving = true
@@ -248,51 +249,51 @@ struct ProfileSettingsView: View {
     }
 }
 
-// MARK: - Core Form Content
+
 private struct PreferencesFormContent: View {
     @ObservedObject var formState: ProfileFormState
     let title: String
     let subtitle: String
-    
+
     @State private var activeSheet: ActiveSheet? = nil
     @State private var showSections: [Bool] = Array(repeating: false, count: 12)
-    
+
     var bmi: Double {
         let h = formState.heightInches
         let w = formState.weight
         return h > 0 ? (w / (h * h)) * 703 : 0
     }
-    
+
     var bmiCategory: String {
         if bmi < 18.5 { return "Underweight" }
         else if bmi < 25 { return "Normal" }
         else if bmi < 30 { return "Overweight" }
         else { return "Obese" }
     }
-    
+
     var bmiColor: Color {
         if bmi < 18.5 { return .blue }
         else if bmi < 25 { return .green }
         else if bmi < 30 { return .orange }
         else { return .red }
     }
-    
-    // Mifflin-St Jeor estimate using sex, age, height, and weight
+
+
     var estimatedCalories: Int {
         let weightKg = formState.weight * 0.453592
         let heightCm = formState.heightInches * 2.54
         let age = formState.age
-        
+
         let bmr: Double
-        
+
         if formState.sex == "Male" {
             bmr = (10 * weightKg) + (6.25 * heightCm) - (5 * age) + 5
         } else {
             bmr = (10 * weightKg) + (6.25 * heightCm) - (5 * age) - 161
         }
-        
+
         let activityMultiplier: Double
-        
+
         switch formState.activityLevel {
         case "🛋️ Sedentary":
             activityMultiplier = 1.2
@@ -305,9 +306,9 @@ private struct PreferencesFormContent: View {
         default:
             activityMultiplier = 1.2
         }
-        
+
         var calories = bmr * activityMultiplier
-        
+
         switch formState.targetGoal {
         case "📉 Weight Loss":
             calories -= 400
@@ -316,7 +317,7 @@ private struct PreferencesFormContent: View {
         default:
             break
         }
-        
+
         let clamped = max(1200, min(calories, 4500))
         return Int(clamped.rounded())
     }
@@ -324,8 +325,8 @@ private struct PreferencesFormContent: View {
     var body: some View {
         ScrollView(showsIndicators: false) {
             VStack(alignment: .leading, spacing: 24) {
-                
-                // Header Animation
+
+
                 VStack(alignment: .leading, spacing: 16) {
                     HStack {
                         Spacer()
@@ -334,7 +335,7 @@ private struct PreferencesFormContent: View {
                             .frame(height: 100)
                         Spacer()
                     }
-                    
+
                     VStack(alignment: .leading, spacing: 8) {
                         Text(title)
                             .font(.system(size: 34, weight: .heavy, design: .rounded))
@@ -346,12 +347,12 @@ private struct PreferencesFormContent: View {
                     .padding(.horizontal, 24)
                 }
                 .padding(.top, 20)
-                
-                // SECTION 1: Core Basics
+
+
                 AnimatedSection(isVisible: showSections[0]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "The Basics", icon: "person.text.rectangle")
-                        
+
                         ProfileSinglePreference(
                             title: "Experience Level",
                             options: levelsList,
@@ -359,7 +360,7 @@ private struct PreferencesFormContent: View {
                         ) {
                             activeSheet = .level
                         }
-                        
+
                         ProfileMultiPreference(
                             title: "Dietary Preferences",
                             options: dietsList,
@@ -367,7 +368,7 @@ private struct PreferencesFormContent: View {
                         ) {
                             activeSheet = .diet
                         }
-                        
+
                         VStack(alignment: .leading, spacing: 12) {
                             ProfileMultiPreference(
                                 title: "Avoid (Allergies)",
@@ -376,7 +377,7 @@ private struct PreferencesFormContent: View {
                             ) {
                                 activeSheet = .allergy
                             }
-                            
+
                             let customAllergies = formState.allergies.filter { !allergiesList.contains($0) }.sorted()
                             if !customAllergies.isEmpty {
                                 ScrollView(.horizontal, showsIndicators: false) {
@@ -407,13 +408,13 @@ private struct PreferencesFormContent: View {
                                     }
                                 }
                             }
-                            
+
                             HStack(spacing: 12) {
                                 ProfileTextField(
                                     placeholder: "Add a custom allergy...",
                                     text: $formState.customAllergyInput
                                 )
-                                
+
                                 Button(action: {
                                     let input = formState.customAllergyInput.trimmingCharacters(in: .whitespacesAndNewlines)
                                     if !input.isEmpty {
@@ -432,7 +433,7 @@ private struct PreferencesFormContent: View {
                             }
                             .padding(.horizontal, 24)
                         }
-                        
+
                         ProfileMultiPreference(
                             title: "Macro Goals",
                             options: macrosList,
@@ -442,8 +443,8 @@ private struct PreferencesFormContent: View {
                         }
                     }
                 }
-                
-                // SECTION 2: Physical Metrics & BMI
+
+
                 AnimatedSection(isVisible: showSections[1]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "Body & Goals", icon: "figure.walk")
@@ -455,7 +456,7 @@ private struct PreferencesFormContent: View {
                         ) {
                             activeSheet = .sex
                         }
-                        
+
                         VStack(spacing: 32) {
                             ProfileSlider(
                                 title: "Age",
@@ -465,14 +466,14 @@ private struct PreferencesFormContent: View {
                             ) {
                                 activeSheet = .physical
                             }
-                            
+
                             ProfileHeightSlider(
                                 title: "Height",
                                 inches: $formState.heightInches
                             ) {
                                 activeSheet = .physical
                             }
-                            
+
                             ProfileSlider(
                                 title: "Weight",
                                 value: $formState.weight,
@@ -481,8 +482,8 @@ private struct PreferencesFormContent: View {
                             ) {
                                 activeSheet = .physical
                             }
-                            
-                            // Calculated BMI Card
+
+
                             HStack {
                                 Text("Calculated BMI")
                                     .font(.system(size: 16, weight: .bold, design: .rounded))
@@ -505,10 +506,10 @@ private struct PreferencesFormContent: View {
                                 RoundedRectangle(cornerRadius: 16)
                                     .stroke(Color.primary.opacity(0.05), lineWidth: 1)
                             )
-                            
+
                         }
                         .padding(.horizontal, 24)
-                        
+
                         ProfileSinglePreference(
                             title: "Target Goal",
                             options: goalsList,
@@ -516,7 +517,7 @@ private struct PreferencesFormContent: View {
                         ) {
                             activeSheet = .goal
                         }
-                        
+
                         ProfileSinglePreference(
                             title: "Activity Level",
                             options: activityList,
@@ -525,7 +526,7 @@ private struct PreferencesFormContent: View {
                             activeSheet = .activity
                         }
 
-                        // Estimated calories card
+
                         VStack(alignment: .leading, spacing: 12) {
                             HStack(alignment: .center) {
                                 VStack(alignment: .leading, spacing: 4) {
@@ -582,12 +583,12 @@ private struct PreferencesFormContent: View {
                         .padding(.horizontal, 24)
                     }
                 }
-                
-                // SECTION 3: Kitchen & Time
+
+
                 AnimatedSection(isVisible: showSections[2]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "Kitchen & Time", icon: "timer")
-                        
+
                         VStack(alignment: .leading, spacing: 12) {
                             ProfileMultiPreference(
                                 title: "Appliances You Own",
@@ -596,7 +597,7 @@ private struct PreferencesFormContent: View {
                             ) {
                                 activeSheet = .appliances
                             }
-                            
+
                             let customAppliances = formState.appliances.filter { !appliancesList.contains($0) }.sorted()
                             if !customAppliances.isEmpty {
                                 ScrollView(.horizontal, showsIndicators: false) {
@@ -627,13 +628,13 @@ private struct PreferencesFormContent: View {
                                     }
                                 }
                             }
-                            
+
                             HStack(spacing: 12) {
                                 ProfileTextField(
                                     placeholder: "Add a custom appliance...",
                                     text: $formState.customApplianceInput
                                 )
-                                
+
                                 Button(action: {
                                     let input = formState.customApplianceInput.trimmingCharacters(in: .whitespacesAndNewlines)
                                     if !input.isEmpty {
@@ -652,7 +653,7 @@ private struct PreferencesFormContent: View {
                             }
                             .padding(.horizontal, 24)
                         }
-                        
+
                         ProfileSinglePreference(
                             title: "Typical Cook Time",
                             options: cookTimesList,
@@ -662,13 +663,13 @@ private struct PreferencesFormContent: View {
                         }
                     }
                 }
-                
-                // SECTION 4: Taste & Household
+
+
                 AnimatedSection(isVisible: showSections[3]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "Taste & Household", icon: "fork.knife")
-                        
-                        // Cuisines Selection & Custom Entry
+
+
                         VStack(alignment: .leading, spacing: 12) {
                             ProfileMultiPreference(
                                 title: "Favorite Cuisines",
@@ -677,7 +678,7 @@ private struct PreferencesFormContent: View {
                             ) {
                                 activeSheet = .cuisines
                             }
-                            
+
                             let customCuisines = formState.cuisines.filter { !cuisinesList.contains($0) }.sorted()
                             if !customCuisines.isEmpty {
                                 ScrollView(.horizontal, showsIndicators: false) {
@@ -708,7 +709,7 @@ private struct PreferencesFormContent: View {
                                     }
                                 }
                             }
-                            
+
                             HStack(spacing: 12) {
                                 ProfileTextField(
                                     placeholder: "Add a custom cuisine...",
@@ -732,7 +733,7 @@ private struct PreferencesFormContent: View {
                             }
                             .padding(.horizontal, 24)
                         }
-                        
+
                         ProfileSinglePreference(
                             title: "Spice Tolerance",
                             options: spiceList,
@@ -740,8 +741,8 @@ private struct PreferencesFormContent: View {
                         ) {
                             activeSheet = .spice
                         }
-                        
-                        // Ingredients to Avoid Custom Entry
+
+
                         VStack(alignment: .leading, spacing: 12) {
                             HStack {
                                 Text("Ingredients to Avoid")
@@ -752,7 +753,7 @@ private struct PreferencesFormContent: View {
                                 }
                             }
                             .padding(.horizontal, 24)
-                            
+
                             if !formState.dislikesList.isEmpty {
                                 ScrollView(.horizontal, showsIndicators: false) {
                                     HStack(spacing: 12) {
@@ -782,7 +783,7 @@ private struct PreferencesFormContent: View {
                                     }
                                 }
                             }
-                            
+
                             HStack(spacing: 12) {
                                 ProfileTextField(
                                     placeholder: "e.g. Cilantro, Olives...",
@@ -805,7 +806,7 @@ private struct PreferencesFormContent: View {
                             }
                             .padding(.horizontal, 24)
                         }
-                        
+
                         ProfileSinglePreference(
                             title: "Typical Serving Size",
                             options: servingsList,
@@ -813,7 +814,7 @@ private struct PreferencesFormContent: View {
                         ) {
                             activeSheet = .serving
                         }
-                        
+
                         ProfileSinglePreference(
                             title: "Budget",
                             options: budgetList,
@@ -823,7 +824,7 @@ private struct PreferencesFormContent: View {
                         }
                     }
                 }
-                
+
                 Spacer(minLength: 160)
             }
         }
@@ -840,7 +841,6 @@ private struct PreferencesFormContent: View {
     }
 }
 
-// MARK: - UI Components & Data Lists
 
 private let levelsList = ["🍳 Beginner", "👨‍🍳 Intermediate", "🔪 Advanced", "🌟 Masterchef"]
 private let dietsList = ["🥗 Vegetarian", "🌿 Vegan", "🐟 Pescatarian", "🥩 Keto", "🍖 Paleo", "☪️ Halal", "✡️ Kosher"]
@@ -859,7 +859,7 @@ private let budgetList = ["🪙 $ (Budget)", "💵 $$ (Standard)", "💰 $$$ (Go
 private struct AnimatedSection<Content: View>: View {
     var isVisible: Bool
     @ViewBuilder var content: () -> Content
-    
+
     var body: some View {
         VStack(spacing: 0) {
             content()
@@ -888,7 +888,7 @@ private struct ProfileBackground: View {
 private struct ProfileSectionHeader: View {
     let title: String
     let icon: String
-    
+
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon).foregroundStyle(.orange)
@@ -910,7 +910,7 @@ private struct ProfileTextField: View {
     let placeholder: String
     @Binding var text: String
     var keyboardType: UIKeyboardType = .default
-    
+
     var body: some View {
         TextField(placeholder, text: $text)
             .keyboardType(keyboardType)
@@ -930,7 +930,7 @@ private struct ProfileSlider: View {
     let range: ClosedRange<Double>
     let format: String
     let onInfoTap: () -> Void
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -953,7 +953,7 @@ private struct ProfileHeightSlider: View {
     let title: String
     @Binding var inches: Double
     let onInfoTap: () -> Void
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -977,7 +977,7 @@ private struct ProfileSinglePreference: View {
     let options: [String]
     @Binding var selected: String
     var onInfoTap: (() -> Void)? = nil
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -990,7 +990,7 @@ private struct ProfileSinglePreference: View {
                 }
             }
             .padding(.horizontal, 24)
-            
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     Spacer().frame(width: 12)
@@ -1025,7 +1025,7 @@ private struct ProfileMultiPreference: View {
     let options: [String]
     @Binding var selected: Set<String>
     var onInfoTap: (() -> Void)? = nil
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -1038,7 +1038,7 @@ private struct ProfileMultiPreference: View {
                 }
             }
             .padding(.horizontal, 24)
-            
+
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 12) {
                     Spacer().frame(width: 12)
@@ -1077,7 +1077,7 @@ private struct ProfileSequentialIconView: View {
     @State private var currentIndex = 0
     @State private var isAnimating = false
     let timer = Timer.publish(every: 2.2, on: .main, in: .common).autoconnect()
-    
+
     var body: some View {
         ZStack {
             Circle()
@@ -1090,7 +1090,7 @@ private struct ProfileSequentialIconView: View {
                 )
                 .frame(width: 180, height: 180)
                 .scaleEffect(isAnimating ? 1.0 : 0.8)
-            
+
             Image(systemName: icons[currentIndex])
                 .font(.system(size: 70, weight: .light))
                 .foregroundStyle(
@@ -1123,7 +1123,6 @@ private struct ProfileSequentialIconView: View {
     }
 }
 
-// MARK: - Detailed Info Sheets
 
 private enum ActiveSheet: String, Identifiable {
     case level
@@ -1142,13 +1141,13 @@ private enum ActiveSheet: String, Identifiable {
     case dislikes
     case serving
     case budget
-    
+
     var id: String { self.rawValue }
 }
 
 private struct SheetRouter: View {
     let sheetType: ActiveSheet
-    
+
     var body: some View {
         switch sheetType {
         case .level:
@@ -1159,7 +1158,7 @@ private struct SheetRouter: View {
                 ("🌟", "Masterchef", "An expert looking for culinary challenges and inspiration.")
             ])
             .presentationDetents([.fraction(0.55)])
-            
+
         case .diet:
             ProfileDetailedInfoSheet(title: "Dietary Preferences", subtitle: "We filter out recipes that don't fit these rules.", items: [
                 ("🥗", "Vegetarian", "No meat or poultry."),
@@ -1171,7 +1170,7 @@ private struct SheetRouter: View {
                 ("✡️", "Kosher", "Prepared according to Jewish dietary laws.")
             ])
             .presentationDetents([.fraction(0.7)])
-            
+
         case .allergy:
             ProfileDetailedInfoSheet(title: "Allergies", subtitle: "ChefBuddy will strictly exclude these ingredients.", items: [
                 ("🥜", "Peanuts", "Avoids all peanut products."),
@@ -1183,7 +1182,7 @@ private struct SheetRouter: View {
                 ("🌾", "Gluten", "Wheat, barley, rye.")
             ])
             .presentationDetents([.fraction(0.7)])
-            
+
         case .macro:
             ProfileDetailedInfoSheet(title: "Macro Goals", subtitle: "AI prioritizes recipes that fit your needs.", items: [
                 ("⚖️", "Balanced", "A well-rounded ratio of proteins, fats, and carbs."),
@@ -1192,21 +1191,21 @@ private struct SheetRouter: View {
                 ("🍞", "Low Carb", "Minimizes carbohydrates for specialized diets.")
             ])
             .presentationDetents([.fraction(0.55)])
-            
+
         case .physical:
             ProfileSimpleInfoSheet(
                 title: "Body Metrics",
                 message: "We use your age, height, weight, sex, target goal, and activity level to estimate your daily calorie needs. BMI is shown as a simple weight-to-height ratio, and calorie needs are estimated separately using the Mifflin-St Jeor equation plus an activity multiplier."
             )
             .presentationDetents([.fraction(0.42)])
-            
+
         case .sex:
             ProfileSimpleInfoSheet(
                 title: "Sex",
                 message: "Sex is included because the calorie estimate uses the Mifflin-St Jeor equation, which uses slightly different constants for male and female metabolism estimates."
             )
             .presentationDetents([.fraction(0.32)])
-            
+
         case .calories:
             ProfileDetailedInfoSheet(
                 title: "How Calories Are Calculated",
@@ -1219,7 +1218,7 @@ private struct SheetRouter: View {
                 ]
             )
             .presentationDetents([.fraction(0.72)])
-            
+
         case .goal:
             ProfileDetailedInfoSheet(title: "Target Goal", subtitle: "Adjusts meal portions accordingly.", items: [
                 ("📉", "Weight Loss", "Caloric deficit for shedding pounds."),
@@ -1227,7 +1226,7 @@ private struct SheetRouter: View {
                 ("💪", "Muscle Gain", "Caloric surplus focused on protein intake.")
             ])
             .presentationDetents([.fraction(0.45)])
-            
+
         case .activity:
             ProfileDetailedInfoSheet(title: "Activity Level", subtitle: "Helps calculate daily energy expenditure.", items: [
                 ("🛋️", "Sedentary", "Little to no exercise, desk job."),
@@ -1236,7 +1235,7 @@ private struct SheetRouter: View {
                 ("🏋️", "Athlete", "Hard exercise/sports 6-7 days a week.")
             ])
             .presentationDetents([.fraction(0.55)])
-            
+
         case .appliances:
             ProfileDetailedInfoSheet(title: "Appliances", subtitle: "We'll only suggest meals you can actually cook.", items: [
                 ("♨️", "Stove", "Standard stovetop cooking."),
@@ -1250,7 +1249,7 @@ private struct SheetRouter: View {
                 ("🥘", "Cast Iron", "High-heat searing and stovetop-to-oven.")
             ])
             .presentationDetents([.fraction(0.85)])
-            
+
         case .cookTime:
             ProfileDetailedInfoSheet(title: "Cook Time", subtitle: "How long do you want to spend?", items: [
                 ("⚡", "< 15 mins", "Lightning fast, minimal prep."),
@@ -1259,14 +1258,14 @@ private struct SheetRouter: View {
                 ("🕰️", "1 hr+", "Slow roasting, braising, or complex meals.")
             ])
             .presentationDetents([.fraction(0.55)])
-            
+
         case .cuisines:
             ProfileSimpleInfoSheet(
                 title: "Cuisines",
                 message: "Select your favorite flavors, or add your own custom cuisines using the text box. We'll tailor recipe styles to match your cravings."
             )
             .presentationDetents([.fraction(0.35)])
-            
+
         case .spice:
             ProfileDetailedInfoSheet(title: "Spice Tolerance", subtitle: "How much heat can you handle?", items: [
                 ("🌿", "Mild", "No heat, focus on herbs and aromatics."),
@@ -1275,14 +1274,14 @@ private struct SheetRouter: View {
                 ("🌋", "Extra Spicy", "Bring on the habaneros and ghost peppers.")
             ])
             .presentationDetents([.fraction(0.55)])
-            
+
         case .dislikes:
             ProfileSimpleInfoSheet(
                 title: "Ingredients to Avoid",
                 message: "Not an allergy, just a preference. If you hate cilantro or mushrooms, put them here and you won't see them in recipes."
             )
             .presentationDetents([.fraction(0.35)])
-            
+
         case .serving:
             ProfileDetailedInfoSheet(title: "Serving Size", subtitle: "Auto-scales ingredient measurements.", items: [
                 ("👤", "1 Person", "Single portions, minimal leftovers."),
@@ -1291,7 +1290,7 @@ private struct SheetRouter: View {
                 ("🏠", "5+ People", "Large batches and gatherings.")
             ])
             .presentationDetents([.fraction(0.55)])
-            
+
         case .budget:
             ProfileDetailedInfoSheet(title: "Budget", subtitle: "Controls the cost of suggested ingredients.", items: [
                 ("🪙", "$ (Budget)", "Affordable staples: beans, rice, chicken thighs."),
@@ -1307,7 +1306,7 @@ private struct ProfileDetailedInfoSheet: View {
     let title: String
     let subtitle: String?
     let items: [(String, String, String)]
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
             VStack(alignment: .leading, spacing: 6) {
@@ -1318,7 +1317,7 @@ private struct ProfileDetailedInfoSheet: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            
+
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 24) {
                     ForEach(items, id: \.1) { item in
@@ -1347,7 +1346,7 @@ private struct ProfileDetailedInfoSheet: View {
 private struct ProfileSimpleInfoSheet: View {
     let title: String
     let message: String
-    
+
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
@@ -1357,12 +1356,12 @@ private struct ProfileSimpleInfoSheet: View {
                     .foregroundStyle(.orange)
                     .font(.title2)
             }
-            
+
             Text(message)
                 .font(.system(size: 16, weight: .regular))
                 .foregroundStyle(.secondary)
                 .lineSpacing(4)
-            
+
             Spacer()
         }
         .padding(24)

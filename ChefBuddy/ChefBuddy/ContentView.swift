@@ -1,9 +1,11 @@
-//
-//  ContentView.swift
-//  ChefBuddy
-//
-//  Created by Hrudhai Umas on 3/1/26.
-//
+// ContentView.swift
+// The root routing view. Reads AuthViewModel state and decides which screen to show:
+// onboarding (not logged in), a loading spinner (fetching profile), preference setup
+// (logged in but no profile yet), or the main HomeView (fully set up).
+// Also presents the AI hallucination warning sheet on every cold launch so users
+// understand the limits of AI-generated recipes before they start cooking.
+
+import SwiftUI
 
 import SwiftUI
 
@@ -14,7 +16,9 @@ struct ContentView: View {
     var body: some View {
         Group {
             if authVM.userSession != nil {
-                // If they are logged in, figure out where they go:
+
+                // Show a spinner while Firestore loads the profile. Skipping this state
+                // would cause a brief flash of the setup screen for returning users.
                 if authVM.isFetchingProfile {
                     ZStack {
                         Color(.systemBackground).ignoresSafeArea()
@@ -23,25 +27,29 @@ struct ContentView: View {
                             Text("Loading your kitchen...").foregroundStyle(.secondary)
                         }
                     }
+                // Profile is nil — user is logged in but hasn't completed setup yet.
                 } else if authVM.currentUserProfile == nil {
-                    // Logged in, but NO preferences saved yet -> Show Setup
+
                     InitialPreferencesView()
                         .environmentObject(authVM)
                 } else {
-                    // Logged in AND preferences exist -> Show App
+
                     HomeView()
                         .environmentObject(authVM)
                 }
             } else {
-                // Not logged in -> Always show Onboarding
+
                 OnboardingFlowView()
                     .environmentObject(authVM)
             }
         }
-        // Smooth transitions between routing states
+
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: authVM.userSession != nil)
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: authVM.isFetchingProfile)
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: authVM.currentUserProfile != nil)
+        // Shown on every cold launch to remind users that AI recipes may contain
+// errors. interactiveDismissDisabled prevents swiping it away without
+// explicitly tapping "I Understand".
         .sheet(isPresented: $showHallucinationWarning) {
             AIWarningSheet(onDismiss: { showHallucinationWarning = false })
                 .presentationDetents([.fraction(0.80)])
@@ -51,8 +59,10 @@ struct ContentView: View {
     }
 }
 
-// MARK: - AI Hallucination Warning Sheet
 
+// The warning sheet itself. Uses a dark glassmorphism card with animated
+// gradient glows. The dismiss button is disabled until the user ticks the
+// acknowledgement checkbox, ensuring they actually read the warnings.
 private struct AIWarningSheet: View {
     let onDismiss: () -> Void
 
@@ -62,11 +72,11 @@ private struct AIWarningSheet: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            // Dimmed background
+
             Color.black.opacity(0.35)
                 .ignoresSafeArea()
 
-            // Floating glow behind sheet
+
             ZStack {
                 Circle()
                     .fill(Color.orange.opacity(animateGlow ? 0.16 : 0.08))
@@ -91,7 +101,7 @@ private struct AIWarningSheet: View {
                     .padding(.bottom, 16)
 
                 VStack(spacing: 18) {
-                    // Header
+
                     VStack(spacing: 10) {
                         ZStack {
                             Circle()
@@ -129,7 +139,7 @@ private struct AIWarningSheet: View {
                         }
                     }
 
-                    // Compact warning list
+
                     VStack(spacing: 10) {
                         CompactWarningRow(
                             icon: "brain.head.profile",
@@ -156,7 +166,7 @@ private struct AIWarningSheet: View {
                         )
                     }
 
-                    // Acknowledgement row
+
                     Button {
                         withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
                             understood.toggle()
@@ -203,7 +213,7 @@ private struct AIWarningSheet: View {
                     }
                     .buttonStyle(.plain)
 
-                    // CTA button
+
                     Button(action: onDismiss) {
                         HStack(spacing: 8) {
                             Image(systemName: "checkmark.circle.fill")
@@ -268,8 +278,9 @@ private struct AIWarningSheet: View {
     }
 }
 
-// MARK: - Compact Warning Row
 
+// A single warning item — icon badge on the left, title text on the right.
+// Reused four times in the warning sheet for consistent spacing and style.
 private struct CompactWarningRow: View {
     let icon: String
     let color: Color
@@ -329,13 +340,13 @@ private struct WarningRow: View {
     }
 }
 
-// Dedicated wrapper for the login screen when users are logged out
+
 struct StandaloneAuthView: View {
     @EnvironmentObject var authVM: AuthViewModel
     var body: some View {
         AuthView(onAuthSuccess: {
-            // Do nothing here.
-            // The AuthViewModel updates `userSession`, which automatically kicks the user to HomeView
+
+
         })
     }
 }
@@ -346,8 +357,8 @@ struct MainAppPlaceholderView: View {
             Image("ChefBuddyLogo").resizable().scaledToFit().frame(width: 120, height: 120)
             Text("ChefBuddy").font(.system(size: 34, weight: .bold, design: .rounded))
             Text("Home placeholder").foregroundStyle(.secondary)
-            
-            // Temporary button to let you test onboarding again
+
+
             Button("Reset Onboarding") {
                 UserDefaults.standard.set(false, forKey: "hasOnboarded")
             }.buttonStyle(.borderedProminent).tint(.orange).padding(.top, 20)

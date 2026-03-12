@@ -1,15 +1,21 @@
-//
-//  AIViewModel.swift
-//  ChefBuddy
-//
-//  Created by nrml on 3/5/26.
-//
+// AIViewModel.swift
+// Defines CookingAssistant — the central AI brain of ChefBuddy.
+// Owns the Gemini model instance and exposes every AI operation the app uses:
+// recipe suggestions, pantry scanning, live cooking help, and fridge image analysis.
+// All AI calls go through this single class so model setup and error handling stay in one place.
 
 import Combine
 import FirebaseFirestore
 import FirebaseAILogic
 import SwiftUI
 
+import Combine
+import FirebaseFirestore
+import FirebaseAILogic
+import SwiftUI
+
+// A single AI-generated recipe card shown in the suggestion carousel.
+// Identifiable so SwiftUI lists can diff them; Equatable so we can deduplicate.
 struct RecipeSuggestion: Identifiable, Codable, Equatable {
     let id = UUID()
     let title: String
@@ -31,7 +37,8 @@ struct RecipeSuggestion: Identifiable, Codable, Equatable {
     let steps: [String]
     let matchReason: String
 
-    enum CodingKeys: String, CodingKey {
+    // Explicit keys let us rename Swift properties without breaking the JSON contract.
+enum CodingKeys: String, CodingKey {
         case title
         case emoji
         case description
@@ -92,6 +99,8 @@ struct RecipeSuggestion: Identifiable, Codable, Equatable {
         self.matchReason = matchReason
     }
 
+    // Custom decoder because the AI sometimes returns numbers or booleans instead
+    // of strings. decodeFlexibleString handles all those edge cases gracefully.
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
 
@@ -116,6 +125,8 @@ struct RecipeSuggestion: Identifiable, Codable, Equatable {
         self.matchReason = container.decodeFlexibleString(forKey: .matchReason)
     }
 
+    // Convenience computed property so callers get a NutritionInfo without
+    // having to manually assemble it from the individual macro fields.
     var nutrition: NutritionInfo {
         NutritionInfo(
             calories: calories,
@@ -130,7 +141,12 @@ struct RecipeSuggestion: Identifiable, Codable, Equatable {
     }
 }
 
+// Extension that makes JSON decoding resilient to the AI returning numbers,
+// booleans, or nested dicts where strings are expected. Without this the app
+// would crash whenever Gemini slightly deviates from the requested format.
 private extension KeyedDecodingContainer {
+    // Tries String first, then falls back to Int, Double, Bool, and dict lookups.
+    // Returns defaultValue if nothing works so the recipe still renders.
     func decodeFlexibleString(forKey key: K, defaultValue: String = "") -> String {
         if let value = try? decode(String.self, forKey: key) {
             return value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -167,6 +183,8 @@ private extension KeyedDecodingContainer {
         return defaultValue
     }
 
+    // Handles arrays that may arrive as comma-separated strings or as arrays
+    // of dicts (Gemini occasionally wraps items in {"text": "..."} objects).
     func decodeFlexibleStringArray(forKey key: K) -> [String] {
         if let value = try? decode([String].self, forKey: key) {
             return value
@@ -232,6 +250,8 @@ private extension KeyedDecodingContainer {
     }
 }
 
+// Type-erased Decodable used when we need to peek inside heterogeneous JSON
+// arrays or dicts before committing to a concrete Swift type.
 struct AnyDecodable: Decodable {
     let value: Any
 
@@ -290,6 +310,7 @@ struct AnyDecodable: Decodable {
     }
 }
 
+// Typed errors so the UI can show useful messages instead of raw system errors.
 enum CookingAssistantError: LocalizedError {
     case modelNotReady
     case imageProcessingFailed
@@ -304,6 +325,9 @@ enum CookingAssistantError: LocalizedError {
     }
 }
 
+// The AI model wrapper. One instance lives in HomeView and is passed down
+// so all child views share the same warmed-up model — avoids re-initialising
+// Gemini every time a sheet opens.
 class CookingAssistant: ObservableObject {
     private let db = Firestore.firestore()
 
@@ -311,6 +335,8 @@ class CookingAssistant: ObservableObject {
     @Published var isModelReady = false
     @Published var suggestions: [RecipeSuggestion] = []
 
+    // Polls isModelReady up to 10 seconds so callers can safely await the model
+    // without hardcoding delays or risking a crash on a cold launch.
     func waitUntilReady() async throws {
         let deadline = Date().addingTimeInterval(10)
 
@@ -323,6 +349,8 @@ class CookingAssistant: ObservableObject {
         }
     }
 
+    // Strips markdown fences and locates the first [...] block in the response.
+    // Gemini sometimes wraps JSON in ```json blocks even when instructed not to.
     private func cleanJSONArrayString(from rawText: String?) -> String? {
         guard var jsonString = rawText else { return nil }
 
@@ -342,6 +370,7 @@ class CookingAssistant: ObservableObject {
         return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // Same as cleanJSONArrayString but for single-object responses.
     private func cleanJSONObjectString(from rawText: String?) -> String? {
         guard var jsonString = rawText else { return nil }
 
@@ -361,11 +390,13 @@ class CookingAssistant: ObservableObject {
         return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    // Generates 3 personalised recipe suggestions and stores them in self.suggestions.
+    // If the user has left reviews, their feedback is injected into the prompt so
+    // future suggestions learn from what they liked or disliked.
     func fetchRecipeSuggestions(reviewFeedback: String = "") async {
         guard let model = model else { return }
 
         let feedbackSection = reviewFeedback.isEmpty ? "" : """
-
 
 
         Important — personalise based on this user feedback from past recipes:
@@ -434,6 +465,9 @@ class CookingAssistant: ObservableObject {
         }
     }
 
+    // Appends one new suggestion to the carousel without duplicating existing ones.
+    // Passing excludedTitles in the prompt prevents Gemini from regenerating a
+    // recipe the user already sees.
     func fetchOneMoreRecipeSuggestion(excludingTitles: [String], reviewFeedback: String = "") async throws {
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
@@ -451,7 +485,6 @@ class CookingAssistant: ObservableObject {
         }
 
         let feedbackSection = reviewFeedback.isEmpty ? "" : """
-
 
 
         Important — personalise based on this user feedback from past recipes:
@@ -530,6 +563,8 @@ class CookingAssistant: ObservableObject {
         }
     }
 
+    // Generates 3 recipes constrained to the ingredients the user has on hand.
+    // Strips emoji prefixes from pantry item strings before sending to the model.
     func generatePantryRecipes(ingredients: [String]) async throws -> [RecipeSuggestion] {
         guard let model else {
             throw CookingAssistantError.modelNotReady
@@ -599,6 +634,9 @@ class CookingAssistant: ObservableObject {
         return try JSONDecoder().decode([RecipeSuggestion].self, from: data)
     }
 
+    // Fetches the user's full profile from Firestore and builds a system prompt
+    // that pins Gemini's persona to their preferences. Called once on HomeView
+    // appear — subsequent AI calls inherit the context without re-fetching.
     func setupAssistant(userId: String) async {
         do {
             let snapshot = try await db.collection("users").document(userId).getDocument()
@@ -655,6 +693,8 @@ class CookingAssistant: ObservableObject {
         }
     }
 
+    // General-purpose text question to the model. Used for typed chat questions
+    // in LiveCookingView and for recipe generation prompts in RecipesViewModel.
     func getHelp(question: String) async throws -> String {
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
@@ -664,6 +704,8 @@ class CookingAssistant: ObservableObject {
         return response.text ?? "Hmm, I couldn't come up with anything. Try rephrasing!"
     }
 
+    // Multimodal call — sends both an image frame and a text prompt so Gemini
+    // can see what the user is cooking and give step-specific visual guidance.
     func getLiveHelp(image: UIImage, question: String) async throws -> String {
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
@@ -690,6 +732,9 @@ class CookingAssistant: ObservableObject {
         }
     }
 
+    // Accepts one or more fridge/pantry photos and returns a categorised
+    // ingredient dictionary. Sending all images in one request reduces latency
+    // and gives the model full context of the fridge contents at once.
     func scanMultipleImages(images: [UIImage]) async throws -> [String: [String]] {
         guard let model else {
             throw CookingAssistantError.modelNotReady

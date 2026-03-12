@@ -1,49 +1,58 @@
-//
-//  User.swift
-//  ChefBuddy
-//
-//  Created by Hrudhai Umas on 3/5/26.
-//
+// User.swift
+// Defines DBUser — the Firestore document model for a user's full profile.
+// Stores authentication identifiers, physical metrics, dietary preferences,
+// kitchen setup, and scheduling preferences.
+// Used by AuthViewModel to read/write user data and by CookingAssistant
+// to personalise every AI prompt with the user's actual preferences.
 
 import Foundation
 import FirebaseFirestore
 import FirebaseAuth
 
+import Foundation
+import FirebaseFirestore
+import FirebaseAuth
+
+// Firestore document model for a user's full profile.
+// Every field maps 1-to-1 to a Firestore key — Codable handles encoding
+// automatically so we never write manual dictionary packing.
 struct DBUser: Codable {
     let id: String
     let email: String?
     var dateCreated: Date
-    
-    // Core Preferences
+
+
     var chefLevel: String
     var dietTags: [String]
     var allergies: [String]
     var macroTags: [String]
-    
-    // Physical Metrics
+
+
     var age: String
     var height: String
     var weight: String
     var sex: String
     var targetGoal: String
     var activityLevel: String
-    
-    // Kitchen Hardware
+
+
     var appliances: [String]
-    
-    // Time & Schedule
+
+
     var cookTime: String
     var mealPrep: Bool
-    
-    // Flavor Profiles
+
+
     var cuisines: [String]
     var spiceTolerance: String
     var dislikes: String
-    
-    // Household & Budget
+
+
     var servingSize: String
     var budget: String
-    
+
+    // Converts Firebase Auth user + onboarding form values into a storable
+    // struct. Sets are converted to arrays because Firestore doesn't support Swift Sets.
     init(
         auth: FirebaseAuth.User,
         level: String,
@@ -68,28 +77,28 @@ struct DBUser: Codable {
         self.id = auth.uid
         self.email = auth.email
         self.dateCreated = Date()
-        
+
         self.chefLevel = level
         self.dietTags = Array(diets)
         self.allergies = Array(allergy)
         self.macroTags = Array(macros)
-        
+
         self.age = age
         self.height = height
         self.weight = weight
         self.sex = sex
         self.targetGoal = targetGoal
         self.activityLevel = activityLevel
-        
+
         self.appliances = Array(appliances)
-        
+
         self.cookTime = cookTime
         self.mealPrep = mealPrep
-        
+
         self.cuisines = Array(cuisines)
         self.spiceTolerance = spiceTolerance
         self.dislikes = dislikes
-        
+
         self.servingSize = servingSize
         self.budget = budget
     }

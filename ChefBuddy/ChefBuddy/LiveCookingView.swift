@@ -1,7 +1,15 @@
-//
-//  LiveCookingView.swift
-//  ChefBuddy
-//
+// LiveCookingView.swift
+// The real-time cooking assistant screen. Combines a live camera feed with
+// step-by-step recipe navigation and an AI chat interface.
+// Users can tap a button to let the AI analyse a frame of their cooking, or ask
+// typed/voice questions hands-free using SpeechManager (SFSpeechRecognizer).
+// When the last step is complete, transitions directly into RecipeReviewView.
+
+import SwiftUI
+import AVFoundation
+import FirebaseFirestore
+import Combine
+import Speech
 
 import SwiftUI
 import AVFoundation
@@ -10,29 +18,31 @@ import Combine
 import Speech
 import UIKit
 
-// MARK: - Image Resizing Extension
+
 extension UIImage {
     func resizedForAI() -> UIImage? {
         let targetWidth: CGFloat = 512.0
         let scale = targetWidth / self.size.width
         let targetHeight = self.size.height * scale
         let targetSize = CGSize(width: targetWidth, height: targetHeight)
-        
+
         let format = UIGraphicsImageRendererFormat()
         format.scale = 1.0
         let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
-        
+
         let resized = renderer.image { _ in
             self.draw(in: CGRect(origin: .zero, size: targetSize))
         }
-        
+
         guard let jpegData = resized.jpegData(compressionQuality: 0.6) else { return nil }
         return UIImage(data: jpegData)
     }
 }
 
-// MARK: - Camera Manager
 
+// Wraps AVCaptureSession so SwiftUI can observe camera state reactively.
+// Publishes isRunning and capturedImage — the view only needs these two
+// values to drive its UI, keeping camera internals fully encapsulated.
 class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     @Published var previewLayer: AVCaptureVideoPreviewLayer?
     @Published var capturedImage: UIImage? = nil
@@ -58,6 +68,8 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         checkPermissionAndSetup()
     }
 
+    // Checks camera authorisation before adding inputs. Adding an input without
+    // permission crashes the session, so permission must be confirmed first.
     private func checkPermissionAndSetup() {
         let status = AVCaptureDevice.authorizationStatus(for: .video)
         DispatchQueue.main.async {
@@ -178,6 +190,8 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         return UIImage(cgImage: cgImage)
     }
 
+    // Grabs the latest sample buffer and converts it to a UIImage so it can
+    // be sent to the Gemini vision model. Uses CIContext for efficient GPU conversion.
     func captureFrame() {
         guard let image = snapshotImage() else { return }
         DispatchQueue.main.async {
@@ -190,8 +204,10 @@ class CameraManager: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
     }
 }
 
-// MARK: - Speech Manager
 
+// Manages microphone input and on-device speech recognition.
+// Hands-free input is important in a cooking context where the user's
+// hands are often messy — voice lets them ask questions without touching the screen.
 class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
     @Published var transcript: String = ""
     @Published var finalTranscript: String = ""
@@ -214,6 +230,8 @@ class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
         requestPermissions()
     }
 
+    // Requests both speech recognition and microphone permissions up front.
+    // Both are required — SFSpeechRecognizer needs the mic AND system authorisation.
     func requestPermissions() {
         SFSpeechRecognizer.requestAuthorization { [weak self] status in
             DispatchQueue.main.async {
@@ -233,6 +251,9 @@ class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
         }
     }
 
+    // Configures the audio session for recording, starts the recognition task,
+    // and taps the input node to feed audio buffers into the request in real time.
+    // .duckOthers lowers any background audio so speech recognition is cleaner.
     func startRecording() {
         guard permissionGranted, !audioEngine.isRunning else {
             if !permissionGranted {
@@ -332,7 +353,6 @@ class SpeechManager: NSObject, ObservableObject, SFSpeechRecognizerDelegate {
     }
 }
 
-// MARK: - Voice Response Manager
 
 final class VoiceResponseManager: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
     @Published var isSpeaking = false
@@ -409,19 +429,19 @@ final class VoiceResponseManager: NSObject, ObservableObject, AVSpeechSynthesize
         let utterance = AVSpeechUtterance(string: text)
         let bestVoice = mostNaturalVoice()
         utterance.voice = bestVoice
-        
+
         if bestVoice?.quality == .premium || bestVoice?.quality == .enhanced {
             self.usingNeuralVoice = true
         } else {
             self.usingNeuralVoice = false
         }
-        
+
         utterance.rate = 0.50
         utterance.pitchMultiplier = 1.05
         utterance.volume = 1.0
         utterance.preUtteranceDelay = 0.02
         utterance.postUtteranceDelay = 0.04
-        
+
         synthesizer.speak(utterance)
     }
 
@@ -436,7 +456,7 @@ final class VoiceResponseManager: NSObject, ObservableObject, AVSpeechSynthesize
         let voiceName = (configuredVoice?.isEmpty == false) ? configuredVoice! : "en-US-Journey-D"
         let parts = voiceName.split(separator: "-")
         let languageCode = parts.count >= 2 ? "\(parts[0])-\(parts[1])" : "en-US"
-        
+
         guard let url = URL(string: "https://texttospeech.googleapis.com/v1/text:synthesize?key=\(apiKey)") else {
             return false
         }
@@ -458,7 +478,7 @@ final class VoiceResponseManager: NSObject, ObservableObject, AVSpeechSynthesize
                     "pitch": 0.0
                 ]
             ]
-            
+
             request.httpBody = try JSONSerialization.data(withJSONObject: payload)
 
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -482,7 +502,7 @@ final class VoiceResponseManager: NSObject, ObservableObject, AVSpeechSynthesize
                     player.delegate = self
                     player.prepareToPlay()
                     self.audioPlayer = player
-                    
+
                     self.usingNeuralVoice = true
                     self.isSpeaking = true
                     self.isPreparingAudio = false
@@ -545,7 +565,7 @@ final class VoiceResponseManager: NSObject, ObservableObject, AVSpeechSynthesize
     private func mostNaturalVoice() -> AVSpeechSynthesisVoice? {
         let voices = AVSpeechSynthesisVoice.speechVoices()
         let englishVoices = voices.filter { $0.language.hasPrefix("en") }
-        
+
         if let premium = englishVoices.first(where: { $0.quality == .premium && $0.language == "en-US" }) { return premium }
         if let premiumAnyEn = englishVoices.first(where: { $0.quality == .premium }) { return premiumAnyEn }
         if let enhanced = englishVoices.first(where: { $0.quality == .enhanced && $0.language == "en-US" }) { return enhanced }
@@ -557,14 +577,13 @@ final class VoiceResponseManager: NSObject, ObservableObject, AVSpeechSynthesize
     }
 }
 
-// MARK: - Camera Preview
 
 struct CameraPreview: UIViewRepresentable {
     let layer: AVCaptureVideoPreviewLayer
-    
+
     class VideoView: UIView {
         var previewLayer: AVCaptureVideoPreviewLayer?
-        
+
         override func layoutSubviews() {
             super.layoutSubviews()
             previewLayer?.frame = bounds
@@ -581,8 +600,10 @@ struct CameraPreview: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) { }
 }
 
-// MARK: - Live Cooking ViewModel
 
+// Drives the step navigation and AI response state for the cooking screen.
+// Kept separate from the view so logic can be tested independently and so
+// the camera and speech managers stay decoupled from AI calls.
 class LiveCookingViewModel: ObservableObject {
     @Published var currentStepIndex: Int = 0
     @Published var aiResponse: String = ""
@@ -597,6 +618,9 @@ class LiveCookingViewModel: ObservableObject {
         let timestamp: Date
     }
 
+    // Sends a camera frame + contextual prompt to Gemini and updates aiResponse.
+    // The prompt tells the model which step we think we're on so it can confirm
+    // or correct, making the guidance actionable rather than generic.
     func analyzeFrame(image: UIImage, recipe: Recipe, assistant: CookingAssistant) {
         isThinking = true
         let steps = recipe.steps
@@ -700,8 +724,9 @@ class LiveCookingViewModel: ObservableObject {
     }
 }
 
-// MARK: - Recipe Picker Sheet
 
+// Sheet that lists the user's saved recipes so they can pick one before
+// starting live cooking. Shown from both HomeView and the dropdown menu.
 struct RecipePickerSheet: View {
     let recipes: [Recipe]
     let onSelect: (Recipe) -> Void
@@ -792,8 +817,11 @@ struct RecipePickerSheet: View {
     }
 }
 
-// MARK: - Main Live UI
 
+// The full-screen cooking experience. Combines camera, step navigation,
+// AI frame analysis, and voice/typed question input in a single dark-mode view.
+// Designed to stay on-screen the entire time the user cooks so they can
+// glance at instructions and get help without leaving the screen.
 struct LiveCookingView: View {
     let recipe: Recipe
     @ObservedObject var assistant: CookingAssistant
@@ -831,7 +859,7 @@ struct LiveCookingView: View {
         speech.isRecording || voice.isSpeaking || voice.isPreparingAudio || vm.isThinking
     }
 
-    // 🧑‍🍳 CULINARY PUNS ADDED HERE
+
     private var liveStatusText: String {
         if speech.isRecording { return "Listening to the chef..." }
         if voice.isPreparingAudio || vm.isThinking { return "Cooking up a response..." }
@@ -914,7 +942,6 @@ struct LiveCookingView: View {
         }
     }
 
-    // MARK: UI Components
 
     private var floatingTopPill: some View {
         VStack(spacing: 0) {
@@ -1115,11 +1142,11 @@ struct LiveCookingView: View {
 
     private var modernBottomDock: some View {
         HStack(spacing: 12) {
-            
-            // ✨ THE NEW CHEF BUDDY ORB UI ✨
+
+
             Button(action: toggleVoiceOrb) {
                 ZStack {
-                    // Outer glow animation
+
                     Circle()
                         .fill(
                             RadialGradient(
@@ -1137,7 +1164,7 @@ struct LiveCookingView: View {
                         .animation(.spring(response: 0.3), value: speech.audioLevel)
                         .animation(.easeInOut(duration: 1.0).repeatForever(), value: voice.isSpeaking)
 
-                    // Inner Orb Core
+
                     Circle()
                         .fill(
                             LinearGradient(
@@ -1149,9 +1176,9 @@ struct LiveCookingView: View {
                         .frame(width: 44, height: 44)
                         .shadow(color: (speech.isRecording ? Color.red : (voice.isSpeaking ? Color.green : Color.orange)).opacity(0.5), radius: 8)
 
-                    // Center Icon / Spinner
+
                     if voice.isPreparingAudio || vm.isThinking {
-                        LiveDots() // Pulses directly inside the orb when thinking!
+                        LiveDots()
                     } else {
                         Image(systemName: speech.isRecording ? "waveform" : (voice.isSpeaking ? "speaker.wave.2.fill" : "sparkles"))
                             .font(.system(size: 18, weight: .bold))
@@ -1161,7 +1188,7 @@ struct LiveCookingView: View {
             }
             .buttonStyle(.plain)
 
-            // Text Field
+
             TextField(
                 liveStatusText,
                 text: $questionText
@@ -1184,7 +1211,7 @@ struct LiveCookingView: View {
                 }
             }
 
-            // Submit Button
+
             if !questionText.trimmingCharacters(in: .whitespaces).isEmpty {
                 Button(action: {
                     sendQuestionWithLiveContext(questionText)
@@ -1205,7 +1232,7 @@ struct LiveCookingView: View {
 
     var body: some View {
         ZStack {
-            // 1. Edge-to-Edge Camera Background
+
             Color.black.ignoresSafeArea()
 
             if cameraReady, let layer = camera.previewLayer {
@@ -1231,7 +1258,7 @@ struct LiveCookingView: View {
                 }
             }
 
-            // 2. Gradients for readability
+
             VStack {
                 LinearGradient(colors: [.black.opacity(0.6), .clear], startPoint: .top, endPoint: .bottom)
                     .frame(height: 140)
@@ -1246,23 +1273,23 @@ struct LiveCookingView: View {
                 Color.white.opacity(0.6).ignoresSafeArea()
             }
 
-            // 3. Floating UI Overlay
+
             VStack(spacing: 0) {
                 floatingTopPill
                     .padding(.top, 8)
-                
+
                 Spacer()
 
                 analyzeButton
-                
+
                 floatingContent
                     .padding(.bottom, 12)
-                
+
                 modernBottomDock
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 16)
-            .safeAreaPadding(.top) // Respects notch/dynamic island
+            .safeAreaPadding(.top)
         }
         .onAppear {
             camera.start()
@@ -1358,7 +1385,6 @@ private struct LiveDots: View {
     }
 }
 
-// MARK: - Step List Sheet
 
 private struct StepListSheet: View {
     let steps: [String]

@@ -1,9 +1,9 @@
-//
-//  ChefBuddyBackground.swift
-//  ChefBuddy
-//
-//  Created by Arkita Jain on 3/10/26.
-//
+// ChefBuddyBackground.swift
+// Shared background used across multiple screens.
+// Two blurred gradient circles give every screen a consistent warm/organic feel
+// without adding rendering cost — circles are static and cheap to composite.
+
+import SwiftUI
 
 import SwiftUI
 
