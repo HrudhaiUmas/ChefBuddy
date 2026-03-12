@@ -40,7 +40,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		6214F6B82F5831F200488C57 /* Exceptions for "ChefBuddy" folder in "ChefBuddy" target */ = {
+		6263C70C2F624C50008BB526 /* Exceptions for "ChefBuddy" folder in "ChefBuddy" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
@@ -53,7 +53,7 @@
 		62DFC6352F580165003EC7D0 /* ChefBuddy */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				6214F6B82F5831F200488C57 /* Exceptions for "ChefBuddy" folder in "ChefBuddy" target */,
+				6263C70C2F624C50008BB526 /* Exceptions for "ChefBuddy" folder in "ChefBuddy" target */,
 			);
 			path = ChefBuddy;
 			sourceTree = "<group>";
@@ -320,6 +320,8 @@
 /* Begin XCBuildConfiguration section */
 		62DFC6522F580169003EC7D0 /* Debug */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 62DFC6352F580165003EC7D0 /* ChefBuddy */;
+			baseConfigurationReferenceRelativePath = Secrets.xcconfig;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -384,6 +386,8 @@
 		};
 		62DFC6532F580169003EC7D0 /* Release */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReferenceAnchor = 62DFC6352F580165003EC7D0 /* ChefBuddy */;
+			baseConfigurationReferenceRelativePath = Secrets.xcconfig;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
