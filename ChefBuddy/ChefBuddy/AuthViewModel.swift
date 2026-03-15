@@ -11,14 +11,6 @@ import FirebaseFirestore
 import GoogleSignIn
 import Combine
 
-import SwiftUI
-import FirebaseAuth
-import FirebaseCore
-import FirebaseFirestore
-import GoogleSignIn
-import Combine
-
-
 // UIKit helper needed because GIDSignIn requires a UIViewController to present
 // the OAuth web view. SwiftUI doesn't expose one directly, so we reach into
 // the connected scene hierarchy to get the root view controller.

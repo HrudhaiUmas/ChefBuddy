@@ -11,14 +11,6 @@ import FirebaseFirestore
 import Combine
 import Speech
 
-import SwiftUI
-import AVFoundation
-import FirebaseFirestore
-import Combine
-import Speech
-import UIKit
-
-
 extension UIImage {
     func resizedForAI() -> UIImage? {
         let targetWidth: CGFloat = 512.0

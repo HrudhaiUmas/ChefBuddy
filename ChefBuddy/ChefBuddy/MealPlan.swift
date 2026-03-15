@@ -8,12 +8,6 @@ import FirebaseFirestore
 import FirebaseAuth
 import Combine
 
-import SwiftUI
-import FirebaseFirestore
-import FirebaseAuth
-import Combine
-
-
 struct MealPlanSlot: Identifiable, Codable {
     var id: String?
     var day: String

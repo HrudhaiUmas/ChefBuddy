@@ -6,11 +6,6 @@ import SwiftUI
 import FirebaseCore
 import GoogleSignIn
 
-import SwiftUI
-import FirebaseCore
-import GoogleSignIn
-
-
 // AppDelegate exists solely to call FirebaseApp.configure() at the earliest
 // possible moment. Firebase must be configured before any SDK call happens,
 // which is why this lives in didFinishLaunchingWithOptions rather than a view.

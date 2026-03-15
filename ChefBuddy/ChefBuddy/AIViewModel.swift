@@ -9,11 +9,6 @@ import FirebaseFirestore
 import FirebaseAILogic
 import SwiftUI
 
-import Combine
-import FirebaseFirestore
-import FirebaseAILogic
-import SwiftUI
-
 // A single AI-generated recipe card shown in the suggestion carousel.
 // Identifiable so SwiftUI lists can diff them; Equatable so we can deduplicate.
 struct RecipeSuggestion: Identifiable, Codable, Equatable {

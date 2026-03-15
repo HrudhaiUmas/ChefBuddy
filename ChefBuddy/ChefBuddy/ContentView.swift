@@ -7,8 +7,6 @@
 
 import SwiftUI
 
-import SwiftUI
-
 struct ContentView: View {
     @StateObject private var authVM = AuthViewModel()
     @State private var showHallucinationWarning = true

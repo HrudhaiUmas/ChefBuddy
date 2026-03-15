@@ -9,10 +9,6 @@ import Foundation
 import FirebaseFirestore
 import FirebaseAuth
 
-import Foundation
-import FirebaseFirestore
-import FirebaseAuth
-
 // Firestore document model for a user's full profile.
 // Every field maps 1-to-1 to a Firestore key — Codable handles encoding
 // automatically so we never write manual dictionary packing.

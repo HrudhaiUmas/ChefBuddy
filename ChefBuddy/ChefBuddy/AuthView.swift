@@ -7,8 +7,6 @@
 
 import SwiftUI
 
-import SwiftUI
-
 // Root view for authentication. Toggles between sign-up and log-in modes
 // in place so the form fields animate smoothly without a sheet transition.
 struct AuthView: View {

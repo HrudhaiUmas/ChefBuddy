@@ -5,8 +5,6 @@
 
 import SwiftUI
 import FirebaseFirestore
-
-import SwiftUI
 import Combine
 import FirebaseAuth
 

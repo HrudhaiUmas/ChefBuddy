@@ -8,10 +8,6 @@
 import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
-
-import SwiftUI
-import FirebaseAuth
-import FirebaseFirestore
 import FirebaseAILogic
 
 struct SimplePantrySpace: Identifiable, Equatable {

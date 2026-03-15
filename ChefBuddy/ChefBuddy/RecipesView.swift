@@ -14,10 +14,6 @@
 // NutritionBreakdownCard — Reusable macro display used in detail and review views.
 
 import SwiftUI
-import FirebaseFirestore
-import Combine
-
-import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 import Combine

@@ -5,8 +5,6 @@
 
 import SwiftUI
 
-import SwiftUI
-
 struct ChefBuddyBackground: View {
     var body: some View {
         ZStack {

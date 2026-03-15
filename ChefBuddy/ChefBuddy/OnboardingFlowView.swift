@@ -7,10 +7,6 @@
 import SwiftUI
 import Combine
 
-import SwiftUI
-import Combine
-
-
 enum OnboardingStep: Int, CaseIterable {
     case welcome = 0
     case scanIngredients
