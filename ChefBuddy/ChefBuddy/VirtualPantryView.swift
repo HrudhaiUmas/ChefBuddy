@@ -10,12 +10,18 @@ import FirebaseFirestore
 import FirebaseAuth
 import Combine
 import UniformTypeIdentifiers
+import UIKit
 
 struct PantrySpace: Identifiable, Hashable {
     let id: String
     var name: String
     var emoji: String
     var colorTheme: String
+}
+
+enum PantryScanMode {
+    case add
+    case replace
 }
 
 struct VirtualPantryView: View {
@@ -42,13 +48,21 @@ struct VirtualPantryView: View {
 
 
     @State private var newIngredient: String = ""
+    @State private var manualIngredientCategory: String = "Produce"
+    @State private var manualIngredientEmoji: String = "🥬"
     @State private var isScanning = false
     @State private var isFetchingDB = true
+    @State private var isSavingPantryLocally = false
+    @State private var pantrySaveInFlightForId: String? = nil
 
     @State private var selectedPhotos: [PhotosPickerItem] = []
+    @State private var pendingSelectedPhotos: [PhotosPickerItem] = []
     @State private var showCamera = false
     @State private var cameraImage: UIImage?
+    @State private var pendingCameraImage: UIImage?
     @State private var showClearAllConfirmation = false
+    @State private var showManualIngredientSheet = false
+    @State private var showScanModeDialog = false
 
 
     @State private var lastScannedDate: Date? = nil
@@ -58,6 +72,7 @@ struct VirtualPantryView: View {
     @State private var editingOriginalCategory: String? = nil
     @State private var editedIngredientName: String = ""
     @State private var editedIngredientCategory: String = "Other"
+    @State private var editedIngredientEmoji: String = "🥬"
     @State private var showEditIngredientSheet = false
 
 
@@ -273,40 +288,43 @@ struct VirtualPantryView: View {
         .sheet(isPresented: $showCamera) {
             CameraPicker(image: $cameraImage)
         }
+        .sheet(isPresented: $showManualIngredientSheet) {
+            IngredientEditorSheet(
+                title: "Add Ingredient",
+                subtitle: "Choose exactly where this item belongs before it hits your shelves.",
+                ingredientName: $newIngredient,
+                selectedEmoji: $manualIngredientEmoji,
+                selectedCategory: $manualIngredientCategory,
+                categories: allCategories,
+                accentColor: activeColor,
+                actionTitle: "Add to Pantry",
+                showsDeleteAction: false,
+                onDelete: nil,
+                onSave: addManualIngredient,
+                onCancel: {
+                    showManualIngredientSheet = false
+                    newIngredient = ""
+                    manualIngredientEmoji = "🥬"
+                }
+            )
+        }
         .sheet(isPresented: $showEditIngredientSheet) {
-            NavigationStack {
-                Form {
-                    Section("Ingredient") {
-                        TextField("Ingredient name", text: $editedIngredientName)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                    }
-
-                    Section("Category") {
-                        Picker("Category", selection: $editedIngredientCategory) {
-                            ForEach(allCategories, id: \.self) { category in
-                                Text(category).tag(category)
-                            }
-                        }
-                        .pickerStyle(.menu)
-                    }
+            IngredientEditorSheet(
+                title: "Edit Ingredient",
+                subtitle: "Rename it, move it, or clean up where it lives in your pantry.",
+                ingredientName: $editedIngredientName,
+                selectedEmoji: $editedIngredientEmoji,
+                selectedCategory: $editedIngredientCategory,
+                categories: allCategories,
+                accentColor: activeColor,
+                actionTitle: "Save Changes",
+                showsDeleteAction: false,
+                onDelete: nil,
+                onSave: saveEditedIngredient,
+                onCancel: {
+                    showEditIngredientSheet = false
                 }
-                .navigationTitle("Edit Ingredient")
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .cancellationAction) {
-                        Button("Cancel") {
-                            showEditIngredientSheet = false
-                        }
-                    }
-                    ToolbarItem(placement: .confirmationAction) {
-                        Button("Save") {
-                            saveEditedIngredient()
-                        }
-                        .disabled(editedIngredientName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                    }
-                }
-            }
+            )
         }
         .fullScreenCover(isPresented: $showCreatePantrySheet) {
             PantryCardCreatorView(
@@ -348,16 +366,40 @@ struct VirtualPantryView: View {
         } message: {
             Text("This will clear everything from \(selectedPantryName).")
         }
+        .confirmationDialog(
+            "How should ChefBuddy handle this scan?",
+            isPresented: $showScanModeDialog,
+            titleVisibility: .visible
+        ) {
+            Button("Add to Pantry") {
+                startPendingScan(mode: .add)
+            }
+            Button("Replace Pantry", role: .destructive) {
+                startPendingScan(mode: .replace)
+            }
+            Button("Cancel", role: .cancel) {
+                pendingSelectedPhotos.removeAll()
+                pendingCameraImage = nil
+                selectedPhotos.removeAll()
+                cameraImage = nil
+            }
+        } message: {
+            Text("Choose whether this scan should add new ingredients or fully replace what’s already in \(selectedPantryName).")
+        }
         .onChange(of: cameraImage) { image in
             if let img = image {
-                Task { await processCameraImage(img) }
+                prepareCameraScan(img)
             }
+        }
+        .onChange(of: assistant.pantryScanSession) { session in
+            handleAssistantScanSession(session)
         }
         .onReceive(relativeTimeTimer) { value in
             relativeTimeRefresh = value
         }
         .onAppear {
             loadPantrySpaces()
+            handleAssistantScanSession(assistant.pantryScanSession)
         }
     }
 
@@ -453,36 +495,44 @@ struct VirtualPantryView: View {
 
     private var actionBar: some View {
         VStack(spacing: 16) {
-            HStack(spacing: 12) {
-                TextField("Add item manually...", text: $newIngredient)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .padding()
-                    .background(.ultraThinMaterial)
-                    .clipShape(RoundedRectangle(cornerRadius: 16))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 16)
-                            .stroke(Color.primary.opacity(0.05), lineWidth: 1)
-                    )
-                    .submitLabel(.done)
-                    .disabled(isScanning || selectedPantryId == nil)
-                    .onSubmit(addManualIngredient)
+            HStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Stock it your way")
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
 
-                Button(action: addManualIngredient) {
-                    Image(systemName: "plus")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: 50, height: 50)
-                        .background(
-                            newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isScanning || selectedPantryId == nil
-                            ? Color.gray.opacity(0.4)
-                            : activeColor
-                        )
-                        .clipShape(Circle())
-                        .shadow(color: activeColor.opacity(0.25), radius: 5, y: 2)
+                    Text("Add ingredients manually, or scan and choose whether to merge or replace.")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
                 }
-                .disabled(newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isScanning || selectedPantryId == nil)
+
+                Spacer(minLength: 0)
+
+                Button(action: {
+                    newIngredient = ""
+                    manualIngredientCategory = allCategories.first ?? "Other"
+                    showManualIngredientSheet = true
+                }) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "plus.circle.fill")
+                        Text("Add Manually")
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(activeColor)
+                    .clipShape(Capsule())
+                    .shadow(color: activeColor.opacity(0.24), radius: 8, y: 4)
+                }
+                .buttonStyle(.plain)
+                .disabled(isScanning || selectedPantryId == nil)
             }
+            .padding(18)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+            )
 
             HStack(spacing: 12) {
                 PhotosPicker(selection: $selectedPhotos, maxSelectionCount: 5, matching: .images) {
@@ -490,7 +540,7 @@ struct VirtualPantryView: View {
                 }
                 .disabled(isScanning || selectedPantryId == nil)
                 .onChange(of: selectedPhotos) { newItems in
-                    Task { await processSelectedPhotos(newItems) }
+                    preparePhotoScan(newItems)
                 }
 
                 Button(action: { showCamera = true }) {
@@ -691,6 +741,11 @@ struct VirtualPantryView: View {
         guard let collection = pantrySpacesCollection() else { return }
 
         collection.document(spaceId).getDocument { snapshot, error in
+            if self.pantrySaveInFlightForId == spaceId || self.isSavingPantryLocally {
+                self.isFetchingDB = false
+                return
+            }
+
             var newCategories: [String: [String]] = [:]
             var newLastScannedDate: Date? = nil
 
@@ -733,7 +788,15 @@ struct VirtualPantryView: View {
             payload["lastScannedAt"] = FieldValue.serverTimestamp()
         }
 
-        collection.document(selectedPantryId).setData(payload, merge: true)
+        isSavingPantryLocally = true
+        pantrySaveInFlightForId = selectedPantryId
+
+        collection.document(selectedPantryId).setData(payload, merge: true) { _ in
+            self.isSavingPantryLocally = false
+            if self.pantrySaveInFlightForId == selectedPantryId {
+                self.pantrySaveInFlightForId = nil
+            }
+        }
     }
 
     private func clearAllIngredients() {
@@ -748,27 +811,59 @@ struct VirtualPantryView: View {
         let clean = newIngredient.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !clean.isEmpty else { return }
 
-        let itemToAdd = normalizeIngredientItem(clean)
+        let itemToAdd = normalizeIngredientItem(clean, preferredEmoji: manualIngredientEmoji)
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.7)) {
-            var items = pantryCategories["Other"] ?? []
+            var items = pantryCategories[manualIngredientCategory] ?? []
             if !items.contains(itemToAdd) {
                 items.insert(itemToAdd, at: 0)
-                pantryCategories["Other"] = items
+                pantryCategories[manualIngredientCategory] = items
             }
         }
 
         newIngredient = ""
+        manualIngredientEmoji = "🥬"
+        manualIngredientCategory = allCategories.first ?? "Other"
+        showManualIngredientSheet = false
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         savePantry(isScan: false)
     }
 
-    private func processSelectedPhotos(_ items: [PhotosPickerItem]) async {
+    private func preparePhotoScan(_ items: [PhotosPickerItem]) {
         guard !items.isEmpty else { return }
 
-        await MainActor.run {
-            startScanAnimation()
+        if hasIngredients {
+            pendingSelectedPhotos = items
+            pendingCameraImage = nil
+            showScanModeDialog = true
+        } else {
+            Task { await processSelectedPhotos(items, mode: .add) }
         }
+    }
+
+    private func prepareCameraScan(_ image: UIImage) {
+        if hasIngredients {
+            pendingCameraImage = image
+            pendingSelectedPhotos.removeAll()
+            showScanModeDialog = true
+        } else {
+            Task { await processCameraImage(image, mode: .add) }
+        }
+    }
+
+    private func startPendingScan(mode: PantryScanMode) {
+        if !pendingSelectedPhotos.isEmpty {
+            let items = pendingSelectedPhotos
+            pendingSelectedPhotos.removeAll()
+            Task { await processSelectedPhotos(items, mode: mode) }
+        } else if let image = pendingCameraImage {
+            pendingCameraImage = nil
+            Task { await processCameraImage(image, mode: mode) }
+        }
+    }
+
+    private func processSelectedPhotos(_ items: [PhotosPickerItem], mode: PantryScanMode) async {
+        guard !items.isEmpty else { return }
 
         var images: [UIImage] = []
         for item in items {
@@ -778,18 +873,15 @@ struct VirtualPantryView: View {
             }
         }
 
-        do {
-            let scannedCategories = try await assistant.scanMultipleImages(images: images)
-
-            await MainActor.run {
-                mergeIngredients(scannedCategories)
-                finishScanAnimation()
-            }
-        } catch {
-            print("Failed to scan images: \(error)")
-            await MainActor.run {
-                stopScanAnimation(resetProgress: true)
-            }
+        await MainActor.run {
+            guard let selectedPantryId else { return }
+            startScanAnimation()
+            assistant.startPantryScan(
+                images: images,
+                pantryId: selectedPantryId,
+                pantryName: selectedPantryName,
+                mode: mode
+            )
         }
 
         await MainActor.run {
@@ -797,28 +889,66 @@ struct VirtualPantryView: View {
         }
     }
 
-    private func processCameraImage(_ image: UIImage) async {
+    private func processCameraImage(_ image: UIImage, mode: PantryScanMode) async {
         await MainActor.run {
             startScanAnimation()
-        }
-
-        do {
-            let scannedCategories = try await assistant.scanMultipleImages(images: [image])
-
-            await MainActor.run {
-                mergeIngredients(scannedCategories)
-                finishScanAnimation()
-            }
-        } catch {
-            print("Failed to scan camera image: \(error)")
-            await MainActor.run {
-                stopScanAnimation(resetProgress: true)
-            }
+            guard let selectedPantryId else { return }
+            assistant.startPantryScan(
+                images: [image],
+                pantryId: selectedPantryId,
+                pantryName: selectedPantryName,
+                mode: mode
+            )
         }
 
         await MainActor.run {
             cameraImage = nil
         }
+    }
+
+    private func handleAssistantScanSession(_ session: PantryScanSession?) {
+        guard let session else {
+            if isScanning {
+                stopScanAnimation(resetProgress: true)
+            }
+            return
+        }
+
+        guard session.pantryId == selectedPantryId else {
+            if isScanning {
+                stopScanAnimation(resetProgress: true)
+            }
+            return
+        }
+
+        switch session.state {
+        case .running:
+            if !isScanning {
+                startScanAnimation()
+            }
+            selectedPantryName = session.pantryName
+        case .completed:
+            if !session.didApplyResult {
+                applyScannedIngredients(session.scannedCategories, mode: session.mode)
+                assistant.markPantryScanApplied(session.id)
+            }
+            finishScanAnimation()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
+                assistant.clearPantryScanIfFinished(for: session.pantryId)
+            }
+        case .failed:
+            stopScanAnimation(resetProgress: true)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                assistant.clearPantryScanIfFinished(for: session.pantryId)
+            }
+        }
+    }
+
+    private func applyScannedIngredients(_ newCategories: [String: [String]], mode: PantryScanMode) {
+        if mode == .replace {
+            pantryCategories.removeAll()
+        }
+        mergeIngredients(newCategories)
     }
 
     private func mergeIngredients(_ newCategories: [String: [String]]) {
@@ -850,8 +980,10 @@ struct VirtualPantryView: View {
 
         let parts = item.split(separator: " ", maxSplits: 1)
         if parts.count == 2 {
+            editedIngredientEmoji = String(parts[0])
             editedIngredientName = String(parts[1])
         } else {
+            editedIngredientEmoji = "🥬"
             editedIngredientName = item
         }
 
@@ -873,12 +1005,7 @@ struct VirtualPantryView: View {
 
 
         let updatedItem: String
-        let oldParts = originalItem.split(separator: " ", maxSplits: 1)
-        if oldParts.count == 2 {
-            updatedItem = "\(oldParts[0]) \(cleanedName)"
-        } else {
-            updatedItem = normalizeIngredientItem(cleanedName)
-        }
+        updatedItem = normalizeIngredientItem(cleanedName, preferredEmoji: editedIngredientEmoji)
 
         withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
             removeItem(originalItem, from: originalCategory)
@@ -896,7 +1023,8 @@ struct VirtualPantryView: View {
         editingOriginalItem = nil
         editingOriginalCategory = nil
         editedIngredientName = ""
-        editedIngredientCategory = "Other"
+        editedIngredientEmoji = "🥬"
+        editedIngredientCategory = allCategories.first ?? "Other"
     }
 
     private func removeItem(_ item: String, from category: String) {
@@ -929,7 +1057,7 @@ struct VirtualPantryView: View {
         savePantry(isScan: false)
     }
 
-    private func normalizeIngredientItem(_ item: String) -> String {
+    private func normalizeIngredientItem(_ item: String, preferredEmoji: String? = nil) -> String {
         let trimmed = item.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         let parts = trimmed.split(separator: " ", maxSplits: 1)
 
@@ -937,7 +1065,7 @@ struct VirtualPantryView: View {
             return "\(parts[0]) \(parts[1])"
         } else {
             let defaultEmojis = ["🥫", "🍱", "🍲", "🥗", "🍛", "🥘", "🌮", "🍝", "🥩", "🍗", "🥦", "🍋", "🌶️", "🍄", "🥕"]
-            let randomEmoji = defaultEmojis.randomElement() ?? "🥘"
+            let randomEmoji = preferredEmoji ?? defaultEmojis.randomElement() ?? "🥘"
             return "\(randomEmoji) \(trimmed)"
         }
     }
@@ -980,6 +1108,350 @@ struct VirtualPantryView: View {
         if resetProgress {
             scanStatusText = "Waking up ChefBuddy..."
             scanAnimationStep = 0
+        }
+    }
+}
+
+private struct IngredientEditorSheet: View {
+    let title: String
+    let subtitle: String
+    @Binding var ingredientName: String
+    @Binding var selectedEmoji: String
+    @Binding var selectedCategory: String
+    let categories: [String]
+    let accentColor: Color
+    let actionTitle: String
+    let showsDeleteAction: Bool
+    let onDelete: (() -> Void)?
+    let onSave: () -> Void
+    let onCancel: () -> Void
+
+    @FocusState private var isFocused: Bool
+    @State private var showEmojiPicker = false
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                Color(.systemGroupedBackground).ignoresSafeArea()
+
+                Circle()
+                    .fill(accentColor.opacity(0.14))
+                    .blur(radius: 80)
+                    .offset(x: -130, y: -220)
+                    .ignoresSafeArea()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 22) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text(title)
+                                .font(.system(size: 30, weight: .heavy, design: .rounded))
+
+                            Text(subtitle)
+                                .font(.system(size: 15, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 20)
+
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("Ingredient Name")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            TextField("Example: baby spinach", text: $ingredientName)
+                                .textInputAutocapitalization(.never)
+                                .autocorrectionDisabled()
+                                .focused($isFocused)
+                                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 14)
+                                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        }
+                        .padding(18)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("Pick an emoji")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            IngredientEmojiButton(
+                                selectedEmoji: $selectedEmoji,
+                                accentColor: accentColor,
+                                onTap: {
+                                    showEmojiPicker = true
+                                }
+                            )
+                        }
+                        .padding(18)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 16) {
+                            Text("Where should it live?")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            FlexibleCategoryGrid(categories: categories, selectedCategory: $selectedCategory, accentColor: accentColor)
+                        }
+                        .padding(18)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+
+                        if showsDeleteAction, let onDelete {
+                            Button(role: .destructive, action: onDelete) {
+                                Label("Delete Ingredient", systemImage: "trash.fill")
+                                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 14)
+                            }
+                        }
+
+                        Button(action: onSave) {
+                            Text(actionTitle)
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 56)
+                                .background(accentColor, in: Capsule())
+                                .shadow(color: accentColor.opacity(0.24), radius: 10, y: 5)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(ingredientName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .opacity(ingredientName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.6 : 1)
+                    }
+                    .padding(.horizontal, 22)
+                    .padding(.bottom, 24)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel", action: onCancel)
+                }
+            }
+            .onAppear {
+                if selectedCategory.isEmpty {
+                    selectedCategory = categories.first ?? "Other"
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    isFocused = true
+                }
+            }
+            .sheet(isPresented: $showEmojiPicker) {
+                IngredientEmojiKeyboardSheet(selectedEmoji: $selectedEmoji, accentColor: accentColor)
+                    .presentationDetents([.fraction(0.32)])
+                    .presentationDragIndicator(.visible)
+            }
+        }
+    }
+}
+
+private struct IngredientEmojiButton: View {
+    @Binding var selectedEmoji: String
+    let accentColor: Color
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            HStack(spacing: 14) {
+                Text(selectedEmoji)
+                    .font(.system(size: 32))
+                    .frame(width: 60, height: 60)
+                    .background(
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(accentColor.opacity(0.16))
+                    )
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Choose from keyboard")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text("Tap to open the emoji keyboard and pick any emoji.")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+
+                Spacer()
+
+                Text("...")
+                    .font(.system(size: 24, weight: .heavy, design: .rounded))
+                    .foregroundStyle(accentColor)
+            }
+            .padding(14)
+            .background(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(Color.primary.opacity(0.06))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .stroke(accentColor.opacity(0.18), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct IngredientEmojiKeyboardSheet: View {
+    @Binding var selectedEmoji: String
+    let accentColor: Color
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draftEmoji = ""
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("Pick any emoji")
+                    .font(.system(size: 24, weight: .heavy, design: .rounded))
+
+                Text("ChefBuddy will use the first emoji you enter here.")
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+
+                HStack(spacing: 14) {
+                    Text(draftEmoji.isEmpty ? selectedEmoji : draftEmoji)
+                        .font(.system(size: 42))
+                        .frame(width: 78, height: 78)
+                        .background(
+                            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                .fill(accentColor.opacity(0.16))
+                        )
+
+                    EmojiKeyboardTextField(text: $draftEmoji)
+                        .frame(maxWidth: .infinity)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 16)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                }
+
+                Text("If you want a different one later, tap the ... button again.")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+
+                Button {
+                    if draftEmoji.isEmpty == false {
+                        selectedEmoji = draftEmoji
+                    }
+                    dismiss()
+                } label: {
+                    Text("Use Emoji")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(accentColor, in: Capsule())
+                }
+                .buttonStyle(.plain)
+
+                Spacer()
+            }
+            .padding(22)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") {
+                        if draftEmoji.isEmpty == false {
+                            selectedEmoji = draftEmoji
+                        }
+                        dismiss()
+                    }
+                }
+            }
+            .onAppear {
+                draftEmoji = selectedEmoji
+            }
+        }
+    }
+}
+
+private struct EmojiKeyboardTextField: UIViewRepresentable {
+    @Binding var text: String
+
+    func makeUIView(context: Context) -> EmojiOnlyTextField {
+        let textField = EmojiOnlyTextField()
+        textField.delegate = context.coordinator
+        textField.textAlignment = .center
+        textField.font = .systemFont(ofSize: 34)
+        textField.tintColor = .clear
+        textField.backgroundColor = .clear
+        textField.placeholder = "😀"
+        return textField
+    }
+
+    func updateUIView(_ uiView: EmojiOnlyTextField, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+        if uiView.window != nil, uiView.isFirstResponder == false {
+            DispatchQueue.main.async {
+                uiView.becomeFirstResponder()
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text)
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        @Binding var text: String
+
+        init(text: Binding<String>) {
+            _text = text
+        }
+
+        func textFieldDidChangeSelection(_ textField: UITextField) {
+            let firstEmoji = textField.text?.first.map(String.init) ?? ""
+            if text != firstEmoji {
+                text = firstEmoji
+            }
+            if textField.text != firstEmoji {
+                textField.text = firstEmoji
+            }
+        }
+    }
+}
+
+private final class EmojiOnlyTextField: UITextField {
+    override var textInputContextIdentifier: String? {
+        ""
+    }
+
+    override var textInputMode: UITextInputMode? {
+        UITextInputMode.activeInputModes.first(where: { $0.primaryLanguage == "emoji" }) ?? super.textInputMode
+    }
+}
+
+private struct FlexibleCategoryGrid: View {
+    let categories: [String]
+    @Binding var selectedCategory: String
+    let accentColor: Color
+
+    private let columns = [GridItem(.adaptive(minimum: 120), spacing: 12)]
+
+    var body: some View {
+        LazyVGrid(columns: columns, spacing: 12) {
+            ForEach(categories, id: \.self) { category in
+                Button(action: {
+                    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    selectedCategory = category
+                }) {
+                    Text(category)
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                        .foregroundStyle(selectedCategory == category ? .white : .primary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(
+                            Group {
+                                if selectedCategory == category {
+                                    accentColor
+                                } else {
+                                    Color.primary.opacity(0.08)
+                                }
+                            }
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 }
@@ -1449,7 +1921,7 @@ struct IngredientCard: View {
                     Text(parsedEmoji)
                         .font(.system(size: 16))
 
-                    Text(parsedTitle.capitalized)
+                    Text(parsedTitle)
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundStyle(.primary)
 

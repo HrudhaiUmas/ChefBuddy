@@ -9,6 +9,39 @@ import Foundation
 import FirebaseFirestore
 import FirebaseAuth
 
+enum NotificationSlotKind: String, Codable, CaseIterable {
+    case pantry
+    case mealPlan
+    case inspiration
+
+    var title: String {
+        switch self {
+        case .pantry: return "Pantry Nudges"
+        case .mealPlan: return "Meal Plan Reminders"
+        case .inspiration: return "Recipe Inspiration"
+        }
+    }
+}
+
+struct NotificationSlotPreference: Codable, Equatable, Identifiable {
+    var slotId: String
+    var title: String
+    var hour: Int
+    var minute: Int
+    var isEnabled: Bool
+    var kind: NotificationSlotKind
+
+    var id: String { slotId }
+
+    static var defaults: [NotificationSlotPreference] {
+        [
+            NotificationSlotPreference(slotId: "breakfast", title: "Breakfast", hour: 9, minute: 0, isEnabled: true, kind: .inspiration),
+            NotificationSlotPreference(slotId: "afternoon", title: "Afternoon", hour: 14, minute: 0, isEnabled: true, kind: .pantry),
+            NotificationSlotPreference(slotId: "evening", title: "Evening", hour: 18, minute: 0, isEnabled: true, kind: .mealPlan)
+        ]
+    }
+}
+
 // Firestore document model for a user's full profile.
 // Every field maps 1-to-1 to a Firestore key — Codable handles encoding
 // automatically so we never write manual dictionary packing.
@@ -46,6 +79,12 @@ struct DBUser: Codable {
 
     var servingSize: String
     var budget: String
+    var dailyCalorieTarget: Int?
+    var activePantryId: String?
+    var didCompleteNotificationOnboarding: Bool?
+    var notificationsEnabled: Bool?
+    var notificationAuthorizationStatus: String?
+    var notificationPreferences: [NotificationSlotPreference]?
 
     // Converts Firebase Auth user + onboarding form values into a storable
     // struct. Sets are converted to arrays because Firestore doesn't support Swift Sets.
@@ -68,7 +107,10 @@ struct DBUser: Codable {
         spiceTolerance: String,
         dislikes: String,
         servingSize: String,
-        budget: String
+        budget: String,
+        dailyCalorieTarget: Int? = nil,
+        activePantryId: String? = nil,
+        notificationPreferences: [NotificationSlotPreference] = NotificationSlotPreference.defaults
     ) {
         self.id = auth.uid
         self.email = auth.email
@@ -97,5 +139,11 @@ struct DBUser: Codable {
 
         self.servingSize = servingSize
         self.budget = budget
+        self.dailyCalorieTarget = dailyCalorieTarget
+        self.activePantryId = activePantryId
+        self.didCompleteNotificationOnboarding = false
+        self.notificationsEnabled = false
+        self.notificationAuthorizationStatus = "not_determined"
+        self.notificationPreferences = notificationPreferences
     }
 }

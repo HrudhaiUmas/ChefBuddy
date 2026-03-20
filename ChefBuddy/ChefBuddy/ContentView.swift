@@ -6,9 +6,11 @@
 // understand the limits of AI-generated recipes before they start cooking.
 
 import SwiftUI
+import FirebaseAuth
 
 struct ContentView: View {
     @StateObject private var authVM = AuthViewModel()
+    @StateObject private var notificationManager = NotificationManager.shared
     @State private var showHallucinationWarning = true
 
     var body: some View {
@@ -30,15 +32,22 @@ struct ContentView: View {
 
                     InitialPreferencesView()
                         .environmentObject(authVM)
+                        .environmentObject(notificationManager)
+                } else if (authVM.currentUserProfile?.didCompleteNotificationOnboarding ?? false) == false {
+                    NotificationPermissionView()
+                        .environmentObject(authVM)
+                        .environmentObject(notificationManager)
                 } else {
 
                     HomeView()
                         .environmentObject(authVM)
+                        .environmentObject(notificationManager)
                 }
             } else {
 
                 OnboardingFlowView()
                     .environmentObject(authVM)
+                    .environmentObject(notificationManager)
             }
         }
 
@@ -53,6 +62,12 @@ struct ContentView: View {
                 .presentationDetents([.fraction(0.80)])
                 .presentationDragIndicator(.hidden)
                 .interactiveDismissDisabled(true)
+        }
+        .task(id: authVM.currentUserProfile?.id) {
+            if let profile = authVM.currentUserProfile,
+               let uid = authVM.userSession?.uid {
+                await notificationManager.rescheduleNotificationsIfPossible(profile: profile, userId: uid)
+            }
         }
     }
 }

@@ -196,6 +196,13 @@ func quantityHint(from ingredientLine: String) -> String {
     return ""
 }
 
+func displayIngredientText(from raw: String) -> String {
+    raw
+        .replacingOccurrences(of: #"^[-*•]\s*"#, with: "", options: .regularExpression)
+        .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 private func ingredientTokenSet(_ raw: String) -> Set<String> {
     let normalized = normalizedIngredientKey(from: raw)
     return Set(normalized.split(separator: " ").map(String.init))
@@ -353,23 +360,6 @@ extension CookingAssistant {
         return output
     }
 
-    private static func extractJSONObject(from raw: String?) -> String? {
-        guard var json = raw else { return nil }
-
-        json = json
-            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
-            .replacingOccurrences(of: "```", with: "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-
-        if let start = json.firstIndex(of: "{") {
-            json = String(json[start...])
-        }
-        if let end = json.lastIndex(of: "}") {
-            json = String(json[...end])
-        }
-
-        return json.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
 }
 
 
@@ -616,47 +606,7 @@ class RecipesViewModel: ObservableObject {
         Task {
             do {
                 try await assistant.waitUntilReady()
-
-                let fullPrompt = """
-                Generate a recipe based on: \(prompt)
-
-                Respond ONLY in this exact format, no extra text:
-                Title: [recipe name]
-                Emoji: [single relevant emoji]
-                Description: [one sentence about the dish]
-                Cook Time: [e.g. 25 mins]
-                Servings: [e.g. 2 people]
-                Difficulty: [Easy / Medium / Hard]
-                Calories: [e.g. 420 kcal]
-                Carbs: [e.g. 42g]
-                Protein: [e.g. 35g]
-                Fat: [e.g. 12g]
-                Saturated Fat: [e.g. 4g]
-                Sugar: [e.g. 8g]
-                Fiber: [e.g. 5g]
-                Sodium: [e.g. 620mg]
-                Tags: [comma-separated, e.g. High Protein, Healthy, Quick]
-
-                Ingredients:
-                - [ingredient 1]
-                - [ingredient 2]
-
-                Instructions:
-                1. [step one]
-                2. [step two]
-
-                Rules for quality:
-                - ingredients must include concrete amounts/units (e.g., "1 tbsp olive oil", "200g tofu")
-                - instructions must be detailed, precise, and beginner-friendly
-                - include prep details where relevant (washing, peeling, dicing, preheating, marinating)
-                - include doneness cues and timing checkpoints (e.g., "cook until translucent, 3-4 mins")
-                - never skip important food safety or preparation steps
-                - include at least one cuisine tag in Tags
-                """
-
-                let raw = try await assistant.getHelp(question: fullPrompt)
-
-                var recipe = RecipesViewModel.parseRecipe(from: raw)
+                var recipe = try await assistant.generateRecipe(from: prompt)
 
                 let encoded = try Firestore.Encoder().encode(recipe)
                 let ref = try await db.collection("users")
@@ -818,6 +768,8 @@ struct RecipesView: View {
     @State private var liveHelpRecipe: Recipe? = nil
     @State private var pantryIngredients: [String] = []
     @State private var pantryListener: ListenerRegistration? = nil
+    @State private var pantrySpaces: [SimplePantrySpace] = []
+    @State private var selectedPantryId: String? = nil
     @State private var showGroceryList = false
 
     private var userId: String { authVM.userSession?.uid ?? "" }
@@ -887,15 +839,42 @@ struct RecipesView: View {
             .addSnapshotListener { snap, _ in
                 guard let docs = snap?.documents else { return }
 
-                var all: [String] = []
+                var spaces: [SimplePantrySpace] = []
                 for doc in docs {
                     let data = doc.data()
+                    let name = data["name"] as? String ?? "Pantry"
+                    let emoji = data["emoji"] as? String ?? "🥑"
+                    let colorTheme = data["colorTheme"] as? String ?? "Orange"
                     let virtualPantry = data["virtualPantry"] as? [String: [String]] ?? [:]
-                    all.append(contentsOf: virtualPantry.values.flatMap { $0 })
+                    spaces.append(
+                        SimplePantrySpace(
+                            id: doc.documentID,
+                            name: name,
+                            emoji: emoji,
+                            ingredients: virtualPantry.values.flatMap { $0 },
+                            colorTheme: colorTheme
+                        )
+                    )
                 }
 
                 DispatchQueue.main.async {
-                    pantryIngredients = all
+                    pantrySpaces = spaces.sorted { $0.name < $1.name }
+
+                    let preferredPantryId = authVM.currentUserProfile?.activePantryId
+                    if let selectedPantryId,
+                       pantrySpaces.contains(where: { $0.id == selectedPantryId }) == false {
+                        self.selectedPantryId = nil
+                    }
+
+                    if self.selectedPantryId == nil,
+                       let preferredPantryId,
+                       pantrySpaces.contains(where: { $0.id == preferredPantryId }) {
+                        self.selectedPantryId = preferredPantryId
+                    } else if self.selectedPantryId == nil {
+                        self.selectedPantryId = pantrySpaces.first?.id
+                    }
+
+                    pantryIngredients = pantrySpaces.first(where: { $0.id == self.selectedPantryId })?.ingredients ?? []
                 }
             }
     }
@@ -1115,20 +1094,6 @@ struct RecipesView: View {
                     await loadInitialSuggestions()
                 }
             }
-            .onChange(of: vm.recipes) { recipes in
-                if recipes.count < 3 && !vm.isGenerating && assistant.isModelReady {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        vm.autoGenerateIfNeeded(assistant: assistant, userId: userId)
-                    }
-                }
-            }
-        .onChange(of: assistant.isModelReady) { ready in
-            if ready && vm.recipes.count < 3 && !vm.isGenerating {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    vm.autoGenerateIfNeeded(assistant: assistant, userId: userId)
-                }
-            }
-        }
         .onChange(of: vm.justGeneratedRecipe) { recipe in
             if recipe != nil {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
@@ -1136,6 +1101,10 @@ struct RecipesView: View {
                     vm.justGeneratedRecipe = nil
                 }
             }
+        }
+        .onChange(of: selectedPantryId) { pantryId in
+            pantryIngredients = pantrySpaces.first(where: { $0.id == pantryId })?.ingredients ?? []
+            authVM.updateActivePantrySelection(pantryId)
         }
         .sheet(isPresented: $showGenerateSheet) {
             GenerateRecipeSheet(vm: vm, assistant: assistant, userId: userId)
@@ -1147,6 +1116,8 @@ struct RecipesView: View {
                 recipe: recipe,
                 assistant: assistant,
                 pantryIngredients: pantryIngredients,
+                pantrySpaces: pantrySpaces,
+                selectedPantryId: selectedPantryId,
                 onFavorite: {
                     toggleFavoriteEverywhere(recipe)
                 },
@@ -1176,6 +1147,9 @@ struct RecipesView: View {
                 },
                 onOpenGroceryList: {
                     openGroceryListSheetSafely()
+                },
+                onSelectPantry: { pantryId in
+                    selectedPantryId = pantryId
                 }
             )
         }
@@ -1205,12 +1179,6 @@ struct RecipesView: View {
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                         liveHelpRecipe = recipe
                     }
-                },
-                onAddMissingToGrocery: { targetRecipe, missing in
-                    addMissingIngredientsToGroceryList(recipe: targetRecipe, missing: missing)
-                },
-                onOpenGroceryList: {
-                    openGroceryListSheetSafely()
                 }
             )
         }
@@ -1898,28 +1866,62 @@ private struct SuggestionCookingCard: View {
                     .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    HStack(spacing: 4) {
+                        Image(systemName: "circle")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("AI Suggestion")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(Color.primary.opacity(0.92))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.14))
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+                    )
+                    .clipShape(Capsule())
+                }
+                .frame(height: 16)
+
                 Text("ChefBuddy is cooking...")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(.primary)
-                    .lineLimit(2)
+                    .lineLimit(3)
+                    .frame(height: 54, alignment: .topLeading)
 
                 Text("Making your next recipe idea")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                    .frame(height: 20, alignment: .leading)
+
+                Text("Detailed steps and nutrition are on the way.")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .frame(height: 18, alignment: .leading)
 
                 HStack(spacing: 4) {
                     Text("Generating")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.blue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.blue.opacity(0.12))
+                        .clipShape(Capsule())
+
+                    Spacer(minLength: 0)
 
                     RecipeBouncingDotsView(step: scanAnimationStep, color: .orange)
                 }
+                .frame(height: 22)
             }
             .padding(12)
         }
-        .frame(width: 180)
+        .frame(width: 180, height: 288)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20))
         .overlay(RoundedRectangle(cornerRadius: 20).stroke(Color.primary.opacity(0.05), lineWidth: 1))
@@ -2396,6 +2398,8 @@ struct RecipeDetailView: View {
     let recipe: Recipe
     @ObservedObject var assistant: CookingAssistant
     var pantryIngredients: [String] = []
+    var pantrySpaces: [SimplePantrySpace] = []
+    var selectedPantryId: String? = nil
     let onFavorite: () -> Void
     let onDelete: () -> Void
     let userId: String
@@ -2404,6 +2408,7 @@ struct RecipeDetailView: View {
     var onLiveHelp: (() -> Void)? = nil
     var onAddMissingToGrocery: ((Recipe, [String]) -> Void)? = nil
     var onOpenGroceryList: (() -> Void)? = nil
+    var onSelectPantry: ((String?) -> Void)? = nil
 
 
     @State private var activeTab = 0
@@ -2694,13 +2699,16 @@ struct RecipeDetailView: View {
                     IngredientsTab(
                         ingredients: recipe.ingredients,
                         pantryIngredients: pantryIngredients,
+                        pantrySpaces: pantrySpaces,
+                        selectedPantryId: selectedPantryId,
                         onAddAllMissing: { missing in
                             onAddMissingToGrocery?(recipe, missing)
                             dismissThenOpenGroceryListIfAvailable()
                         },
                         onOpenGroceryList: {
                             dismissThenOpenGroceryListIfAvailable()
-                        }
+                        },
+                        onSelectPantry: onSelectPantry
                     )
                 } else {
                     InstructionsTab(steps: recipe.steps)
@@ -2722,11 +2730,6 @@ struct RecipeDetailView: View {
                 .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
-        .alert("Added to Plan", isPresented: $mealPlanVM.showSuccessAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("\(recipe.title) has been added to your meal plan.")
-        }
     }
 
 }
@@ -2739,8 +2742,6 @@ struct SuggestedRecipeDetailView: View {
     var onDislike: (() -> Void)? = nil
     var onRecipeUpdated: ((Recipe) -> Void)? = nil
     var onLiveHelp: (() -> Void)? = nil
-    var onAddMissingToGrocery: ((Recipe, [String]) -> Void)? = nil
-    var onOpenGroceryList: (() -> Void)? = nil
 
     @State private var activeTab = 0
     @State private var showAssistantSheet = false
@@ -2754,14 +2755,6 @@ struct SuggestedRecipeDetailView: View {
             return .red
         default:
             return .orange
-        }
-    }
-
-    private func dismissThenOpenGroceryListIfAvailable() {
-        guard let onOpenGroceryList else { return }
-        dismiss()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            onOpenGroceryList()
         }
     }
 
@@ -2971,13 +2964,7 @@ struct SuggestedRecipeDetailView: View {
                     IngredientsTab(
                         ingredients: recipe.ingredients,
                         pantryIngredients: pantryIngredients,
-                        onAddAllMissing: { missing in
-                            onAddMissingToGrocery?(recipe, missing)
-                            dismissThenOpenGroceryListIfAvailable()
-                        },
-                        onOpenGroceryList: {
-                            dismissThenOpenGroceryListIfAvailable()
-                        }
+                        showsGroceryActions: false
                     )
                 } else {
                     InstructionsTab(steps: recipe.steps)
@@ -3252,6 +3239,10 @@ private struct StatBadge: View {
 
 private struct MissingIngredientPanel: View {
     let missingIngredients: [String]
+    var pantrySpaces: [SimplePantrySpace] = []
+    var selectedPantryId: String? = nil
+    var onSelectPantry: ((String?) -> Void)? = nil
+    var showsGroceryActions = true
     var onAddAll: (() -> Void)? = nil
     var onOpenList: (() -> Void)? = nil
 
@@ -3271,11 +3262,44 @@ private struct MissingIngredientPanel: View {
                 .foregroundStyle(.primary)
             }
 
+            if let onSelectPantry,
+               let selectedPantry = pantrySpaces.first(where: { $0.id == selectedPantryId }) {
+                Menu {
+                    ForEach(pantrySpaces) { pantry in
+                        Button {
+                            onSelectPantry(pantry.id)
+                        } label: {
+                            HStack {
+                                Text("\(pantry.emoji) \(pantry.name)")
+                                if pantry.id == selectedPantryId {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Checking")
+                            .foregroundStyle(.secondary)
+                        Text("\(selectedPantry.emoji) \(selectedPantry.name)")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .lineLimit(1)
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(Capsule())
+                }
+            }
+
             if !missingIngredients.isEmpty {
                 ScrollView(.horizontal, showsIndicators: false) {
                     HStack(spacing: 6) {
                         ForEach(missingIngredients, id: \.self) { ingredient in
-                            Text(normalizedIngredientKey(from: ingredient))
+                            Text(displayIngredientText(from: ingredient))
                                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                                 .foregroundStyle(.orange)
                                 .padding(.horizontal, 9)
@@ -3286,43 +3310,45 @@ private struct MissingIngredientPanel: View {
                     }
                 }
 
-                HStack(spacing: 8) {
-                    if let onAddAll {
-                        Button(action: {
-                            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                            onAddAll()
-                        }) {
-                            Label("Add Missing to Grocery List", systemImage: "cart.badge.plus")
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(
-                                    LinearGradient(
-                                        colors: [.orange, .green.opacity(0.85)],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
+                if showsGroceryActions {
+                    HStack(spacing: 8) {
+                        if let onAddAll {
+                            Button(action: {
+                                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                                onAddAll()
+                            }) {
+                                Label("Add Missing to Grocery List", systemImage: "cart.badge.plus")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        LinearGradient(
+                                            colors: [.orange, .green.opacity(0.85)],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
                                     )
-                                )
-                                .clipShape(Capsule())
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
-                    }
 
-                    if let onOpenList {
-                        Button(action: {
-                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                            onOpenList()
-                        }) {
-                            Label("Open Grocery List", systemImage: "list.bullet.clipboard")
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(Color.primary.opacity(0.06))
-                                .clipShape(Capsule())
+                        if let onOpenList {
+                            Button(action: {
+                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                onOpenList()
+                            }) {
+                                Label("Open Grocery List", systemImage: "list.bullet.clipboard")
+                                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 8)
+                                    .background(Color.primary.opacity(0.06))
+                                    .clipShape(Capsule())
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
             }
@@ -3342,8 +3368,12 @@ private struct MissingIngredientPanel: View {
 private struct IngredientsTab: View {
     let ingredients: [String]
     var pantryIngredients: [String] = []
+    var pantrySpaces: [SimplePantrySpace] = []
+    var selectedPantryId: String? = nil
+    var showsGroceryActions = true
     var onAddAllMissing: (([String]) -> Void)? = nil
     var onOpenGroceryList: (() -> Void)? = nil
+    var onSelectPantry: ((String?) -> Void)? = nil
 
     private var missingItems: [String] {
         missingIngredients(from: ingredients, pantryIngredients: pantryIngredients)
@@ -3354,6 +3384,10 @@ private struct IngredientsTab: View {
             if !pantryIngredients.isEmpty {
                 MissingIngredientPanel(
                     missingIngredients: missingItems,
+                    pantrySpaces: pantrySpaces,
+                    selectedPantryId: selectedPantryId,
+                    onSelectPantry: onSelectPantry,
+                    showsGroceryActions: showsGroceryActions,
                     onAddAll: {
                         guard !missingItems.isEmpty else { return }
                         onAddAllMissing?(missingItems)
@@ -3592,6 +3626,7 @@ struct GroceryListView: View {
     @ObservedObject var assistant: CookingAssistant
     let budgetPreference: String
 
+    @EnvironmentObject var authVM: AuthViewModel
     @Environment(\.dismiss) private var dismiss
     @State private var items: [GroceryListItem] = []
     @State private var selectedStore: GroceryStore = .safeway
@@ -3603,6 +3638,9 @@ struct GroceryListView: View {
     @State private var expandedRecipeId: String? = nil
     @State private var hasAppeared = false
     @State private var heroPulse = false
+    @State private var pantrySpaces: [SimplePantrySpace] = []
+    @State private var selectedPantryId: String? = nil
+    @State private var pantryListener: ListenerRegistration? = nil
 
     private var itemsCollection: CollectionReference {
         Firestore.firestore()
@@ -3671,6 +3709,7 @@ struct GroceryListView: View {
         }
         .onAppear {
             startListening()
+            startPantryListening()
             heroPulse = true
             withAnimation(.spring(response: 0.45, dampingFraction: 0.84).delay(0.05)) {
                 hasAppeared = true
@@ -3680,6 +3719,8 @@ struct GroceryListView: View {
         .onDisappear {
             listener?.remove()
             listener = nil
+            pantryListener?.remove()
+            pantryListener = nil
             stopMatchTimer()
         }
         .onChange(of: selectedStore) { _ in
@@ -3687,6 +3728,9 @@ struct GroceryListView: View {
         }
         .onChange(of: itemStateSignature) { _ in
             Task { await matchStoreProducts(force: false) }
+        }
+        .onChange(of: selectedPantryId) { pantryId in
+            authVM.updateActivePantrySelection(pantryId)
         }
     }
 
@@ -3747,6 +3791,7 @@ struct GroceryListView: View {
                 GroceryStatTile(icon: "cart.fill", value: "\(totalCount)", label: "Items", color: .orange)
                 GroceryStatTile(icon: "checkmark.circle.fill", value: "\(purchasedCount)", label: "Purchased", color: .green)
             }
+
         }
         .padding(14)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -3898,6 +3943,50 @@ struct GroceryListView: View {
                 .stroke(Color.orange.opacity(0.2), lineWidth: 1)
         )
         .transition(.move(edge: .top).combined(with: .opacity))
+    }
+
+    private func startPantryListening() {
+        pantryListener?.remove()
+        pantryListener = Firestore.firestore()
+            .collection("users")
+            .document(userId)
+            .collection("pantrySpaces")
+            .addSnapshotListener { snapshot, _ in
+                guard let documents = snapshot?.documents else { return }
+
+                let spaces = documents.map { document -> SimplePantrySpace in
+                    let data = document.data()
+                    let name = data["name"] as? String ?? "Pantry"
+                    let emoji = data["emoji"] as? String ?? "🥑"
+                    let colorTheme = data["colorTheme"] as? String ?? "Orange"
+                    let ingredients = (data["virtualPantry"] as? [String: [String]] ?? [:]).values.flatMap { $0 }
+                    return SimplePantrySpace(
+                        id: document.documentID,
+                        name: name,
+                        emoji: emoji,
+                        ingredients: ingredients,
+                        colorTheme: colorTheme
+                    )
+                }
+                .sorted { $0.name < $1.name }
+
+                DispatchQueue.main.async {
+                    pantrySpaces = spaces
+
+                    if let selectedPantryId,
+                       spaces.contains(where: { $0.id == selectedPantryId }) == false {
+                        self.selectedPantryId = nil
+                    }
+
+                    if self.selectedPantryId == nil,
+                       let preferredPantryId = authVM.currentUserProfile?.activePantryId,
+                       spaces.contains(where: { $0.id == preferredPantryId }) {
+                        self.selectedPantryId = preferredPantryId
+                    } else if self.selectedPantryId == nil {
+                        self.selectedPantryId = spaces.first?.id
+                    }
+                }
+            }
     }
 
     @ViewBuilder

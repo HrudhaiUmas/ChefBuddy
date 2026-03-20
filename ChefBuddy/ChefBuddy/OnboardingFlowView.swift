@@ -165,18 +165,19 @@ private struct FeatureStep: View {
 private struct AccountStep: View {
     @EnvironmentObject var authVM: AuthViewModel
 
-    @State private var showFeatures = false
     @State private var isFloating = false
-    @State private var shimmerOffset: CGFloat = -1.0
     @State private var showAuthSheet = false
+    @State private var carouselIndex = 0
 
     let features = [
-        ("camera.viewfinder", "Smart Ingredient Scanning"),
-        ("sparkles", "Personalized AI Recipes"),
-        ("bubble.left.and.bubble.right.fill", "Real-time Cooking Assistant"),
-        ("slider.horizontal.3", "Recipe Adjustment & Detail"),
-        ("cart.fill", "Auto-Generated Grocery Lists")
+        ("camera.viewfinder", "Smart Ingredient Scanning", "Scan a fridge or shelf and sort ingredients into the right spots fast."),
+        ("sparkles", "Personalized AI Recipes", "Get detailed meals with nutrition, timing cues, and clearer instructions."),
+        ("bubble.left.and.bubble.right.fill", "Real-time Cooking Assistant", "Ask follow-up questions while you cook and keep the recipe moving."),
+        ("calendar", "Weekly Meal Plans", "Turn your week into actionable meals with recipe details attached to each day."),
+        ("cart.fill", "Auto-Generated Grocery Lists", "Catch what you’re missing before the store run and stay organized.")
     ]
+
+    private let carouselTimer = Timer.publish(every: 4.4, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 20) {
@@ -200,31 +201,83 @@ private struct AccountStep: View {
 
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
-                    Text("ChefBuddy Passport").font(.headline.bold())
+                    Text("ChefBuddy Tasting Menu").font(.headline.bold())
                     Spacer()
-                    Image(systemName: "star.fill").foregroundStyle(.orange)
+                    Text("\(carouselIndex + 1)/\(features.count)")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 6)
+                        .background(
+                            LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                        )
+                        .clipShape(Capsule())
                 }
                 Divider()
-                VStack(alignment: .leading, spacing: 14) {
+                TabView(selection: $carouselIndex) {
                     ForEach(Array(features.enumerated()), id: \.offset) { index, feature in
-                        HStack(spacing: 14) {
-                            Image(systemName: feature.0).font(.caption.bold()).foregroundStyle(.green).frame(width: 26, height: 26).background(Color.green.opacity(0.15)).clipShape(Circle())
-                            Text(feature.1).font(.system(size: 15, weight: .semibold, design: .rounded))
+                        VStack(alignment: .leading, spacing: 18) {
+                            HStack(spacing: 12) {
+                                Image(systemName: feature.0)
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundStyle(.green)
+                                    .frame(width: 42, height: 42)
+                                    .background(Color.green.opacity(0.15))
+                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(feature.1)
+                                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                                    Text("ChefBuddy feature spotlight")
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+
+                            Text(feature.2)
+                                .font(.system(size: 15, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(3)
+
+                            HStack(spacing: 8) {
+                                Text("Ready to use")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.green)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.green.opacity(0.12))
+                                    .clipShape(Capsule())
+
+                                Text("Built for your kitchen")
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(Color.orange.opacity(0.12))
+                                    .clipShape(Capsule())
+                            }
+
+                            Spacer(minLength: 0)
                         }
-                        .opacity(showFeatures ? 1 : 0)
-                        .offset(x: showFeatures ? 0 : -20)
-                        .animation(.spring().delay(Double(index) * 0.1), value: showFeatures)
+                        .padding(.top, 6)
+                        .tag(index)
+                    }
+                }
+                .frame(height: 180)
+                .tabViewStyle(.page(indexDisplayMode: .never))
+
+                HStack(spacing: 8) {
+                    ForEach(features.indices, id: \.self) { index in
+                        Capsule()
+                            .fill(index == carouselIndex ? Color.orange : Color.primary.opacity(0.10))
+                            .frame(width: index == carouselIndex ? 26 : 8, height: 8)
+                            .animation(.spring(response: 0.35, dampingFraction: 0.8), value: carouselIndex)
                     }
                 }
             }
             .padding(24)
             .background(.ultraThinMaterial)
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-            .overlay(
-                LinearGradient(colors: [.clear, .white.opacity(0.4), .clear], startPoint: .topLeading, endPoint: .bottomTrailing)
-                    .offset(x: shimmerOffset * 300)
-                    .mask(RoundedRectangle(cornerRadius: 24, style: .continuous))
-            )
             .overlay(RoundedRectangle(cornerRadius: 24).stroke(Color.white.opacity(0.6), lineWidth: 1))
             .shadow(color: Color.orange.opacity(isFloating ? 0.1 : 0.0), radius: 20, y: 10)
             .padding(.horizontal, 24)
@@ -246,12 +299,13 @@ private struct AccountStep: View {
             Spacer()
         }
         .onAppear {
-            showFeatures = true
             withAnimation(.easeInOut(duration: 2.5).repeatForever(autoreverses: true)) {
                 isFloating = true
             }
-            withAnimation(.linear(duration: 3.0).repeatForever(autoreverses: false).delay(1.5)) {
-                shimmerOffset = 1.5
+        }
+        .onReceive(carouselTimer) { _ in
+            withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                carouselIndex = (carouselIndex + 1) % features.count
             }
         }
         .sheet(isPresented: $showAuthSheet) {

@@ -8,22 +8,121 @@ import FirebaseFirestore
 import FirebaseAuth
 import Combine
 
+struct PlannedMealRecipe: Codable, Equatable {
+    var title: String
+    var emoji: String
+    var description: String
+    var ingredients: [String]
+    var steps: [String]
+    var cookTime: String
+    var servings: String
+    var difficulty: String
+    var tags: [String]
+    var calories: String
+    var nutrition: NutritionInfo
+
+    init(recipe: Recipe) {
+        self.title = recipe.title
+        self.emoji = recipe.emoji
+        self.description = recipe.description
+        self.ingredients = recipe.ingredients
+        self.steps = recipe.steps
+        self.cookTime = recipe.cookTime
+        self.servings = recipe.servings
+        self.difficulty = recipe.difficulty
+        self.tags = recipe.tags
+        self.calories = recipe.calories
+        self.nutrition = recipe.nutrition
+    }
+
+    func asRecipe(id: String? = nil) -> Recipe {
+        var recipe = Recipe(
+            title: title,
+            emoji: emoji,
+            description: description,
+            ingredients: ingredients,
+            steps: steps,
+            cookTime: cookTime,
+            servings: servings,
+            difficulty: difficulty,
+            tags: tags,
+            calories: calories,
+            nutrition: nutrition,
+            createdAt: Date()
+        )
+        recipe.id = id
+        return recipe
+    }
+}
+
 struct MealPlanSlot: Identifiable, Codable {
     var id: String?
     var day: String
     var mealType: String
     var recipeId: String?
     var recipeTitle: String?
+    var plannedRecipe: PlannedMealRecipe?
+
+    var displayTitle: String {
+        let snapshotTitle = plannedRecipe?.title.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let topLevelTitle = recipeTitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return !snapshotTitle.isEmpty ? snapshotTitle : topLevelTitle
+    }
+
+    var hasRecipeContent: Bool {
+        plannedRecipe != nil
+    }
+}
+
+private struct MealPlanGenerationSlot: Codable {
+    let day: String
+    let mealType: String
+    let recipe: RecipeSuggestion
+}
+
+private func nutritionNumericValue(from raw: String) -> Double {
+    let pattern = #"[-+]?\d*\.?\d+"#
+    guard let range = raw.range(of: pattern, options: .regularExpression) else { return 0 }
+    return Double(raw[range]) ?? 0
+}
+
+private func formatNutritionValue(_ value: Double, suffix: String) -> String {
+    if value == 0 { return "0\(suffix)" }
+    if value.rounded() == value {
+        return "\(Int(value))\(suffix)"
+    }
+    return "\(String(format: "%.1f", value))\(suffix)"
+}
+
+struct DayNutritionSummary {
+    let calories: String
+    let carbs: String
+    let protein: String
+    let fat: String
+    let sodium: String
+}
+
+struct MealPlanGenerationSession: Equatable {
+    enum Kind: Equatable {
+        case weekly
+        case day(day: String, mealTypes: [String])
+    }
+
+    let id = UUID()
+    let kind: Kind
 }
 
 
 class MealPlanViewModel: ObservableObject {
+    static let shared = MealPlanViewModel()
 
     @Published var weeklySlots: [MealPlanSlot] = []
     @Published var isGenerating = false
+    @Published var activeGeneration: MealPlanGenerationSession? = nil
 
     private let db = Firestore.firestore()
     private var listener: ListenerRegistration?
+    private var generationTask: Task<Void, Never>? = nil
 
     func startListening(userId: String) {
 
@@ -45,32 +144,38 @@ class MealPlanViewModel: ObservableObject {
             }
 
     }
-    @Published var showSuccessAlert = false
 
     func addToPlan(recipe: Recipe, day: String, mealType: String, userId: String) {
         let slotId = "\(day)-\(mealType)"
         let ref = db.collection("users").document(userId).collection("mealPlan").document(slotId)
 
-        let payload: [String: Any] = [
-            "id": slotId,
-            "day": day,
-            "mealType": mealType,
-            "recipeId": recipe.id ?? "",
-            "recipeTitle": recipe.title,
-            "updatedAt": FieldValue.serverTimestamp()
-        ]
+        let slot = MealPlanSlot(
+            id: slotId,
+            day: day,
+            mealType: mealType,
+            recipeId: recipe.id ?? "",
+            recipeTitle: recipe.title,
+            plannedRecipe: PlannedMealRecipe(recipe: recipe)
+        )
 
-        ref.setData(payload, merge: true) { error in
-            if error == nil {
-                DispatchQueue.main.async {
-                    UINotificationFeedbackGenerator().notificationOccurred(.success)
-                    self.showSuccessAlert = true
+        do {
+            var payload = try Firestore.Encoder().encode(slot)
+            payload["updatedAt"] = FieldValue.serverTimestamp()
+
+            ref.setData(payload, merge: true) { error in
+                if error == nil {
+                    DispatchQueue.main.async {
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                    }
+                } else {
+                    print("Error adding to plan: \(error?.localizedDescription ?? "Unknown error")")
                 }
-            } else {
-                print("Error adding to plan: \(error?.localizedDescription ?? "Unknown error")")
             }
+        } catch {
+            print("Error encoding meal plan slot: \(error.localizedDescription)")
         }
     }
+
     func removeFromPlan(day: String, mealType: String, userId: String) {
         let slotId = "\(day)-\(mealType)"
         let ref = db.collection("users")
@@ -91,6 +196,93 @@ class MealPlanViewModel: ObservableObject {
 
     deinit {
         listener?.remove()
+    }
+
+    func startWeeklyPlanGeneration(
+        assistant: CookingAssistant,
+        userId: String
+    ) {
+        guard !userId.isEmpty else { return }
+
+        let session = MealPlanGenerationSession(kind: .weekly)
+        generationTask?.cancel()
+
+        Task { @MainActor in
+            activeGeneration = session
+            isGenerating = true
+        }
+
+        generationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.generateWeeklyPlan(assistant: assistant, userId: userId)
+            await MainActor.run {
+                if self.activeGeneration?.id == session.id {
+                    self.activeGeneration = nil
+                }
+                self.generationTask = nil
+            }
+        }
+    }
+
+    func startDayCustomization(
+        day: String,
+        mealTypes: [String],
+        prompt: String,
+        assistant: CookingAssistant,
+        userId: String
+    ) {
+        guard !userId.isEmpty, !day.isEmpty, !mealTypes.isEmpty else { return }
+
+        let session = MealPlanGenerationSession(kind: .day(day: day, mealTypes: mealTypes))
+        generationTask?.cancel()
+
+        Task { @MainActor in
+            activeGeneration = session
+            isGenerating = true
+        }
+
+        generationTask = Task { [weak self] in
+            guard let self else { return }
+            await self.customizeDayPlan(
+                day: day,
+                mealTypes: mealTypes,
+                prompt: prompt,
+                assistant: assistant,
+                userId: userId
+            )
+            await MainActor.run {
+                if self.activeGeneration?.id == session.id {
+                    self.activeGeneration = nil
+                }
+                self.generationTask = nil
+            }
+        }
+    }
+
+    func updatePlannedRecipe(_ recipe: Recipe, for slot: MealPlanSlot, userId: String) {
+        guard let slotId = slot.id else { return }
+
+        let updated = MealPlanSlot(
+            id: slotId,
+            day: slot.day,
+            mealType: slot.mealType,
+            recipeId: slot.recipeId,
+            recipeTitle: recipe.title,
+            plannedRecipe: PlannedMealRecipe(recipe: recipe)
+        )
+
+        do {
+            var payload = try Firestore.Encoder().encode(updated)
+            payload["updatedAt"] = FieldValue.serverTimestamp()
+
+            db.collection("users")
+                .document(userId)
+                .collection("mealPlan")
+                .document(slotId)
+                .setData(payload, merge: true)
+        } catch {
+            print("Error updating planned recipe snapshot: \(error.localizedDescription)")
+        }
     }
 
 
@@ -122,6 +314,7 @@ class MealPlanViewModel: ObservableObject {
             let budget = data["budget"] as? String ?? "Standard"
             let servings = data["servingSize"] as? String ?? "2"
             let dislikes = data["dislikes"] as? String ?? ""
+            let dailyCalorieTarget = data["dailyCalorieTarget"] as? Int
 
             var context = ""
 
@@ -135,6 +328,9 @@ class MealPlanViewModel: ObservableObject {
             context += "Cook time preference: \(cookTime). "
             context += "Budget: \(budget). "
             context += "Serving size: \(servings)."
+            if let dailyCalorieTarget {
+                context += " Target about \(dailyCalorieTarget) calories across the full day."
+            }
 
 
             let existingSnap = try await db.collection("users")
@@ -147,7 +343,7 @@ class MealPlanViewModel: ObservableObject {
             var emptySlotsDescription = ""
             for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"] {
                 for meal in ["Breakfast", "Lunch", "Dinner"] {
-                    if !currentPlan.contains(where: { $0.day == day && $0.mealType == meal }) {
+                    if !currentPlan.contains(where: { $0.day == day && $0.mealType == meal && !$0.displayTitle.isEmpty }) {
                         emptySlotsDescription += "- \(day): \(meal)\n"
                     }
                 }
@@ -160,51 +356,43 @@ class MealPlanViewModel: ObservableObject {
             Do not provide suggestions for slots already filled.
             User preferences: \(context)
 
-            Return ONLY valid JSON in this format:
+            Return ONLY valid JSON in this exact format:
             [
-              {"day":"Monday","mealType":"Breakfast","recipeTitle":"Example"}
+              {
+                "day": "Monday",
+                "mealType": "Breakfast",
+                "recipe": {
+                  "title": "Spinach Egg Tacos",
+                  "emoji": "🌮",
+                  "description": "A fast, savory breakfast taco with fluffy eggs and sauteed spinach.",
+                  "prepTime": "15 mins",
+                  "servings": "2 people",
+                  "difficulty": "Easy",
+                  "calories": "410 kcal",
+                  "carbs": "26g",
+                  "protein": "24g",
+                  "fat": "21g",
+                  "saturatedFat": "6g",
+                  "sugar": "3g",
+                  "fiber": "4g",
+                  "sodium": "540mg",
+                  "tags": ["Mexican", "High Protein", "Quick"],
+                  "ingredients": ["4 eggs", "1 cup spinach"],
+                  "steps": ["Crack the eggs into a bowl and whisk until smooth before heating the pan.", "Cook until the eggs are softly set, 2 to 3 minutes, then remove from the heat immediately."],
+                  "matchReason": "Why it fits the user."
+                }
+              }
             ]
 
-            Generate a 7-day meal plan including Breakfast, Lunch, and Dinner for ONLY empty slots.
-
-            Do not skip any meals.
-
-            User preferences:
-            \(context)
-
-            Choose meals primarily from these recipes when possible.
-
-            Return ONLY valid JSON in this format:
-
-            [
-            {"day":"Monday","mealType":"Breakfast","recipeTitle":"Example"},
-            {"day":"Monday","mealType":"Lunch","recipeTitle":"Example"},
-            {"day":"Monday","mealType":"Dinner","recipeTitle":"Example"},
-
-            {"day":"Tuesday","mealType":"Breakfast","recipeTitle":"Example"},
-            {"day":"Tuesday","mealType":"Lunch","recipeTitle":"Example"},
-            {"day":"Tuesday","mealType":"Dinner","recipeTitle":"Example"},
-
-            {"day":"Wednesday","mealType":"Breakfast","recipeTitle":"Example"},
-            {"day":"Wednesday","mealType":"Lunch","recipeTitle":"Example"},
-            {"day":"Wednesday","mealType":"Dinner","recipeTitle":"Example"},
-
-            {"day":"Thursday","mealType":"Breakfast","recipeTitle":"Example"},
-            {"day":"Thursday","mealType":"Lunch","recipeTitle":"Example"},
-            {"day":"Thursday","mealType":"Dinner","recipeTitle":"Example"},
-
-            {"day":"Friday","mealType":"Breakfast","recipeTitle":"Example"},
-            {"day":"Friday","mealType":"Lunch","recipeTitle":"Example"},
-            {"day":"Friday","mealType":"Dinner","recipeTitle":"Example"},
-
-            {"day":"Saturday","mealType":"Breakfast","recipeTitle":"Example"},
-            {"day":"Saturday","mealType":"Lunch","recipeTitle":"Example"},
-            {"day":"Saturday","mealType":"Dinner","recipeTitle":"Example"},
-
-            {"day":"Sunday","mealType":"Breakfast","recipeTitle":"Example"},
-            {"day":"Sunday","mealType":"Lunch","recipeTitle":"Example"},
-            {"day":"Sunday","mealType":"Dinner","recipeTitle":"Example"}
-            ]
+            Rules:
+            - Output JSON only. No markdown, no commentary, and no code fences.
+            - Generate entries for every empty slot only.
+            - Every recipe must be fully cookable with 4 to 7 detailed steps.
+            - ingredients must include exact quantities and units.
+            - steps must include prep work, timing ranges, heat guidance, and doneness or texture cues.
+            - Include nutrition strings for calories, carbs, protein, fat, saturatedFat, sugar, fiber, and sodium.
+            - Keep recipes realistic for the stated cook time, budget, preferences, and skill level.
+            - Include at least one cuisine tag in each recipe tags array.
             """
 
 
@@ -212,20 +400,10 @@ class MealPlanViewModel: ObservableObject {
 
             let response = try await assistant.getHelp(question: prompt)
 
-            guard let json = extractJSONArray(from: response),
+            guard let json = CookingAssistant.extractJSONArray(from: response),
                   let data = json.data(using: .utf8) else { return }
 
-            var generated = try JSONDecoder().decode([MealPlanSlot].self, from: data)
-
-            for i in generated.indices {
-                generated[i].id = "\(generated[i].day)-\(generated[i].mealType)"
-            }
-
-
-            for i in generated.indices {
-                generated[i].id = "\(generated[i].day)-\(generated[i].mealType)"
-            }
-
+            let generated = try JSONDecoder().decode([MealPlanGenerationSlot].self, from: data)
 
             let batch = db.batch()
 
@@ -233,18 +411,20 @@ class MealPlanViewModel: ObservableObject {
                 .document(userId)
                 .collection("mealPlan")
 
-            for slot in generated {
-
-                let doc = collection.document(slot.id ?? "\(slot.day)-\(slot.mealType)")
-
-                let payload: [String: Any] = [
-                    "id": slot.id ?? "\(slot.day)-\(slot.mealType)",
-                    "day": slot.day,
-                    "mealType": slot.mealType,
-                    "recipeTitle": slot.recipeTitle ?? "New Recipe",
-                    "updatedAt": FieldValue.serverTimestamp()
-                ]
-
+            for generatedSlot in generated {
+                let slotId = "\(generatedSlot.day)-\(generatedSlot.mealType)"
+                let doc = collection.document(slotId)
+                let recipe = generatedSlot.recipe.asRecipe()
+                let slot = MealPlanSlot(
+                    id: slotId,
+                    day: generatedSlot.day,
+                    mealType: generatedSlot.mealType,
+                    recipeId: nil,
+                    recipeTitle: recipe.title,
+                    plannedRecipe: PlannedMealRecipe(recipe: recipe)
+                )
+                var payload = try Firestore.Encoder().encode(slot)
+                payload["updatedAt"] = FieldValue.serverTimestamp()
                 batch.setData(payload, forDocument: doc, merge: true)
             }
 
@@ -266,14 +446,139 @@ class MealPlanViewModel: ObservableObject {
         }
     }
 
+    func customizeDayPlan(
+        day: String,
+        mealTypes: [String],
+        prompt: String,
+        assistant: CookingAssistant,
+        userId: String
+    ) async {
+        guard !userId.isEmpty, !day.isEmpty, !mealTypes.isEmpty else { return }
 
-    private func extractJSONArray(from raw: String) -> String? {
+        await MainActor.run {
+            isGenerating = true
+        }
 
-        guard let start = raw.firstIndex(of: "["),
-              let end = raw.lastIndex(of: "]")
-        else { return nil }
+        do {
+            let userDoc = try await db.collection("users").document(userId).getDocument()
+            let data = userDoc.data() ?? [:]
 
-        return String(raw[start...end])
+            let diets = (data["dietTags"] as? [String])?.joined(separator: ", ") ?? ""
+            let allergies = (data["allergies"] as? [String])?.joined(separator: ", ") ?? ""
+            let macros = (data["macroTags"] as? [String])?.joined(separator: ", ") ?? ""
+            let cuisines = (data["cuisines"] as? [String])?.joined(separator: ", ") ?? ""
+            let spice = data["spiceTolerance"] as? String ?? "Medium"
+            let cookTime = data["cookTime"] as? String ?? "30 mins"
+            let budget = data["budget"] as? String ?? "Standard"
+            let servings = data["servingSize"] as? String ?? "2"
+            let dislikes = data["dislikes"] as? String ?? ""
+            let dailyCalorieTarget = data["dailyCalorieTarget"] as? Int
+
+            var context = ""
+            if !diets.isEmpty { context += "Diet: \(diets). " }
+            if !allergies.isEmpty { context += "Avoid allergies: \(allergies). " }
+            if !macros.isEmpty { context += "Macro goal: \(macros). " }
+            if !cuisines.isEmpty { context += "Preferred cuisines: \(cuisines). " }
+            if !dislikes.isEmpty { context += "Avoid ingredients: \(dislikes). " }
+            context += "Spice tolerance: \(spice). "
+            context += "Cook time preference: \(cookTime). "
+            context += "Budget: \(budget). "
+            context += "Serving size: \(servings). "
+            if let dailyCalorieTarget {
+                context += "Keep the full day close to \(dailyCalorieTarget) calories total. "
+            }
+
+            let targetedMeals = mealTypes.joined(separator: ", ")
+            let customizationPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "No extra theme request. Make the day balanced and appealing."
+                : prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+
+            let request = """
+            Regenerate only these meals for \(day): \(targetedMeals).
+
+            User preferences: \(context)
+            Extra customization request: \(customizationPrompt)
+
+            Return ONLY valid JSON in this exact format:
+            [
+              {
+                "day": "\(day)",
+                "mealType": "Lunch",
+                "recipe": {
+                  "title": "Recipe name",
+                  "emoji": "🍝",
+                  "description": "Short enticing description",
+                  "prepTime": "25 mins",
+                  "servings": "2 people",
+                  "difficulty": "Easy",
+                  "calories": "420 kcal",
+                  "carbs": "42g",
+                  "protein": "35g",
+                  "fat": "12g",
+                  "saturatedFat": "4g",
+                  "sugar": "8g",
+                  "fiber": "5g",
+                  "sodium": "620mg",
+                  "tags": ["Italian", "Balanced"],
+                  "ingredients": ["1 tbsp olive oil", "200g chicken breast"],
+                  "steps": ["Prep...", "Cook..."],
+                  "matchReason": "Why it fits the day."
+                }
+              }
+            ]
+
+            Rules:
+            - Output JSON only with no markdown or code fences.
+            - Generate entries for exactly these meal types and no others: \(targetedMeals).
+            - Keep the selected day coherent with the customization request.
+            - Balance the selected meals so the full day tracks close to the calorie target when provided.
+            - Each recipe must be fully cookable with 4 to 7 detailed steps.
+            - ingredients must include exact quantities and units.
+            - steps must include prep work, timing ranges, heat guidance, and doneness or texture cues.
+            - Include nutrition strings for calories, carbs, protein, fat, saturatedFat, sugar, fiber, and sodium.
+            - Include at least one cuisine tag in each recipe tags array.
+            """
+
+            try await assistant.waitUntilReady()
+            let response = try await assistant.getHelp(question: request)
+
+            guard let json = CookingAssistant.extractJSONArray(from: response),
+                  let responseData = json.data(using: .utf8) else {
+                throw NSError(domain: "MealPlan", code: 1)
+            }
+
+            let generated = try JSONDecoder().decode([MealPlanGenerationSlot].self, from: responseData)
+            let batch = db.batch()
+            let collection = db.collection("users").document(userId).collection("mealPlan")
+
+            for generatedSlot in generated where mealTypes.contains(generatedSlot.mealType) {
+                let slotId = "\(generatedSlot.day)-\(generatedSlot.mealType)"
+                let recipe = generatedSlot.recipe.asRecipe()
+                let slot = MealPlanSlot(
+                    id: slotId,
+                    day: generatedSlot.day,
+                    mealType: generatedSlot.mealType,
+                    recipeId: nil,
+                    recipeTitle: recipe.title,
+                    plannedRecipe: PlannedMealRecipe(recipe: recipe)
+                )
+                var payload = try Firestore.Encoder().encode(slot)
+                payload["updatedAt"] = FieldValue.serverTimestamp()
+                batch.setData(payload, forDocument: collection.document(slotId), merge: true)
+            }
+
+            try await batch.commit()
+
+            await MainActor.run {
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                isGenerating = false
+            }
+        } catch {
+            await MainActor.run {
+                UINotificationFeedbackGenerator().notificationOccurred(.error)
+                isGenerating = false
+            }
+        }
     }
 }
 
@@ -283,15 +588,20 @@ struct WeeklyMealPlanView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @ObservedObject var assistant: CookingAssistant
 
-    @StateObject private var vm = MealPlanViewModel()
+    @ObservedObject private var vm = MealPlanViewModel.shared
     @StateObject private var recipesVM = RecipesViewModel()
 
     @State private var selectedDay = "Monday"
     @State private var showRecipePicker = false
     @State private var selectedMealType: String?
     @State private var selectedRecipeForDetail: Recipe? = nil
+    @State private var selectedPlannedRecipeForDetail: Recipe? = nil
+    @State private var selectedPlanSlotForDetail: MealPlanSlot? = nil
     @State private var hasAppeared = false
     @State private var pulseHero = false
+    @State private var showDayAssistant = false
+    @State private var dayAssistantPrompt = ""
+    @State private var dayAssistantMealTypes: Set<String> = ["Breakfast", "Lunch", "Dinner"]
 
     private let days = [
         "Monday", "Tuesday", "Wednesday",
@@ -301,11 +611,11 @@ struct WeeklyMealPlanView: View {
     private let mealTypes = ["Breakfast", "Lunch", "Dinner"]
 
     private var filledSlotsCount: Int {
-        vm.weeklySlots.filter { ($0.recipeTitle ?? "").isEmpty == false }.count
+        vm.weeklySlots.filter { !$0.displayTitle.isEmpty }.count
     }
 
     private var selectedDayFilledCount: Int {
-        mealTypes.compactMap { slotFor(type: $0) }.filter { ($0.recipeTitle ?? "").isEmpty == false }.count
+        mealTypes.compactMap { slotFor(type: $0) }.filter { !$0.displayTitle.isEmpty }.count
     }
 
     private func shortDay(_ day: String) -> String {
@@ -318,14 +628,41 @@ struct WeeklyMealPlanView: View {
         }
     }
 
+    private var selectedDayNutritionSummary: DayNutritionSummary {
+        let plannedRecipes = mealTypes
+            .compactMap { slotFor(type: $0)?.plannedRecipe }
+
+        let calories = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.calories) }
+        let carbs = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.carbs) }
+        let protein = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.protein) }
+        let fat = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.fat) }
+        let sodium = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.sodium) }
+
+        return DayNutritionSummary(
+            calories: formatNutritionValue(calories, suffix: " kcal"),
+            carbs: formatNutritionValue(carbs, suffix: "g carbs"),
+            protein: formatNutritionValue(protein, suffix: "g protein"),
+            fat: formatNutritionValue(fat, suffix: "g fat"),
+            sodium: formatNutritionValue(sodium, suffix: "mg sodium")
+        )
+    }
+
     private func handleSlotTap(type: String) {
-        if let slot = slotFor(type: type), let recipeId = slot.recipeId {
-            if let foundRecipe = recipesVM.recipes.first(where: { $0.id == recipeId }) {
+        if let slot = slotFor(type: type) {
+            if let recipeId = slot.recipeId,
+               let foundRecipe = recipesVM.recipes.first(where: { $0.id == recipeId }) {
                 selectedRecipeForDetail = foundRecipe
-            } else {
-                selectedMealType = type
-                showRecipePicker = true
+                return
             }
+
+            if let plannedRecipe = slot.plannedRecipe {
+                selectedPlanSlotForDetail = slot
+                selectedPlannedRecipeForDetail = plannedRecipe.asRecipe(id: slot.recipeId ?? slot.id)
+                return
+            }
+
+            selectedMealType = type
+            showRecipePicker = true
         } else {
             selectedMealType = type
             showRecipePicker = true
@@ -339,10 +676,22 @@ struct WeeklyMealPlanView: View {
 
     private func generateWeeklyPlan() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-        Task {
-            if let uid = authVM.userSession?.uid {
-                await vm.generateWeeklyPlan(assistant: assistant, userId: uid)
-            }
+        if let uid = authVM.userSession?.uid {
+            vm.startWeeklyPlanGeneration(assistant: assistant, userId: uid)
+        }
+    }
+
+    private func customizeSelectedDay() {
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        if let uid = authVM.userSession?.uid {
+            vm.startDayCustomization(
+                day: selectedDay,
+                mealTypes: Array(dayAssistantMealTypes),
+                prompt: dayAssistantPrompt,
+                assistant: assistant,
+                userId: uid
+            )
+            showDayAssistant = false
         }
     }
 
@@ -383,6 +732,28 @@ struct WeeklyMealPlanView: View {
                                 .clipShape(Capsule())
                         }
 
+                        Button(action: {
+                            dayAssistantMealTypes = Set(mealTypes)
+                            dayAssistantPrompt = ""
+                            showDayAssistant = true
+                        }) {
+                            HStack(spacing: 8) {
+                                Image(systemName: "wand.and.stars")
+                                Text("Customize \(selectedDay) with AI")
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.85)
+                            }
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(
+                                LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                            )
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
                                 ForEach(days, id: \.self) { day in
@@ -410,6 +781,10 @@ struct WeeklyMealPlanView: View {
                     .opacity(hasAppeared ? 1 : 0)
                     .offset(y: hasAppeared ? 0 : -12)
 
+                    DayNutritionSummaryCard(day: selectedDay, summary: selectedDayNutritionSummary)
+                        .opacity(hasAppeared ? 1 : 0)
+                        .offset(y: hasAppeared ? 0 : -8)
+
                     VStack(spacing: 12) {
                         ForEach(mealTypes, id: \.self) { type in
                             MealSlotRow(
@@ -424,7 +799,7 @@ struct WeeklyMealPlanView: View {
                     .offset(y: hasAppeared ? 0 : -6)
 
                     Button(action: generateWeeklyPlan) {
-                        HStack(spacing: 8) {
+                        HStack(spacing: 10) {
                             if vm.isGenerating {
                                 ProgressView()
                                     .tint(.white)
@@ -436,16 +811,8 @@ struct WeeklyMealPlanView: View {
 
                             Text(vm.isGenerating ? "Building Your Week..." : "Generate Weekly Plan")
                                 .font(.system(size: 15, weight: .bold, design: .rounded))
-
-                            if vm.isGenerating {
-                                Spacer(minLength: 0)
-                                Text("AI")
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .padding(.horizontal, 8)
-                                    .padding(.vertical, 4)
-                                    .background(Color.white.opacity(0.20))
-                                    .clipShape(Capsule())
-                            }
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.82)
                         }
                         .foregroundStyle(.white)
                         .frame(maxWidth: .infinity)
@@ -500,6 +867,26 @@ struct WeeklyMealPlanView: View {
                     }
                 },
                 userId: authVM.userSession?.uid ?? ""
+            )
+        }
+        .sheet(item: $selectedPlannedRecipeForDetail) { recipe in
+            SuggestedRecipeDetailView(
+                recipe: recipe,
+                assistant: assistant,
+                onSave: {
+                    guard let uid = authVM.userSession?.uid else { return }
+                    recipesVM.saveSuggestedRecipe(recipe, userId: uid)
+                    selectedPlannedRecipeForDetail = nil
+                    selectedPlanSlotForDetail = nil
+                },
+                onDislike: nil,
+                onRecipeUpdated: { updatedRecipe in
+                    guard let uid = authVM.userSession?.uid,
+                          let slot = selectedPlanSlotForDetail else { return }
+                    vm.updatePlannedRecipe(updatedRecipe, for: slot, userId: uid)
+                    selectedPlannedRecipeForDetail = updatedRecipe
+                },
+                onLiveHelp: nil
             )
         }
         .sheet(isPresented: $showRecipePicker) {
@@ -570,10 +957,15 @@ struct WeeklyMealPlanView: View {
                 }
             }
         }
-        .alert("Added to Plan", isPresented: $vm.showSuccessAlert) {
-            Button("OK", role: .cancel) { }
-        } message: {
-            Text("Recipe added to your \(selectedDay) plan.")
+        .sheet(isPresented: $showDayAssistant) {
+            DayCustomizationSheet(
+                day: selectedDay,
+                mealTypes: mealTypes,
+                selectedMealTypes: $dayAssistantMealTypes,
+                prompt: $dayAssistantPrompt,
+                isGenerating: vm.isGenerating,
+                onGenerate: customizeSelectedDay
+            )
         }
     }
 }
@@ -612,6 +1004,174 @@ struct DayButton: View {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.primary.opacity(isSelected ? 0 : 0.07), lineWidth: 1)
         )
+    }
+}
+
+private struct DayCustomizationSheet: View {
+    let day: String
+    let mealTypes: [String]
+    @Binding var selectedMealTypes: Set<String>
+    @Binding var prompt: String
+    let isGenerating: Bool
+    let onGenerate: () -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ChefBuddyBackground()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("Customize \(day)")
+                            .font(.system(size: 28, weight: .heavy, design: .rounded))
+                            .padding(.top, 8)
+
+                        Text("Tell ChefBuddy what you want for this day and choose which meals should be refreshed.")
+                            .font(.system(size: 15, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Meals to refresh")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            HStack(spacing: 10) {
+                                ForEach(mealTypes, id: \.self) { mealType in
+                                    let selected = selectedMealTypes.contains(mealType)
+                                    Button {
+                                        if selected {
+                                            selectedMealTypes.remove(mealType)
+                                        } else {
+                                            selectedMealTypes.insert(mealType)
+                                        }
+                                    } label: {
+                                        Text(mealType)
+                                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                                            .foregroundStyle(selected ? .white : .primary)
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 10)
+                                            .background(
+                                                selected
+                                                ? AnyView(LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing))
+                                                : AnyView(Color.primary.opacity(0.08))
+                                            )
+                                            .clipShape(Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+                        }
+                        .padding(16)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("What kind of day are you craving?")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+
+                            TextField("Indian lunch, pasta dinner, lighter breakfast...", text: $prompt, axis: .vertical)
+                                .font(.system(size: 15, design: .rounded))
+                                .lineLimit(4)
+                                .padding(14)
+                                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .padding(16)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                        Button(action: onGenerate) {
+                            HStack(spacing: 10) {
+                                if isGenerating {
+                                    ProgressView()
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "sparkles")
+                                }
+
+                                Text(isGenerating ? "Refreshing \(day)..." : "Regenerate This Day")
+                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 56)
+                            .background(
+                                LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                            )
+                            .clipShape(Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(selectedMealTypes.isEmpty || isGenerating)
+                        .opacity(selectedMealTypes.isEmpty ? 0.65 : 1)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 24)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct DayNutritionSummaryCard: View {
+    let day: String
+    let summary: DayNutritionSummary
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("\(day)'s Nutrition Snapshot")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
+
+                Text("Total intake from the meals planned for this day.")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 10) {
+                NutritionChip(label: "Calories", value: summary.calories, color: .red)
+                NutritionChip(label: "Carbs", value: summary.carbs, color: .orange)
+            }
+
+            HStack(spacing: 10) {
+                NutritionChip(label: "Protein", value: summary.protein, color: .green)
+                NutritionChip(label: "Fat", value: summary.fat, color: .blue)
+            }
+
+            NutritionChip(label: "Sodium", value: summary.sodium, color: .purple)
+        }
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+}
+
+private struct NutritionChip: View {
+    let label: String
+    let value: String
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 14, weight: .bold, design: .rounded))
+                .foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -655,15 +1215,28 @@ struct MealSlotRow: View {
                             .font(.system(size: 11, weight: .bold, design: .rounded))
                             .foregroundStyle(.secondary)
 
-                        Text(slot?.recipeTitle ?? "Tap to add recipe")
+                        Text(slot?.displayTitle.isEmpty == false ? slot?.displayTitle ?? "" : "Tap to add recipe")
                             .font(.system(size: 15, weight: .semibold, design: .rounded))
-                            .foregroundStyle(slot?.recipeTitle == nil ? .secondary : .primary)
+                            .foregroundStyle((slot?.displayTitle.isEmpty ?? true) ? .secondary : .primary)
                             .lineLimit(2)
                             .multilineTextAlignment(.leading)
+
+                        if let plannedRecipe = slot?.plannedRecipe {
+                            HStack(spacing: 8) {
+                                Text(plannedRecipe.calories.isEmpty ? "Nutrition pending" : plannedRecipe.calories)
+                                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.red)
+
+                                Text(plannedRecipe.description)
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                    if slot?.recipeTitle == nil {
+                    if slot?.displayTitle.isEmpty ?? true {
                         Image(systemName: "plus.circle.fill")
                             .font(.system(size: 20, weight: .bold))
                             .foregroundStyle(.green)
@@ -683,7 +1256,7 @@ struct MealSlotRow: View {
             }
             .buttonStyle(.plain)
 
-            if slot?.recipeTitle != nil {
+            if !(slot?.displayTitle.isEmpty ?? true) {
                 Button(action: {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                     onRemove?()

@@ -42,6 +42,7 @@ struct HomeView: View {
     @State private var isGeneratingFromPantry = false
     @State private var generatedPantryRecipes: [RecipeSuggestion]? = nil
     @State private var pantrySuggestionsById: [String: [RecipeSuggestion]] = [:]
+    @State private var pantryIngredientSignatures: [String: String] = [:]
     @State private var selectedGeneratedPantryRecipe: Recipe? = nil
 
     // Derives a friendly first name from the Firebase Auth display name or email.
@@ -371,6 +372,8 @@ struct HomeView: View {
 
                             var newPantries: [SimplePantrySpace] = []
                             var allEmpty = true
+                            var newSignatures: [String: String] = [:]
+                            var pantryToRefresh: SimplePantrySpace? = nil
 
                             for doc in docs {
                                 let data = doc.data()
@@ -380,32 +383,71 @@ struct HomeView: View {
                                 let pantryDict = data["virtualPantry"] as? [String: [String]] ?? [:]
 
                                 let allIngredients = pantryDict.values.flatMap { $0 }
+                                let signature = allIngredients
+                                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                                    .sorted()
+                                    .joined(separator: "|")
+                                newSignatures[doc.documentID] = signature
                                 if !allIngredients.isEmpty {
                                     allEmpty = false
                                 }
 
-                                newPantries.append(
-                                    SimplePantrySpace(
-                                        id: doc.documentID,
-                                        name: name,
-                                        emoji: emoji,
-                                        ingredients: allIngredients,
-                                        colorTheme: color
-                                    )
+                                let pantry = SimplePantrySpace(
+                                    id: doc.documentID,
+                                    name: name,
+                                    emoji: emoji,
+                                    ingredients: allIngredients,
+                                    colorTheme: color
                                 )
+                                newPantries.append(pantry)
+
+                                let previousSignature = pantryIngredientSignatures[doc.documentID]
+                                if previousSignature != nil,
+                                   previousSignature != signature {
+                                    pantrySuggestionsById.removeValue(forKey: doc.documentID)
+
+                                    if selectedPantryId == doc.documentID {
+                                        generatedPantryRecipes = nil
+                                        if !allIngredients.isEmpty {
+                                            pantryToRefresh = pantry
+                                        }
+                                    }
+                                }
                             }
 
                             self.availablePantries = newPantries.sorted { $0.name < $1.name }
                             self.isPantryEmpty = allEmpty
+                            self.pantryIngredientSignatures = newSignatures
 
-                            if selectedPantryId == nil, let first = self.availablePantries.first {
+                            let preferredPantryId = authVM.currentUserProfile?.activePantryId
+
+                            if let preferredPantryId,
+                               self.availablePantries.contains(where: { $0.id == preferredPantryId }),
+                               selectedPantryId == nil {
+                                selectedPantryId = preferredPantryId
+                            } else if selectedPantryId == nil, let first = self.availablePantries.first {
                                 selectedPantryId = first.id
+                            } else if let selectedPantryId,
+                                      self.availablePantries.contains(where: { $0.id == selectedPantryId }) == false {
+                                self.selectedPantryId = self.availablePantries.first?.id
                             }
 
                             if let selectedPantryId {
                                 generatedPantryRecipes = pantrySuggestionsById[selectedPantryId]
                             }
+
+                            if let pantryToRefresh, !isGeneratingFromPantry {
+                                generateFromSelectedPantry(ingredients: pantryToRefresh.ingredients)
+                            }
                         }
+                }
+            }
+            .onChange(of: selectedPantryId) { pantryId in
+                authVM.updateActivePantrySelection(pantryId)
+                if let pantryId {
+                    generatedPantryRecipes = pantrySuggestionsById[pantryId]
+                } else {
+                    generatedPantryRecipes = nil
                 }
             }
         }
@@ -480,7 +522,7 @@ struct HomeView: View {
                     if isGeneratingFromPantry {
                         PantryRecipeLoadingView()
                             .padding(.horizontal, 24)
-                    } else if let recipes = generatedPantryRecipes {
+                    } else if let recipes = generatedPantryRecipes, !recipes.isEmpty {
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 14) {
                                 ForEach(recipes) { recipe in
@@ -584,91 +626,10 @@ struct HomeView: View {
 
         Task {
             do {
-                guard let model = assistant.model else { return }
-
                 let existingTitles = generatedPantryRecipes?.map { $0.title } ?? []
-
-                let ingredientList = pantry.ingredients.map { item -> String in
-                    let parts = item.split(separator: " ", maxSplits: 1)
-                    return parts.count == 2 ? String(parts[1]) : item
-                }
-                .joined(separator: ", ")
-
-                let prompt = """
-                Create exactly 1 fully detailed recipe using ONLY the following ingredients from my pantry:
-                \(ingredientList)
-
-                The recipe title MUST be different from all of these existing titles:
-                \(existingTitles.joined(separator: ", "))
-
-                Return ONLY a valid JSON object (not an array) matching this exact format:
-                {
-                  "title": "Recipe name",
-                  "emoji": "🥗",
-                  "description": "...",
-                  "prepTime": "...",
-                  "servings": "...",
-                  "difficulty": "...",
-                  "calories": "...",
-                  "carbs": "...",
-                  "protein": "...",
-                  "fat": "...",
-                  "saturatedFat": "...",
-                  "sugar": "...",
-                  "fiber": "...",
-                  "sodium": "...",
-                  "tags": [],
-                  "ingredients": [],
-                  "steps": [],
-                  "matchReason": "..."
-                }
-
-                Rules:
-                - ingredients must be a JSON array of plain strings only
-                - steps must be a JSON array of plain strings only
-                - tags must be a JSON array of plain strings only
-                - do not return dictionaries inside ingredients or steps
-                - do not include markdown
-                - do not include backticks
-                - include at least one cuisine tag in tags
-                - ingredients must include precise quantities and units
-                - steps must include detailed prep and timing/doneness cues
-                """
-
-                let response = try await model.generateContent(prompt)
-                let rawText = response.text ?? ""
-
-                var jsonString = rawText
-                    .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
-                    .replacingOccurrences(of: "```", with: "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-
-                if let start = jsonString.firstIndex(of: "{"),
-                   let end = jsonString.lastIndex(of: "}") {
-                    jsonString = String(jsonString[start...end])
-                }
-
-                guard let data = jsonString.data(using: .utf8) else { return }
-                let newRecipe = try JSONDecoder().decode(RecipeSuggestion.self, from: data)
-                let normalizedNewRecipe = RecipeSuggestion(
-                    title: newRecipe.title,
-                    emoji: newRecipe.emoji,
-                    description: newRecipe.description,
-                    prepTime: newRecipe.prepTime,
-                    servings: newRecipe.servings,
-                    difficulty: newRecipe.difficulty,
-                    calories: newRecipe.calories,
-                    carbs: newRecipe.carbs,
-                    protein: newRecipe.protein,
-                    fat: newRecipe.fat,
-                    saturatedFat: newRecipe.saturatedFat,
-                    sugar: newRecipe.sugar,
-                    fiber: newRecipe.fiber,
-                    sodium: newRecipe.sodium,
-                    tags: newRecipe.tags.isEmpty ? [detectedCuisineTag(title: newRecipe.title, description: newRecipe.description, tags: newRecipe.tags)] : newRecipe.tags,
-                    ingredients: newRecipe.ingredients,
-                    steps: newRecipe.steps,
-                    matchReason: newRecipe.matchReason
+                let normalizedNewRecipe = try await assistant.generateSinglePantryRecipe(
+                    ingredients: pantry.ingredients,
+                    excludingTitles: existingTitles
                 )
 
                 await MainActor.run {
@@ -713,6 +674,7 @@ struct HomeView: View {
     private func generateFromSelectedPantry(ingredients: [String]) {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 
+        generatedPantryRecipes = nil
         withAnimation(.spring()) {
             isGeneratingFromPantry = true
         }
@@ -843,28 +805,62 @@ struct PantryCardLoadingView: View {
                     .animation(.spring(response: 0.35, dampingFraction: 0.65), value: scanAnimationStep)
             }
 
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    HStack(spacing: 4) {
+                        Image(systemName: "circle")
+                            .font(.system(size: 9, weight: .bold))
+                        Text("Pantry AI")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(Color.primary.opacity(0.92))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.14))
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.primary.opacity(0.18), lineWidth: 1)
+                    )
+                    .clipShape(Capsule())
+                }
+                .frame(height: 16)
+
                 Text("ChefBuddy is cooking...")
                     .font(.system(size: 14, weight: .bold, design: .rounded))
                     .foregroundStyle(.primary)
-                    .lineLimit(2)
+                    .lineLimit(3)
+                    .frame(height: 54, alignment: .topLeading)
 
                 Text("Crafting recipes from your pantry...")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
+                    .frame(height: 20, alignment: .leading)
+
+                Text("Nutrition and timing are loading in the background.")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+                    .frame(height: 18, alignment: .leading)
 
                 HStack(spacing: 4) {
                     Text("Generating")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.orange)
+                        .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.blue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.blue.opacity(0.12))
+                        .clipShape(Capsule())
+
+                    Spacer(minLength: 0)
 
                     HomeBouncingDotsView(step: scanAnimationStep, color: .orange)
                 }
+                .frame(height: 22)
             }
             .padding(12)
         }
-        .frame(width: 200)
+        .frame(width: 200, height: 288)
         .background(.ultraThinMaterial)
         .clipShape(RoundedRectangle(cornerRadius: 20))
         .overlay(

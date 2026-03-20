@@ -32,6 +32,19 @@ class AuthViewModel: ObservableObject {
 
     private let db = Firestore.firestore()
 
+    private func notificationPreferencePayload(_ preferences: [NotificationSlotPreference]) -> [[String: Any]] {
+        preferences.map { preference in
+            [
+                "slotId": preference.slotId,
+                "title": preference.title,
+                "hour": preference.hour,
+                "minute": preference.minute,
+                "isEnabled": preference.isEnabled,
+                "kind": preference.kind.rawValue
+            ]
+        }
+    }
+
     init() {
 
         self.userSession = Auth.auth().currentUser
@@ -48,7 +61,8 @@ class AuthViewModel: ObservableObject {
     func saveUserPreferences(level: String, diets: Set<String>, allergy: Set<String>, macros: Set<String>,
                              age: String, height: String, weight: String, sex: String, targetGoal: String, activity: String,
                              appliances: Set<String>, cookTime: String, mealPrep: Bool, cuisines: Set<String>,
-                             spice: String, dislikes: String, servings: String, budget: String) {
+                             spice: String, dislikes: String, servings: String, budget: String,
+                             dailyCalorieTarget: Int?) {
         guard let user = userSession else { return }
 
         let newUser = DBUser(
@@ -70,7 +84,8 @@ class AuthViewModel: ObservableObject {
             spiceTolerance: spice,
             dislikes: dislikes,
             servingSize: servings,
-            budget: budget
+            budget: budget,
+            dailyCalorieTarget: dailyCalorieTarget
         )
 
         do {
@@ -113,10 +128,12 @@ class AuthViewModel: ObservableObject {
     func updateUserPreferences(level: String, diets: Set<String>, allergy: Set<String>, macros: Set<String>,
                                age: String, height: String, weight: String, sex: String, targetGoal: String, activity: String,
                                appliances: Set<String>, cookTime: String, mealPrep: Bool, cuisines: Set<String>,
-                               spice: String, dislikes: String, servings: String, budget: String) {
+                               spice: String, dislikes: String, servings: String, budget: String,
+                               dailyCalorieTarget: Int?,
+                               activePantryId: String?) {
         guard let uid = userSession?.uid else { return }
 
-        let updatedData: [String: Any] = [
+        var updatedData: [String: Any] = [
             "chefLevel": level,
             "dietTags": Array(diets),
             "allergies": Array(allergy),
@@ -137,6 +154,16 @@ class AuthViewModel: ObservableObject {
             "budget": budget
         ]
 
+        if let dailyCalorieTarget {
+            updatedData["dailyCalorieTarget"] = dailyCalorieTarget
+        } else {
+            updatedData["dailyCalorieTarget"] = FieldValue.delete()
+        }
+
+        if let activePantryId {
+            updatedData["activePantryId"] = activePantryId
+        }
+
         db.collection("users").document(uid).setData(updatedData, merge: true) { [weak self] error in
             if let error = error {
                 self?.errorMessage = "Failed to update preferences: \(error.localizedDescription)"
@@ -144,6 +171,88 @@ class AuthViewModel: ObservableObject {
                 self?.fetchUserProfile()
                 print("Successfully updated extensive preferences.")
             }
+        }
+    }
+
+    func completeNotificationOnboarding(enabled: Bool, authorizationStatus: String) {
+        guard let uid = userSession?.uid else { return }
+
+        let encodedPreferences = notificationPreferencePayload(NotificationSlotPreference.defaults)
+
+        let updates: [String: Any] = [
+            "didCompleteNotificationOnboarding": true,
+            "notificationsEnabled": enabled,
+            "notificationAuthorizationStatus": authorizationStatus,
+            "notificationPreferences": encodedPreferences
+        ]
+
+        db.collection("users").document(uid).setData(updates, merge: true) { [weak self] error in
+            if let error = error {
+                self?.errorMessage = "Failed to update notification preferences: \(error.localizedDescription)"
+                return
+            }
+
+            guard var profile = self?.currentUserProfile else {
+                self?.fetchUserProfile()
+                return
+            }
+
+            profile.didCompleteNotificationOnboarding = true
+            profile.notificationsEnabled = enabled
+            profile.notificationAuthorizationStatus = authorizationStatus
+            if profile.notificationPreferences == nil {
+                profile.notificationPreferences = NotificationSlotPreference.defaults
+            }
+            self?.currentUserProfile = profile
+        }
+    }
+
+    func updateNotificationPreferences(
+        enabled: Bool,
+        authorizationStatus: String,
+        preferences: [NotificationSlotPreference]
+    ) {
+        guard let uid = userSession?.uid else { return }
+
+        let encodedPreferences = notificationPreferencePayload(preferences)
+        let updates: [String: Any] = [
+            "notificationsEnabled": enabled,
+            "notificationAuthorizationStatus": authorizationStatus,
+            "notificationPreferences": encodedPreferences
+        ]
+
+        db.collection("users").document(uid).setData(updates, merge: true) { [weak self] error in
+            if let error = error {
+                self?.errorMessage = "Failed to update notification preferences: \(error.localizedDescription)"
+                return
+            }
+
+            guard var profile = self?.currentUserProfile else {
+                self?.fetchUserProfile()
+                return
+            }
+
+            profile.notificationsEnabled = enabled
+            profile.notificationAuthorizationStatus = authorizationStatus
+            profile.notificationPreferences = preferences
+            self?.currentUserProfile = profile
+        }
+    }
+
+    func updateActivePantrySelection(_ pantryId: String?) {
+        guard let uid = userSession?.uid else { return }
+
+        let payload: [String: Any] = pantryId.map { ["activePantryId": $0] } ?? ["activePantryId": FieldValue.delete()]
+
+        db.collection("users").document(uid).setData(payload, merge: true) { [weak self] error in
+            if let error = error {
+                self?.errorMessage = "Failed to save pantry preference: \(error.localizedDescription)"
+                return
+            }
+
+            guard var profile = self?.currentUserProfile else { return }
+            profile.activePantryId = pantryId
+            self?.currentUserProfile = profile
         }
     }
 
@@ -187,6 +296,11 @@ class AuthViewModel: ObservableObject {
 
         GIDSignIn.sharedInstance.signIn(withPresenting: UIApplication.shared.getRootViewController()) { [weak self] result, error in
             if let error = error {
+                let loweredDescription = error.localizedDescription.lowercased()
+                if loweredDescription.contains("canceled") || loweredDescription.contains("cancelled") {
+                    self?.errorMessage = ""
+                    return
+                }
                 self?.errorMessage = error.localizedDescription
                 return
             }

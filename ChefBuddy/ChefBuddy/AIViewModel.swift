@@ -8,6 +8,23 @@ import Combine
 import FirebaseFirestore
 import FirebaseAILogic
 import SwiftUI
+import UIKit
+
+struct PantryScanSession: Identifiable, Equatable {
+    enum State: Equatable {
+        case running
+        case completed
+        case failed(String)
+    }
+
+    let id: UUID
+    let pantryId: String
+    let pantryName: String
+    let mode: PantryScanMode
+    var state: State
+    var scannedCategories: [String: [String]]
+    var didApplyResult: Bool
+}
 
 // A single AI-generated recipe card shown in the suggestion carousel.
 // Identifiable so SwiftUI lists can diff them; Equatable so we can deduplicate.
@@ -132,6 +149,23 @@ enum CodingKeys: String, CodingKey {
             sugar: sugar,
             fiber: fiber,
             sodium: sodium
+        )
+    }
+
+    func asRecipe(createdAt: Date = Date()) -> Recipe {
+        Recipe(
+            title: title.isEmpty ? "ChefBuddy Recipe" : title,
+            emoji: emoji.isEmpty ? "🍽️" : emoji,
+            description: description,
+            ingredients: ingredients,
+            steps: steps,
+            cookTime: prepTime,
+            servings: servings,
+            difficulty: difficulty,
+            tags: tags.isEmpty ? [detectedCuisineTag(title: title, description: description, tags: tags)] : tags,
+            calories: calories,
+            nutrition: nutrition,
+            createdAt: createdAt
         )
     }
 }
@@ -309,6 +343,7 @@ struct AnyDecodable: Decodable {
 enum CookingAssistantError: LocalizedError {
     case modelNotReady
     case imageProcessingFailed
+    case invalidRecipeResponse
 
     var errorDescription: String? {
         switch self {
@@ -316,6 +351,8 @@ enum CookingAssistantError: LocalizedError {
             return "ChefBuddy is still loading. Please wait a moment and try again."
         case .imageProcessingFailed:
             return "Couldn't process the image. Please try again."
+        case .invalidRecipeResponse:
+            return "ChefBuddy generated an incomplete recipe. Please try again."
         }
     }
 }
@@ -329,6 +366,39 @@ class CookingAssistant: ObservableObject {
     @Published var model: GenerativeModel?
     @Published var isModelReady = false
     @Published var suggestions: [RecipeSuggestion] = []
+    @Published var pantryScanSession: PantryScanSession?
+
+    private var pantryScanTask: Task<Void, Never>?
+
+    private func beginBackgroundTask(named name: String) async -> UIBackgroundTaskIdentifier {
+        await MainActor.run {
+            var taskId: UIBackgroundTaskIdentifier = .invalid
+            taskId = UIApplication.shared.beginBackgroundTask(withName: name) {
+                UIApplication.shared.endBackgroundTask(taskId)
+            }
+            return taskId
+        }
+    }
+
+    private func endBackgroundTask(_ taskId: UIBackgroundTaskIdentifier) async {
+        await MainActor.run {
+            guard taskId != .invalid else { return }
+            UIApplication.shared.endBackgroundTask(taskId)
+        }
+    }
+
+    private func runWithBackgroundAllowance<T>(
+        name: String,
+        operation: @escaping () async throws -> T
+    ) async throws -> T {
+        let taskId = await beginBackgroundTask(named: name)
+        defer {
+            Task {
+                await endBackgroundTask(taskId)
+            }
+        }
+        return try await operation()
+    }
 
     // Polls isModelReady up to 10 seconds so callers can safely await the model
     // without hardcoding delays or risking a crash on a cold launch.
@@ -385,10 +455,244 @@ class CookingAssistant: ObservableObject {
         return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    static func extractJSONObject(from rawText: String?) -> String? {
+        guard var jsonString = rawText else { return nil }
+
+        jsonString = jsonString
+            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let start = jsonString.firstIndex(of: "{") {
+            jsonString = String(jsonString[start...])
+        }
+
+        if let end = jsonString.lastIndex(of: "}") {
+            jsonString = String(jsonString[...end])
+        }
+
+        return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func extractJSONArray(from rawText: String?) -> String? {
+        guard var jsonString = rawText else { return nil }
+
+        jsonString = jsonString
+            .replacingOccurrences(of: "```json", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        if let start = jsonString.firstIndex(of: "[") {
+            jsonString = String(jsonString[start...])
+        }
+
+        if let end = jsonString.lastIndex(of: "]") {
+            jsonString = String(jsonString[...end])
+        }
+
+        return jsonString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func normalizedSuggestion(from suggestion: RecipeSuggestion, fallbackText rawText: String) -> RecipeSuggestion {
+        let fallbackRecipe = RecipesViewModel.parseRecipe(from: rawText)
+
+        let normalizedIngredients = (suggestion.ingredients.isEmpty ? fallbackRecipe.ingredients : suggestion.ingredients)
+            .map(Self.cleanListItem)
+            .filter { !$0.isEmpty }
+
+        let normalizedSteps = (suggestion.steps.isEmpty ? fallbackRecipe.steps : suggestion.steps)
+            .map(Self.cleanInstructionStep)
+            .filter { !$0.isEmpty }
+
+        let normalizedTags = (suggestion.tags.isEmpty ? fallbackRecipe.tags : suggestion.tags)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let title = suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            ? fallbackRecipe.title
+            : suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        return RecipeSuggestion(
+            title: title.isEmpty ? "ChefBuddy Recipe" : title,
+            emoji: suggestion.emoji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.emoji : suggestion.emoji,
+            description: suggestion.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.description : suggestion.description,
+            prepTime: suggestion.prepTime.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.cookTime : suggestion.prepTime,
+            servings: suggestion.servings.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.servings : suggestion.servings,
+            difficulty: suggestion.difficulty.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.difficulty : suggestion.difficulty,
+            calories: suggestion.calories.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.calories : suggestion.calories,
+            carbs: suggestion.carbs.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.nutrition.carbs : suggestion.carbs,
+            protein: suggestion.protein.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.nutrition.protein : suggestion.protein,
+            fat: suggestion.fat.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.nutrition.fat : suggestion.fat,
+            saturatedFat: suggestion.saturatedFat.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.nutrition.saturatedFat : suggestion.saturatedFat,
+            sugar: suggestion.sugar.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.nutrition.sugar : suggestion.sugar,
+            fiber: suggestion.fiber.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.nutrition.fiber : suggestion.fiber,
+            sodium: suggestion.sodium.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? fallbackRecipe.nutrition.sodium : suggestion.sodium,
+            tags: normalizedTags.isEmpty ? [detectedCuisineTag(title: title, description: suggestion.description, tags: fallbackRecipe.tags)] : normalizedTags,
+            ingredients: normalizedIngredients,
+            steps: normalizedSteps,
+            matchReason: suggestion.matchReason.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+    }
+
+    private static func cleanListItem(_ item: String) -> String {
+        item
+            .replacingOccurrences(of: #"^[-*•]\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"^\d+[\.\)]\s+"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func cleanInstructionStep(_ item: String) -> String {
+        item
+            .replacingOccurrences(of: #"^\d+[\.\)]\s*"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"^[-*•]\s*"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func decodeSuggestionArray(from rawText: String?) throws -> [RecipeSuggestion] {
+        guard let jsonString = cleanJSONArrayString(from: rawText),
+              let data = jsonString.data(using: .utf8) else {
+            throw CookingAssistantError.invalidRecipeResponse
+        }
+
+        let decoded = try JSONDecoder().decode([RecipeSuggestion].self, from: data)
+        let normalized = decoded.map { normalizedSuggestion(from: $0, fallbackText: rawText ?? "") }
+        guard !normalized.isEmpty,
+              normalized.allSatisfy({ !$0.ingredients.isEmpty && !$0.steps.isEmpty }) else {
+            throw CookingAssistantError.invalidRecipeResponse
+        }
+        return normalized
+    }
+
+    private func decodeSuggestionObject(from rawText: String?) throws -> RecipeSuggestion {
+        guard let jsonString = cleanJSONObjectString(from: rawText),
+              let data = jsonString.data(using: .utf8) else {
+            throw CookingAssistantError.invalidRecipeResponse
+        }
+
+        let decoded = try JSONDecoder().decode(RecipeSuggestion.self, from: data)
+        let normalized = normalizedSuggestion(from: decoded, fallbackText: rawText ?? "")
+        guard !normalized.ingredients.isEmpty, !normalized.steps.isEmpty else {
+            throw CookingAssistantError.invalidRecipeResponse
+        }
+        return normalized
+    }
+
+    func generateRecipe(from request: String) async throws -> Recipe {
+        try await waitUntilReady()
+        guard let model else {
+            throw CookingAssistantError.modelNotReady
+        }
+
+        let prompt = """
+        Create exactly 1 complete recipe for this request:
+        \(request)
+
+        Return ONLY valid JSON as a single object in this exact shape:
+        {
+          "title": "Recipe name",
+          "emoji": "🍝",
+          "description": "One vivid sentence describing the dish.",
+          "prepTime": "25 mins",
+          "servings": "2 people",
+          "difficulty": "Easy",
+          "calories": "420 kcal",
+          "carbs": "42g",
+          "protein": "35g",
+          "fat": "12g",
+          "saturatedFat": "4g",
+          "sugar": "8g",
+          "fiber": "5g",
+          "sodium": "620mg",
+          "tags": ["Italian", "High Protein", "Weeknight"],
+          "ingredients": ["1 tbsp olive oil", "200g chicken breast"],
+          "steps": ["Pat the chicken dry and season both sides with salt and pepper before heating the pan.", "Cook over medium heat for 4 to 5 minutes per side until the center reaches 165F and the outside is deeply golden."],
+          "matchReason": "Why this recipe fits the request."
+        }
+
+        Rules:
+        - Output JSON only. No markdown, prose, code fences, or bullet lists outside the JSON.
+        - ingredients must be an array of plain strings with concrete amounts and units.
+        - steps must be an array of plain strings only.
+        - Provide 5 to 8 detailed steps that a beginner could follow.
+        - Include prep, heat level, timing ranges, texture cues, and doneness/safety cues where relevant.
+        - Keep the recipe coherent, realistic, and fully cookable as written.
+        - Include at least one cuisine tag in tags.
+        - Use a single relevant food emoji.
+        """
+
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.generate.recipe") {
+            try await model.generateContent(prompt)
+        }
+
+        let suggestion = try decodeSuggestionObject(from: response.text)
+        return suggestion.asRecipe()
+    }
+
+    func generateSinglePantryRecipe(ingredients: [String], excludingTitles: [String]) async throws -> RecipeSuggestion {
+        try await waitUntilReady()
+        guard let model else {
+            throw CookingAssistantError.modelNotReady
+        }
+
+        let cleanIngredients = ingredients.map { item -> String in
+            let parts = item.split(separator: " ", maxSplits: 1)
+            return parts.count == 2 ? String(parts[1]) : item
+        }
+
+        let excludedTitles = excludingTitles.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let prompt = """
+        Create exactly 1 fully detailed recipe using ONLY the following ingredients from my pantry:
+        \(cleanIngredients.joined(separator: ", "))
+
+        You may also use basic kitchen staples only: salt, pepper, olive oil, neutral oil, butter, and water.
+        STRICTLY respect the dietary preferences, allergies, and restrictions in your system instructions.
+
+        Existing recipe titles that must not be repeated:
+        \(excludedTitles.isEmpty ? "None" : excludedTitles.joined(separator: ", "))
+
+        Return ONLY valid JSON as a single object in this exact shape:
+        {
+          "title": "Recipe name",
+          "emoji": "🥗",
+          "description": "Short enticing description",
+          "prepTime": "20 mins",
+          "servings": "2 people",
+          "difficulty": "Easy",
+          "calories": "350 kcal",
+          "carbs": "42g",
+          "protein": "35g",
+          "fat": "12g",
+          "saturatedFat": "4g",
+          "sugar": "8g",
+          "fiber": "5g",
+          "sodium": "620mg",
+          "tags": ["Mediterranean", "Quick"],
+          "ingredients": ["1 tbsp olive oil", "2 cups spinach"],
+          "steps": ["Wash and dry the spinach thoroughly before starting.", "Cook until ..."],
+          "matchReason": "Why this pantry recipe works."
+        }
+
+        Rules:
+        - Output JSON only with no markdown or code fences.
+        - ingredients and steps must be arrays of plain strings only.
+        - ingredients must include exact quantities and units.
+        - steps must be detailed, beginner-friendly, and include prep, timing, and doneness cues.
+        - title must be clearly different from every excluded title.
+        - include at least one cuisine tag in tags.
+        """
+
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.generate.pantry.recipe") {
+            try await model.generateContent(prompt)
+        }
+
+        return try decodeSuggestionObject(from: response.text)
+    }
+
     // Generates 3 personalised recipe suggestions and stores them in self.suggestions.
     // If the user has left reviews, their feedback is injected into the prompt so
     // future suggestions learn from what they liked or disliked.
     func fetchRecipeSuggestions(reviewFeedback: String = "") async {
+        try? await waitUntilReady()
         guard let model = model else { return }
 
         let feedbackSection = reviewFeedback.isEmpty ? "" : """
@@ -400,7 +704,7 @@ class CookingAssistant: ObservableObject {
         """
 
         let prompt = """
-        Generate 3 fully detailed recipe suggestions based on my profile.\(feedbackSection)
+        Generate exactly 3 fully detailed recipe suggestions based on my profile.\(feedbackSection)
 
         Return ONLY valid JSON.
 
@@ -438,19 +742,19 @@ class CookingAssistant: ObservableObject {
         - steps must be a JSON array of strings
         - never return dictionaries inside ingredients or steps
         - ingredients must include concrete quantities and units
+        - each recipe must have 5 to 8 steps
         - steps must be detailed and precise, including prep steps (wash/chop/preheat where relevant)
-        - steps must include timing/doneness cues where relevant
+        - steps must include heat level, timing, texture cues, and doneness cues where relevant
+        - descriptions should make the dish sound distinct from the other two recipes
         - emoji must be a single relevant food emoji
         - make all 3 recipe titles different from each other
         """
 
         do {
-            let response = try await model.generateContent(prompt)
-
-            guard let jsonString = cleanJSONArrayString(from: response.text) else { return }
-            guard let data = jsonString.data(using: .utf8) else { return }
-
-            let decoded = try JSONDecoder().decode([RecipeSuggestion].self, from: data)
+            let response = try await runWithBackgroundAllowance(name: "chefbuddy.fetch.suggestions") {
+                try await model.generateContent(prompt)
+            }
+            let decoded = try decodeSuggestionArray(from: response.text)
 
             await MainActor.run {
                 self.suggestions = decoded
@@ -464,6 +768,7 @@ class CookingAssistant: ObservableObject {
     // Passing excludedTitles in the prompt prevents Gemini from regenerating a
     // recipe the user already sees.
     func fetchOneMoreRecipeSuggestion(excludingTitles: [String], reviewFeedback: String = "") async throws {
+        try await waitUntilReady()
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
         }
@@ -533,12 +838,11 @@ class CookingAssistant: ObservableObject {
         - title must not match or be too similar to any excluded title
         """
 
-        let response = try await model.generateContent(prompt)
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.fetch.one.suggestion") {
+            try await model.generateContent(prompt)
+        }
 
-        guard let jsonString = cleanJSONObjectString(from: response.text) else { return }
-        guard let data = jsonString.data(using: .utf8) else { return }
-
-        let decoded = try JSONDecoder().decode(RecipeSuggestion.self, from: data)
+        let decoded = try decodeSuggestionObject(from: response.text)
 
         let normalizedExcluded = Set(
             cleanedTitles.map { $0.lowercased() }
@@ -561,6 +865,7 @@ class CookingAssistant: ObservableObject {
     // Generates 3 recipes constrained to the ingredients the user has on hand.
     // Strips emoji prefixes from pantry item strings before sending to the model.
     func generatePantryRecipes(ingredients: [String]) async throws -> [RecipeSuggestion] {
+        try await waitUntilReady()
         guard let model else {
             throw CookingAssistantError.modelNotReady
         }
@@ -611,22 +916,17 @@ class CookingAssistant: ObservableObject {
         - steps must be an array of strings only
         - never return objects inside ingredients or steps
         - ingredients must include concrete quantities and units
+        - each recipe must have 5 to 8 steps
         - steps must be detailed and precise, including prep steps (wash/chop/preheat where relevant)
-        - steps must include timing/doneness cues where relevant
+        - steps must include heat level, timing, texture cues, and doneness cues where relevant
         - make all 3 recipe titles different from each other
         """
 
-        let response = try await model.generateContent(prompt)
-
-        guard let jsonString = cleanJSONArrayString(from: response.text) else {
-            throw URLError(.badServerResponse)
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.generate.pantry") {
+            try await model.generateContent(prompt)
         }
 
-        guard let data = jsonString.data(using: .utf8) else {
-            throw URLError(.cannotDecodeRawData)
-        }
-
-        return try JSONDecoder().decode([RecipeSuggestion].self, from: data)
+        return try decodeSuggestionArray(from: response.text)
     }
 
     // Fetches the user's full profile from Firestore and builds a system prompt
@@ -691,17 +991,21 @@ class CookingAssistant: ObservableObject {
     // General-purpose text question to the model. Used for typed chat questions
     // in LiveCookingView and for recipe generation prompts in RecipesViewModel.
     func getHelp(question: String) async throws -> String {
+        try await waitUntilReady()
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
         }
 
-        let response = try await model.generateContent(question)
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.get.help") {
+            try await model.generateContent(question)
+        }
         return response.text ?? "Hmm, I couldn't come up with anything. Try rephrasing!"
     }
 
     // Multimodal call — sends both an image frame and a text prompt so Gemini
     // can see what the user is cooking and give step-specific visual guidance.
     func getLiveHelp(image: UIImage, question: String) async throws -> String {
+        try await waitUntilReady()
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
         }
@@ -711,7 +1015,9 @@ class CookingAssistant: ObservableObject {
         }
 
         let imagePart = InlineDataPart(data: imageData, mimeType: "image/jpeg")
-        let response = try await model.generateContent(imagePart, question)
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.get.live.help") {
+            try await model.generateContent(imagePart, question)
+        }
         return response.text ?? "I'm not sure — could you show me the ingredients again?"
     }
 
@@ -727,10 +1033,72 @@ class CookingAssistant: ObservableObject {
         }
     }
 
+    func startPantryScan(
+        images: [UIImage],
+        pantryId: String,
+        pantryName: String,
+        mode: PantryScanMode
+    ) {
+        guard !images.isEmpty else { return }
+
+        pantryScanTask?.cancel()
+
+        let sessionId = UUID()
+        pantryScanSession = PantryScanSession(
+            id: sessionId,
+            pantryId: pantryId,
+            pantryName: pantryName,
+            mode: mode,
+            state: .running,
+            scannedCategories: [:],
+            didApplyResult: false
+        )
+
+        pantryScanTask = Task {
+            do {
+                let scannedCategories = try await scanMultipleImages(images: images)
+                await MainActor.run {
+                    guard self.pantryScanSession?.id == sessionId else { return }
+                    self.pantryScanSession?.scannedCategories = scannedCategories
+                    self.pantryScanSession?.state = .completed
+                }
+            } catch {
+                await MainActor.run {
+                    guard self.pantryScanSession?.id == sessionId else { return }
+                    self.pantryScanSession?.state = .failed(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    func markPantryScanApplied(_ sessionId: UUID) {
+        guard pantryScanSession?.id == sessionId else { return }
+        pantryScanSession?.didApplyResult = true
+    }
+
+    func clearPantryScanIfFinished(for pantryId: String? = nil) {
+        guard let session = pantryScanSession else { return }
+        if let pantryId, session.pantryId != pantryId {
+            return
+        }
+
+        switch session.state {
+        case .running:
+            return
+        case .completed where session.didApplyResult:
+            pantryScanSession = nil
+        case .failed:
+            pantryScanSession = nil
+        default:
+            return
+        }
+    }
+
     // Accepts one or more fridge/pantry photos and returns a categorised
     // ingredient dictionary. Sending all images in one request reduces latency
     // and gives the model full context of the fridge contents at once.
     func scanMultipleImages(images: [UIImage]) async throws -> [String: [String]] {
+        try await waitUntilReady()
         guard let model else {
             throw CookingAssistantError.modelNotReady
         }
@@ -768,7 +1136,9 @@ class CookingAssistant: ObservableObject {
         parts.append(TextPart(prompt))
 
         let content = ModelContent(role: "user", parts: parts)
-        let response = try await model.generateContent([content])
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.scan.pantry") {
+            try await model.generateContent([content])
+        }
 
         guard let text = response.text else { return [:] }
 

@@ -42,6 +42,12 @@ class ProfileFormState: ObservableObject {
 
     @Published var servingSize: String = "👤 1 Person"
     @Published var budget: String = "💵 $$ (Standard)"
+    @Published var dailyCalorieTarget: Double = 0
+    @Published var notificationPreferences: [NotificationSlotPreference] = NotificationSlotPreference.defaults
+
+    var resolvedDailyCalorieTarget: Int {
+        Int(dailyCalorieTarget.rounded())
+    }
 
     func load(from profile: DBUser?) {
         guard let profile = profile else { return }
@@ -73,6 +79,10 @@ class ProfileFormState: ObservableObject {
 
         servingSize = profile.servingSize.isEmpty ? "👤 1 Person" : profile.servingSize
         budget = profile.budget.isEmpty ? "💵 $$ (Standard)" : profile.budget
+        dailyCalorieTarget = Double(profile.dailyCalorieTarget ?? 2000)
+        notificationPreferences = profile.notificationPreferences?.isEmpty == false
+            ? profile.notificationPreferences!
+            : NotificationSlotPreference.defaults
     }
 }
 
@@ -152,7 +162,8 @@ struct InitialPreferencesView: View {
             spice: formState.spiceTolerance,
             dislikes: formState.dislikesList.joined(separator: ", "),
             servings: formState.servingSize,
-            budget: formState.budget
+            budget: formState.budget,
+            dailyCalorieTarget: formState.resolvedDailyCalorieTarget
         )
     }
 }
@@ -160,9 +171,11 @@ struct InitialPreferencesView: View {
 
 struct ProfileSettingsView: View {
     @EnvironmentObject var authVM: AuthViewModel
+    @EnvironmentObject var notificationManager: NotificationManager
     @Environment(\.dismiss) var dismiss
     @StateObject private var formState = ProfileFormState()
     @State private var isSaving = false
+    @State private var showNotificationSettings = false
 
     var body: some View {
         ZStack {
@@ -211,9 +224,23 @@ struct ProfileSettingsView: View {
                         .foregroundStyle(Color.primary.opacity(0.8), .ultraThinMaterial)
                 }
             }
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(action: { showNotificationSettings = true }) {
+                    Image(systemName: notificationManager.notificationsEnabled ? "bell.badge.fill" : "bell.slash.fill")
+                        .font(.system(size: 20, weight: .bold))
+                        .foregroundStyle(notificationManager.notificationsEnabled ? .orange : .secondary)
+                }
+            }
         }
         .onAppear {
             formState.load(from: authVM.currentUserProfile)
+        }
+        .sheet(isPresented: $showNotificationSettings) {
+            NavigationStack {
+                NotificationPermissionView(isPresentedFromSettings: true)
+                    .environmentObject(authVM)
+                    .environmentObject(notificationManager)
+            }
         }
     }
 
@@ -238,8 +265,32 @@ struct ProfileSettingsView: View {
             spice: formState.spiceTolerance,
             dislikes: formState.dislikesList.joined(separator: ", "),
             servings: formState.servingSize,
-            budget: formState.budget
+            budget: formState.budget,
+            dailyCalorieTarget: formState.resolvedDailyCalorieTarget,
+            activePantryId: authVM.currentUserProfile?.activePantryId
         )
+        authVM.updateNotificationPreferences(
+            enabled: formState.notificationPreferences.contains(where: \.isEnabled),
+            authorizationStatus: notificationManager.authorizationStatusString,
+            preferences: formState.notificationPreferences
+        )
+        if let userId = authVM.userSession?.uid,
+           var profile = authVM.currentUserProfile {
+            profile.dailyCalorieTarget = formState.resolvedDailyCalorieTarget
+            profile.cuisines = Array(formState.cuisines)
+            profile.servingSize = formState.servingSize
+            profile.notificationPreferences = formState.notificationPreferences
+            profile.notificationsEnabled = formState.notificationPreferences.contains(where: \.isEnabled)
+
+            Task {
+                await notificationManager.updatePreferences(
+                    profile: profile,
+                    userId: userId,
+                    preferences: formState.notificationPreferences,
+                    isEnabled: formState.notificationPreferences.contains(where: \.isEnabled)
+                )
+            }
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             isSaving = false
             dismiss()
@@ -249,12 +300,13 @@ struct ProfileSettingsView: View {
 
 
 private struct PreferencesFormContent: View {
+    @EnvironmentObject var notificationManager: NotificationManager
     @ObservedObject var formState: ProfileFormState
     let title: String
     let subtitle: String
 
     @State private var activeSheet: ActiveSheet? = nil
-    @State private var showSections: [Bool] = Array(repeating: false, count: 12)
+    @State private var showSections: [Bool] = Array(repeating: false, count: 13)
 
     var bmi: Double {
         let h = formState.heightInches
@@ -280,7 +332,7 @@ private struct PreferencesFormContent: View {
     var estimatedCalories: Int {
         let weightKg = formState.weight * 0.453592
         let heightCm = formState.heightInches * 2.54
-        let age = formState.age
+        let age = max(formState.age, 10)
 
         let bmr: Double
 
@@ -305,13 +357,14 @@ private struct PreferencesFormContent: View {
             activityMultiplier = 1.2
         }
 
-        var calories = bmr * activityMultiplier
+        let maintenanceCalories = bmr * activityMultiplier
+        var calories = maintenanceCalories
 
         switch formState.targetGoal {
         case "📉 Weight Loss":
-            calories -= 400
+            calories -= min(max(maintenanceCalories * 0.18, 275), 550)
         case "💪 Muscle Gain":
-            calories += 250
+            calories += min(max(maintenanceCalories * 0.10, 175), 325)
         default:
             break
         }
@@ -560,6 +613,50 @@ private struct PreferencesFormContent: View {
                                 .font(.system(size: 14, weight: .medium))
                                 .foregroundStyle(.primary)
 
+                            VStack(alignment: .leading, spacing: 10) {
+                                HStack {
+                                    Text("Your AI planning target")
+                                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Text("\(formState.resolvedDailyCalorieTarget) cal/day")
+                                        .font(.system(size: 18, weight: .heavy, design: .rounded))
+                                        .foregroundStyle(.green)
+                                }
+
+                                HStack(spacing: 12) {
+                                    Button(action: {
+                                        formState.dailyCalorieTarget = max(1200, formState.dailyCalorieTarget - 50)
+                                    }) {
+                                        Image(systemName: "minus.circle.fill")
+                                            .font(.system(size: 26))
+                                            .foregroundStyle(.orange)
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Slider(value: $formState.dailyCalorieTarget, in: 1200...4500, step: 25)
+                                        .tint(.green)
+
+                                    Button(action: {
+                                        formState.dailyCalorieTarget = min(4500, formState.dailyCalorieTarget + 50)
+                                    }) {
+                                        Image(systemName: "plus.circle.fill")
+                                            .font(.system(size: 26))
+                                            .foregroundStyle(.green)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+
+                                Button("Use Recommended Calories") {
+                                    formState.dailyCalorieTarget = Double(estimatedCalories)
+                                }
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .foregroundStyle(.orange)
+                            }
+                            .padding(14)
+                            .background(Color.primary.opacity(0.05))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundStyle(.yellow)
@@ -591,40 +688,23 @@ private struct PreferencesFormContent: View {
                             ProfileMultiPreference(
                                 title: "Appliances You Own",
                                 options: appliancesList,
-                                selected: $formState.appliances
+                                selected: $formState.appliances,
+                                previewLimit: 6
                             ) {
                                 activeSheet = .appliances
                             }
 
                             let customAppliances = formState.appliances.filter { !appliancesList.contains($0) }.sorted()
                             if !customAppliances.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 12) {
-                                        Spacer().frame(width: 12)
-                                        ForEach(customAppliances, id: \.self) { item in
-                                            Button {
-                                                withAnimation {
-                                                    _ = formState.appliances.remove(item)
-                                                }
-                                            } label: {
-                                                HStack(spacing: 6) {
-                                                    Text(item)
-                                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                                    Image(systemName: "xmark.circle.fill")
-                                                        .font(.system(size: 14))
-                                                        .foregroundStyle(.white.opacity(0.8))
-                                                }
-                                                .foregroundStyle(.white)
-                                                .padding(.horizontal, 16)
-                                                .padding(.vertical, 10)
-                                                .background(Color.green)
-                                                .clipShape(Capsule())
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                        Spacer().frame(width: 12)
+                                RemovablePreferenceChips(
+                                    items: customAppliances,
+                                    tint: .green
+                                ) { item in
+                                    withAnimation {
+                                        _ = formState.appliances.remove(item)
                                     }
                                 }
+                                .padding(.horizontal, 24)
                             }
 
                             HStack(spacing: 12) {
@@ -672,40 +752,23 @@ private struct PreferencesFormContent: View {
                             ProfileMultiPreference(
                                 title: "Favorite Cuisines",
                                 options: cuisinesList,
-                                selected: $formState.cuisines
+                                selected: $formState.cuisines,
+                                previewLimit: 6
                             ) {
                                 activeSheet = .cuisines
                             }
 
                             let customCuisines = formState.cuisines.filter { !cuisinesList.contains($0) }.sorted()
                             if !customCuisines.isEmpty {
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 12) {
-                                        Spacer().frame(width: 12)
-                                        ForEach(customCuisines, id: \.self) { item in
-                                            Button {
-                                                withAnimation {
-                                                    _ = formState.cuisines.remove(item)
-                                                }
-                                            } label: {
-                                                HStack(spacing: 6) {
-                                                    Text(item)
-                                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                                    Image(systemName: "xmark.circle.fill")
-                                                        .font(.system(size: 14))
-                                                        .foregroundStyle(.white.opacity(0.8))
-                                                }
-                                                .foregroundStyle(.white)
-                                                .padding(.horizontal, 16)
-                                                .padding(.vertical, 10)
-                                                .background(Color.green)
-                                                .clipShape(Capsule())
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                        Spacer().frame(width: 12)
+                                RemovablePreferenceChips(
+                                    items: customCuisines,
+                                    tint: .green
+                                ) { item in
+                                    withAnimation {
+                                        _ = formState.cuisines.remove(item)
                                     }
                                 }
+                                .padding(.horizontal, 24)
                             }
 
                             HStack(spacing: 12) {
@@ -823,18 +886,69 @@ private struct PreferencesFormContent: View {
                     }
                 }
 
+                AnimatedSection(isVisible: showSections[4]) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        ProfileSectionHeader(title: "Notifications", icon: "bell.badge")
+
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(alignment: .center) {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Smart Notification Plan")
+                                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                                    Text(notificationManager.notificationsEnabled ? "Three smart slots, fully adjustable." : "Enable notifications to personalize your nudges.")
+                                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer()
+
+                                Image(systemName: notificationManager.notificationsEnabled ? "bell.badge.fill" : "bell.slash.fill")
+                                    .font(.system(size: 22, weight: .bold))
+                                    .foregroundStyle(notificationManager.notificationsEnabled ? .orange : .secondary)
+                                    .padding(12)
+                                    .background(Color.orange.opacity(notificationManager.notificationsEnabled ? 0.12 : 0.06))
+                                    .clipShape(Circle())
+                            }
+
+                            ForEach($formState.notificationPreferences) { $preference in
+                                NotificationPreferenceCard(preference: $preference)
+                            }
+                        }
+                        .padding()
+                        .background(.ultraThinMaterial)
+                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                        )
+                        .padding(.horizontal, 24)
+                    }
+                }
+
                 Spacer(minLength: 160)
             }
         }
         .onAppear {
+            syncDailyCaloriesIfNeeded(force: formState.dailyCalorieTarget <= 0)
             for i in 0..<showSections.count {
                 withAnimation(.spring(response: 0.6, dampingFraction: 0.8).delay(Double(i) * 0.15)) {
                     showSections[i] = true
                 }
             }
         }
+        .onChange(of: estimatedCalories) { newValue in
+            if abs(formState.resolvedDailyCalorieTarget - newValue) <= 80 || formState.dailyCalorieTarget <= 0 {
+                formState.dailyCalorieTarget = Double(newValue)
+            }
+        }
         .sheet(item: $activeSheet) { sheetType in
             SheetRouter(sheetType: sheetType)
+        }
+    }
+
+    private func syncDailyCaloriesIfNeeded(force: Bool = false) {
+        if force || formState.dailyCalorieTarget <= 0 {
+            formState.dailyCalorieTarget = Double(estimatedCalories)
         }
     }
 }
@@ -847,9 +961,9 @@ private let macrosList = ["⚖️ Balanced", "💪 High Protein", "🔥 Low Calo
 private let sexList = ["Male", "Female"]
 private let goalsList = ["📉 Weight Loss", "⚖️ Maintain", "💪 Muscle Gain"]
 private let activityList = ["🛋️ Sedentary", "🚶 Lightly Active", "🏃 Active", "🏋️ Athlete"]
-private let appliancesList = ["♨️ Stove", "🍳 Oven", "🍚 Rice Cooker", "🌪️ Air Fryer", "🍲 Slow Cooker", "🥤 Blender", "🔪 Food Processor", "⏲️ Microwave", "🥘 Cast Iron"]
+private let appliancesList = ["♨️ Stove", "🍳 Oven", "🍚 Rice Cooker", "🌪️ Air Fryer", "🍲 Slow Cooker", "🥤 Blender", "🔪 Food Processor", "⏲️ Microwave", "🥘 Cast Iron", "🔥 Grill", "🧇 Waffle Maker", "🥪 Panini Press", "🍜 Pressure Cooker", "🫕 Dutch Oven", "🥣 Stand Mixer", "🫓 Toaster Oven", "🫙 Instant Pot"]
 private let cookTimesList = ["⚡ < 15 mins", "⏱️ 15-30 mins", "⏳ 30-60 mins", "🕰️ 1 hr+"]
-private let cuisinesList = ["🇮🇹 Italian", "🇲🇽 Mexican", "🇨🇳 Asian", "🇮🇳 Indian", "🇬🇷 Mediterranean", "🇺🇸 American"]
+private let cuisinesList = ["🇮🇹 Italian", "🇲🇽 Mexican", "🇨🇳 Chinese", "🇯🇵 Japanese", "🇰🇷 Korean", "🇹🇭 Thai", "🇮🇳 Indian", "🇬🇷 Mediterranean", "🇺🇸 American", "🇫🇷 French", "🇪🇸 Spanish", "🇹🇷 Turkish", "🇻🇳 Vietnamese", "🇱🇧 Lebanese", "🇧🇷 Brazilian", "🇲🇦 Moroccan"]
 private let spiceList = ["🌿 Mild", "🌶️ Medium", "🔥 Spicy", "🌋 Extra Spicy"]
 private let servingsList = ["👤 1 Person", "👥 2 People", "👨‍👩‍👧‍👦 3-4 People", "🏠 5+ People"]
 private let budgetList = ["🪙 $ (Budget)", "💵 $$ (Standard)", "💰 $$$ (Gourmet)"]
@@ -864,6 +978,77 @@ private struct AnimatedSection<Content: View>: View {
         }
         .opacity(isVisible ? 1.0 : 0.0)
         .offset(y: isVisible ? 0 : 30)
+    }
+}
+
+private struct NotificationPreferenceCard: View {
+    @Binding var preference: NotificationSlotPreference
+
+    private var bindingDate: Binding<Date> {
+        Binding(
+            get: {
+                var components = DateComponents()
+                components.hour = preference.hour
+                components.minute = preference.minute
+                return Calendar.current.date(from: components) ?? Date()
+            },
+            set: { newValue in
+                let components = Calendar.current.dateComponents([.hour, .minute], from: newValue)
+                preference.hour = components.hour ?? preference.hour
+                preference.minute = components.minute ?? preference.minute
+            }
+        )
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(preference.title)
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                    Text(preference.kind.title)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: $preference.isEnabled)
+                    .labelsHidden()
+                    .tint(.green)
+            }
+
+            HStack(spacing: 12) {
+                DatePicker("", selection: bindingDate, displayedComponents: .hourAndMinute)
+                    .labelsHidden()
+                    .datePickerStyle(.compact)
+                    .disabled(!preference.isEnabled)
+
+                Spacer()
+
+                Menu {
+                    ForEach(NotificationSlotKind.allCases, id: \.self) { kind in
+                        Button(kind.title) {
+                            preference.kind = kind
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(preference.kind.title)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                        Image(systemName: "chevron.up.chevron.down")
+                            .font(.system(size: 10, weight: .bold))
+                    }
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color.primary.opacity(0.06))
+                    .clipShape(Capsule())
+                }
+                .disabled(!preference.isEnabled)
+            }
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.05))
+        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -932,10 +1117,12 @@ private struct ProfileSlider: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(title).font(.system(size: 16, weight: .bold, design: .rounded))
-                Button(action: onInfoTap) {
-                    Image(systemName: "info.circle.fill")
-                        .foregroundStyle(Color.primary.opacity(0.4))
+                HStack(spacing: 6) {
+                    Text(title).font(.system(size: 16, weight: .bold, design: .rounded))
+                    Button(action: onInfoTap) {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundStyle(Color.primary.opacity(0.4))
+                    }
                 }
                 Spacer()
                 Text(String(format: format, value))
@@ -955,10 +1142,12 @@ private struct ProfileHeightSlider: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text(title).font(.system(size: 16, weight: .bold, design: .rounded))
-                Button(action: onInfoTap) {
-                    Image(systemName: "info.circle.fill")
-                        .foregroundStyle(Color.primary.opacity(0.4))
+                HStack(spacing: 6) {
+                    Text(title).font(.system(size: 16, weight: .bold, design: .rounded))
+                    Button(action: onInfoTap) {
+                        Image(systemName: "info.circle.fill")
+                            .foregroundStyle(Color.primary.opacity(0.4))
+                    }
                 }
                 Spacer()
                 Text("\(Int(inches) / 12) ft  \(Int(inches) % 12) in")
@@ -979,13 +1168,16 @@ private struct ProfileSinglePreference: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(title).font(.system(size: 18, weight: .bold, design: .rounded))
-                if let onInfoTap = onInfoTap {
-                    Button(action: onInfoTap) {
-                        Image(systemName: "info.circle.fill")
-                            .foregroundStyle(Color.primary.opacity(0.4))
+                HStack(spacing: 6) {
+                    Text(title).font(.system(size: 18, weight: .bold, design: .rounded))
+                    if let onInfoTap = onInfoTap {
+                        Button(action: onInfoTap) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(Color.primary.opacity(0.4))
+                        }
                     }
                 }
+                Spacer()
             }
             .padding(.horizontal, 24)
 
@@ -1022,51 +1214,100 @@ private struct ProfileMultiPreference: View {
     let title: String
     let options: [String]
     @Binding var selected: Set<String>
+    var previewLimit: Int? = nil
     var onInfoTap: (() -> Void)? = nil
+    @State private var showAll = false
+
+    private var visibleOptions: [String] {
+        guard let previewLimit, showAll == false else { return options }
+        return Array(options.prefix(previewLimit))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
-                Text(title).font(.system(size: 18, weight: .bold, design: .rounded))
-                if let onInfoTap = onInfoTap {
-                    Button(action: onInfoTap) {
-                        Image(systemName: "info.circle.fill")
-                            .foregroundStyle(Color.primary.opacity(0.4))
+                HStack(spacing: 6) {
+                    Text(title).font(.system(size: 18, weight: .bold, design: .rounded))
+                    if let onInfoTap = onInfoTap {
+                        Button(action: onInfoTap) {
+                            Image(systemName: "info.circle.fill")
+                                .foregroundStyle(Color.primary.opacity(0.4))
+                        }
                     }
+                }
+                Spacer()
+                if let previewLimit, options.count > previewLimit {
+                    Button(showAll ? "Show Less" : "See More") {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                            showAll.toggle()
+                        }
+                    }
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                    .foregroundStyle(.orange)
                 }
             }
             .padding(.horizontal, 24)
 
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    Spacer().frame(width: 12)
-                    ForEach(options, id: \.self) { option in
-                        let isSelected = selected.contains(option)
-                        Button {
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                if isSelected {
-                                    _ = selected.remove(option)
-                                } else {
-                                    _ = selected.insert(option)
-                                }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+                ForEach(visibleOptions, id: \.self) { option in
+                    let isSelected = selected.contains(option)
+                    Button {
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                            if isSelected {
+                                _ = selected.remove(option)
+                            } else {
+                                _ = selected.insert(option)
                             }
-                        } label: {
-                            Text(option)
-                                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                .foregroundStyle(isSelected ? .white : .primary)
-                                .padding(.horizontal, 20)
-                                .padding(.vertical, 14)
-                                .background(isSelected ? Color.green : Color(.systemGray6))
-                                .clipShape(Capsule())
                         }
-                        .buttonStyle(.plain)
+                    } label: {
+                        Text(option)
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            .foregroundStyle(isSelected ? .white : .primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 18)
+                            .padding(.vertical, 14)
+                            .background(isSelected ? Color.green : Color(.systemGray6))
+                            .clipShape(Capsule())
                     }
-                    Spacer().frame(width: 12)
+                    .buttonStyle(.plain)
                 }
             }
+            .padding(.horizontal, 24)
         }
         .padding(.bottom, 12)
+    }
+}
+
+private struct RemovablePreferenceChips: View {
+    let items: [String]
+    let tint: Color
+    let onRemove: (String) -> Void
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 12)], spacing: 12) {
+            ForEach(items, id: \.self) { item in
+                Button {
+                    onRemove(item)
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(item)
+                            .font(.system(size: 15, weight: .semibold, design: .rounded))
+                            .lineLimit(2)
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(tint)
+                    .clipShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
     }
 }
 
