@@ -8,6 +8,14 @@ import FirebaseFirestore
 import FirebaseAuth
 import Combine
 
+private extension Calendar {
+    func weekdayName(for date: Date) -> String {
+        let weekday = component(.weekday, from: date)
+        let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+        return names[max(0, min(names.count - 1, weekday - 1))]
+    }
+}
+
 struct PlannedMealRecipe: Codable, Equatable {
     var title: String
     var emoji: String
@@ -591,7 +599,7 @@ struct WeeklyMealPlanView: View {
     @ObservedObject private var vm = MealPlanViewModel.shared
     @StateObject private var recipesVM = RecipesViewModel()
 
-    @State private var selectedDay = "Monday"
+    @State private var selectedDay = Calendar.current.weekdayName(for: Date())
     @State private var showRecipePicker = false
     @State private var selectedMealType: String?
     @State private var selectedRecipeForDetail: Recipe? = nil
@@ -609,6 +617,10 @@ struct WeeklyMealPlanView: View {
     ]
 
     private let mealTypes = ["Breakfast", "Lunch", "Dinner"]
+
+    private var currentWeekday: String {
+        Calendar.current.weekdayName(for: Date())
+    }
 
     private var filledSlotsCount: Int {
         vm.weeklySlots.filter { !$0.displayTitle.isEmpty }.count
@@ -712,47 +724,47 @@ struct WeeklyMealPlanView: View {
                 .animation(.easeInOut(duration: 2.4).repeatForever(autoreverses: true), value: pulseHero)
 
             ScrollView(showsIndicators: false) {
-                VStack(alignment: .leading, spacing: 16) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(alignment: .firstTextBaseline) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Weekly Meal Plan")
-                                    .font(.system(size: 30, weight: .heavy, design: .rounded))
-                                Text("\(filledSlotsCount)/21 slots planned")
-                                    .font(.system(size: 13, weight: .medium, design: .rounded))
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Text("\(selectedDayFilledCount)/3 today")
-                                .font(.system(size: 12, weight: .bold, design: .rounded))
-                                .foregroundStyle(.green)
-                                .padding(.horizontal, 10)
-                                .padding(.vertical, 6)
-                                .background(Color.green.opacity(0.16))
-                                .clipShape(Capsule())
-                        }
+                VStack(alignment: .leading, spacing: 22) {
+                    AnimatedScreenHeader(
+                        eyebrow: "Meal Plan",
+                        title: "Shape your week",
+                        subtitle: "\(filledSlotsCount)/21 slots planned and \(selectedDayFilledCount)/3 filled for \(selectedDay).",
+                        systemImage: "calendar",
+                        accent: .orange,
+                        badgeText: "\(selectedDayFilledCount)/3 today"
+                    )
+                    .opacity(hasAppeared ? 1 : 0)
+                    .offset(y: hasAppeared ? 0 : -12)
 
-                        Button(action: {
-                            dayAssistantMealTypes = Set(mealTypes)
-                            dayAssistantPrompt = ""
-                            showDayAssistant = true
-                        }) {
-                            HStack(spacing: 8) {
-                                Image(systemName: "wand.and.stars")
-                                Text("Customize \(selectedDay) with AI")
-                                    .lineLimit(1)
-                                    .minimumScaleFactor(0.85)
+                    VStack(alignment: .leading, spacing: 16) {
+                        HStack {
+                            Text("Planner controls")
+                                .font(.system(size: 18, weight: .bold, design: .rounded))
+
+                            Spacer()
+
+                            Button(action: {
+                                dayAssistantMealTypes = Set(mealTypes)
+                                dayAssistantPrompt = ""
+                                showDayAssistant = true
+                            }) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "wand.and.stars")
+                                    Text("Customize \(selectedDay) with AI")
+                                        .lineLimit(1)
+                                        .minimumScaleFactor(0.85)
+                                }
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                .background(
+                                    LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                                )
+                                .clipShape(Capsule())
                             }
-                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(
-                                LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
-                            )
-                            .clipShape(Capsule())
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
 
                         ScrollView(.horizontal, showsIndicators: false) {
                             HStack(spacing: 10) {
@@ -772,14 +784,14 @@ struct WeeklyMealPlanView: View {
                             }
                         }
                     }
-                    .padding(14)
-                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .padding(18)
+                    .background(.ultraThinMaterial.opacity(0.96), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        RoundedRectangle(cornerRadius: 24, style: .continuous)
                             .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                     )
                     .opacity(hasAppeared ? 1 : 0)
-                    .offset(y: hasAppeared ? 0 : -12)
+                    .offset(y: hasAppeared ? 0 : -10)
 
                     DayNutritionSummaryCard(day: selectedDay, summary: selectedDayNutritionSummary)
                         .opacity(hasAppeared ? 1 : 0)
@@ -834,16 +846,16 @@ struct WeeklyMealPlanView: View {
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 8)
-                .padding(.bottom, 30)
+                .padding(.bottom, 150)
             }
         }
-        .navigationTitle("Meal Plan")
-        .navigationBarTitleDisplayMode(.inline)
+        .toolbar(.hidden, for: .navigationBar)
         .onAppear {
             pulseHero = true
             withAnimation(.spring(response: 0.45, dampingFraction: 0.85).delay(0.05)) {
                 hasAppeared = true
             }
+            selectedDay = currentWeekday
 
             if let uid = authVM.userSession?.uid {
                 vm.startListening(userId: uid)
@@ -1146,10 +1158,10 @@ struct DayNutritionSummaryCard: View {
 
             NutritionChip(label: "Sodium", value: summary.sodium, color: .purple)
         }
-        .padding(16)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .padding(18)
+        .background(.ultraThinMaterial.opacity(0.93), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
     }
@@ -1170,8 +1182,8 @@ private struct NutritionChip: View {
                 .foregroundStyle(color)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(14)
+        .background(color.opacity(0.06), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }
 

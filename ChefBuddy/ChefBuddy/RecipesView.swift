@@ -755,6 +755,8 @@ class RecipesViewModel: ObservableObject {
 struct RecipesView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @ObservedObject var assistant: CookingAssistant
+    var savedRecipes: [Recipe] = []
+    var onOpenLiveCookingPicker: () -> Void = {}
     @StateObject private var vm = RecipesViewModel()
 
     @State private var selectedRecipe: Recipe? = nil
@@ -771,6 +773,11 @@ struct RecipesView: View {
     @State private var pantrySpaces: [SimplePantrySpace] = []
     @State private var selectedPantryId: String? = nil
     @State private var showGroceryList = false
+    @State private var isGeneratingFromPantry = false
+    @State private var pantrySuggestionsById: [String: [RecipeSuggestion]] = [:]
+    @State private var pantryIngredientSignatures: [String: String] = [:]
+    @State private var selectedPantrySuggestionRecipe: Recipe? = nil
+    @State private var infoSheet: RecipesInfoSheet? = nil
 
     private var userId: String { authVM.userSession?.uid ?? "" }
     private var budgetPreference: String {
@@ -828,6 +835,14 @@ struct RecipesView: View {
         assistant.suggestions
     }
 
+    private var currentPantry: SimplePantrySpace? {
+        pantrySpaces.first(where: { $0.id == selectedPantryId })
+    }
+
+    private var currentPantrySuggestions: [RecipeSuggestion] {
+        pantrySuggestionsById[selectedPantryId ?? ""] ?? []
+    }
+
     private func startPantryListener() {
         guard !userId.isEmpty else { return }
 
@@ -840,18 +855,29 @@ struct RecipesView: View {
                 guard let docs = snap?.documents else { return }
 
                 var spaces: [SimplePantrySpace] = []
+                var signatures: [String: String] = [:]
+                var changedPantryIds: Set<String> = []
                 for doc in docs {
                     let data = doc.data()
                     let name = data["name"] as? String ?? "Pantry"
                     let emoji = data["emoji"] as? String ?? "🥑"
                     let colorTheme = data["colorTheme"] as? String ?? "Orange"
                     let virtualPantry = data["virtualPantry"] as? [String: [String]] ?? [:]
+                    let flattenedIngredients = virtualPantry.values.flatMap { $0 }
+                    let signature = flattenedIngredients
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                        .sorted()
+                        .joined(separator: "|")
+                    signatures[doc.documentID] = signature
+                    if let previous = pantryIngredientSignatures[doc.documentID], previous != signature {
+                        changedPantryIds.insert(doc.documentID)
+                    }
                     spaces.append(
                         SimplePantrySpace(
                             id: doc.documentID,
                             name: name,
                             emoji: emoji,
-                            ingredients: virtualPantry.values.flatMap { $0 },
+                            ingredients: flattenedIngredients,
                             colorTheme: colorTheme
                         )
                     )
@@ -859,6 +885,11 @@ struct RecipesView: View {
 
                 DispatchQueue.main.async {
                     pantrySpaces = spaces.sorted { $0.name < $1.name }
+                    pantryIngredientSignatures = signatures
+
+                    for pantryId in changedPantryIds {
+                        pantrySuggestionsById.removeValue(forKey: pantryId)
+                    }
 
                     let preferredPantryId = authVM.currentUserProfile?.activePantryId
                     if let selectedPantryId,
@@ -875,6 +906,13 @@ struct RecipesView: View {
                     }
 
                     pantryIngredients = pantrySpaces.first(where: { $0.id == self.selectedPantryId })?.ingredients ?? []
+
+                    if let selectedPantry = pantrySpaces.first(where: { $0.id == self.selectedPantryId }),
+                       !selectedPantry.ingredients.isEmpty,
+                       pantrySuggestionsById[selectedPantry.id] == nil,
+                       !isGeneratingFromPantry {
+                        generateFromSelectedPantry(selectedPantry)
+                    }
                 }
             }
     }
@@ -882,6 +920,90 @@ struct RecipesView: View {
     private func stopPantryListener() {
         pantryListener?.remove()
         pantryListener = nil
+    }
+
+    private func generateFromSelectedPantry(_ pantry: SimplePantrySpace) {
+        guard !pantry.ingredients.isEmpty else { return }
+
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+            isGeneratingFromPantry = true
+        }
+
+        Task {
+            do {
+                let generated = try await assistant.generatePantryRecipes(ingredients: pantry.ingredients)
+                await MainActor.run {
+                    pantrySuggestionsById[pantry.id] = generated
+                    if selectedPantryId == pantry.id {
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                            isGeneratingFromPantry = false
+                        }
+                    } else {
+                        isGeneratingFromPantry = false
+                    }
+                }
+            } catch {
+                await MainActor.run {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) {
+                        isGeneratingFromPantry = false
+                    }
+                }
+            }
+        }
+    }
+
+    private func removeAndReplacePantrySuggestion(_ recipe: Recipe, pantry: SimplePantrySpace) {
+        let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var currentSuggestions = pantrySuggestionsById[pantry.id] ?? []
+        currentSuggestions.removeAll {
+            $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
+        }
+        pantrySuggestionsById[pantry.id] = currentSuggestions
+
+        Task {
+            do {
+                let excludingTitles = currentSuggestions.map(\.title)
+                let replacement = try await assistant.generateSinglePantryRecipe(
+                    ingredients: pantry.ingredients,
+                    excludingTitles: excludingTitles
+                )
+
+                await MainActor.run {
+                    var refreshedSuggestions = pantrySuggestionsById[pantry.id] ?? currentSuggestions
+                    refreshedSuggestions.append(replacement)
+                    pantrySuggestionsById[pantry.id] = refreshedSuggestions
+                }
+            } catch {
+                print("Failed to fetch replacement pantry recipe: \(error)")
+            }
+        }
+    }
+
+    private func pantrySuggestion(from recipe: Recipe, previous: RecipeSuggestion) -> RecipeSuggestion {
+        let normalizedTags = recipe.tags.isEmpty
+            ? [detectedCuisineTag(title: recipe.title, description: recipe.description, tags: recipe.tags)]
+            : recipe.tags
+
+        return RecipeSuggestion(
+            title: recipe.title,
+            emoji: recipe.emoji,
+            description: recipe.description,
+            prepTime: recipe.cookTime,
+            servings: recipe.servings,
+            difficulty: recipe.difficulty,
+            calories: recipe.calories,
+            carbs: recipe.nutrition.carbs,
+            protein: recipe.nutrition.protein,
+            fat: recipe.nutrition.fat,
+            saturatedFat: recipe.nutrition.saturatedFat,
+            sugar: recipe.nutrition.sugar,
+            fiber: recipe.nutrition.fiber,
+            sodium: recipe.nutrition.sodium,
+            tags: normalizedTags,
+            ingredients: recipe.ingredients,
+            steps: recipe.steps,
+            matchReason: previous.matchReason
+        )
     }
 
     private func addMissingIngredientsToGroceryList(recipe: Recipe, missing: [String]) {
@@ -1105,6 +1227,12 @@ struct RecipesView: View {
         .onChange(of: selectedPantryId) { pantryId in
             pantryIngredients = pantrySpaces.first(where: { $0.id == pantryId })?.ingredients ?? []
             authVM.updateActivePantrySelection(pantryId)
+            if let pantry = pantrySpaces.first(where: { $0.id == pantryId }),
+               !pantry.ingredients.isEmpty,
+               pantrySuggestionsById[pantry.id] == nil,
+               !isGeneratingFromPantry {
+                generateFromSelectedPantry(pantry)
+            }
         }
         .sheet(isPresented: $showGenerateSheet) {
             GenerateRecipeSheet(vm: vm, assistant: assistant, userId: userId)
@@ -1182,6 +1310,44 @@ struct RecipesView: View {
                 }
             )
         }
+        .sheet(item: $selectedPantrySuggestionRecipe) { recipe in
+            SuggestedRecipeDetailView(
+                recipe: recipe,
+                assistant: assistant,
+                pantryIngredients: pantryIngredients,
+                onSave: {
+                    vm.saveSuggestedRecipe(recipe, userId: userId)
+                    if let pantry = currentPantry {
+                        removeAndReplacePantrySuggestion(recipe, pantry: pantry)
+                    }
+                    selectedPantrySuggestionRecipe = nil
+                },
+                onDislike: {
+                    if let pantry = currentPantry {
+                        removeAndReplacePantrySuggestion(recipe, pantry: pantry)
+                    }
+                    selectedPantrySuggestionRecipe = nil
+                },
+                onRecipeUpdated: { updated in
+                    guard let pantry = currentPantry else { return }
+                    var suggestions = pantrySuggestionsById[pantry.id] ?? []
+                    let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if let idx = suggestions.firstIndex(where: {
+                        $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
+                    }) {
+                        suggestions[idx] = pantrySuggestion(from: updated, previous: suggestions[idx])
+                        pantrySuggestionsById[pantry.id] = suggestions
+                        selectedPantrySuggestionRecipe = updated
+                    }
+                },
+                onLiveHelp: {
+                    selectedPantrySuggestionRecipe = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        liveHelpRecipe = recipe
+                    }
+                }
+            )
+        }
         .sheet(isPresented: $showAllRecipesScreen) {
             AllRecipesView(
                 vm: vm,
@@ -1204,6 +1370,9 @@ struct RecipesView: View {
                     budgetPreference: budgetPreference
                 )
             }
+        }
+        .sheet(item: $infoSheet) { item in
+            InfoMessageSheet(title: item.title, message: item.message)
         }
         .sheet(item: $recipeToReview) { recipe in
             RecipeReviewView(
@@ -1265,10 +1434,18 @@ struct RecipesView: View {
         ZStack {
             ChefBuddyBackground()
 
-            VStack(spacing: 0) {
-                headerView
-                filterBar
-                mainContent
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    headerView
+                    if vm.selectedFilter == "All" {
+                        pantryDiscoverySection
+                        suggestionsSection
+                        spotlightSection
+                    }
+                    filterBar
+                    recipesGridSection
+                }
+                .padding(.bottom, 136)
             }
 
             if let err = vm.errorMessage {
@@ -1277,82 +1454,171 @@ struct RecipesView: View {
         }
     }
     private var filterBar: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 10) {
-                Spacer().frame(width: 16)
+        VStack(alignment: .leading, spacing: 10) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(vm.filters, id: \.self) { filter in
+                        Button {
+                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
 
-                ForEach(vm.filters, id: \.self) { filter in
-                    Button {
-                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-
-                        withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                            vm.selectedFilter = filter
-                        }
-                    } label: {
-                        Text(filter)
-                            .font(.system(size: 14, weight: .semibold, design: .rounded))
-                            .foregroundStyle(vm.selectedFilter == filter ? .white : .primary)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 9)
-                            .background(
-                                vm.selectedFilter == filter
-                                ? AnyView(
-                                    LinearGradient(
-                                        colors: [.orange, .green.opacity(0.85)],
-                                        startPoint: .leading,
-                                        endPoint: .trailing
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                vm.selectedFilter = filter
+                            }
+                        } label: {
+                            Text(filter)
+                                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                .foregroundStyle(vm.selectedFilter == filter ? .white : .primary)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                                .background(
+                                    vm.selectedFilter == filter
+                                    ? AnyView(
+                                        LinearGradient(
+                                            colors: [.orange, .green.opacity(0.85)],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
                                     )
-                                  )
-                                : AnyView(Color(.systemGray6))
-                            )
-                            .clipShape(Capsule())
+                                    : AnyView(Color.primary.opacity(0.07))
+                                )
+                                .clipShape(Capsule())
+                        }
                     }
                 }
-
-                Spacer().frame(width: 16)
             }
         }
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+        .padding(.horizontal, 16)
         .opacity(appeared ? 1 : 0)
     }
 
     private var headerView: some View {
-        HStack(alignment: .bottom) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Your Recipes")
-                    .font(.system(size: 32, weight: .heavy, design: .rounded))
-
-                Text("\(vm.recipes.count) recipe\(vm.recipes.count == 1 ? "" : "s") saved")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
-        }
-        .padding(.horizontal, 24)
-        .padding(.top, 20)
-        .padding(.bottom, 16)
+        AnimatedScreenHeader(
+            eyebrow: "Recipes",
+            title: "Cook something worth saving",
+            subtitle: "\(vm.recipes.count) saved recipes, plus smarter ideas based on your pantry and preferences.",
+            systemImage: "book.closed.fill",
+            accent: .orange
+        )
+        .padding(.horizontal, 20)
+        .padding(.top, 24)
         .opacity(appeared ? 1 : 0)
         .offset(y: appeared ? 0 : -10)
     }
 
-    private var mainContent: some View {
-        Group {
-            if vm.filteredRecipes.isEmpty && vm.selectedFilter != "All" {
-                RecipesEmptyState(filter: vm.selectedFilter) {
-                    showGenerateSheet = true
-                }
-            } else {
-                ScrollView(showsIndicators: false) {
-                    VStack(alignment: .leading, spacing: 18) {
-                        suggestionsSection
-                        spotlightSection
-                        recipesGridSection
+    private var pantryDiscoverySection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text("From Your Pantry")
+                            .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                        SectionInfoButton {
+                            infoSheet = RecipesInfoSheet(
+                                title: "From Your Pantry",
+                                message: "These ideas are generated from the ingredients in your currently active pantry, so they should feel more grounded in what you actually have on hand."
+                            )
+                        }
                     }
-                    .padding(.bottom, 40)
+
+                    Text(
+                        currentPantry == nil
+                        ? "Pick a pantry in the Pantry tab to unlock ingredient-aware recipe ideas."
+                        : "Ideas generated from what’s currently stocked in \(currentPantry?.name ?? "your pantry")."
+                    )
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
                 }
+
+                Spacer()
+
+                if pantrySpaces.count > 1 {
+                    Menu {
+                        ForEach(pantrySpaces) { pantry in
+                            Button {
+                                selectedPantryId = pantry.id
+                            } label: {
+                                HStack {
+                                    Text("\(pantry.emoji) \(pantry.name)")
+                                    if pantry.id == selectedPantryId {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(currentPantry.map { "\($0.emoji) \($0.name)" } ?? "Select Pantry")
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.primary.opacity(0.07), in: Capsule())
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+
+            if pantrySpaces.isEmpty {
+                DiscoveryMessageCard(
+                    title: "No pantry linked yet",
+                    subtitle: "Open Pantry to create a space and add ingredients before asking ChefBuddy for pantry-based recipe ideas.",
+                    icon: "basket"
+                )
+                .padding(.horizontal, 16)
+            } else if currentPantry?.ingredients.isEmpty ?? true {
+                DiscoveryMessageCard(
+                    title: "\(currentPantry?.name ?? "This pantry") is still empty",
+                    subtitle: "Scan a shelf or add ingredients manually in Pantry, then come back here for smarter pantry-first ideas.",
+                    icon: "camera.viewfinder"
+                )
+                .padding(.horizontal, 16)
+            } else if isGeneratingFromPantry && currentPantrySuggestions.isEmpty {
+                PantryRecipeLoadingView()
+                    .padding(.horizontal, 16)
+            } else if !currentPantrySuggestions.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        ForEach(currentPantrySuggestions) { suggestion in
+                            PantryRecipeCard(recipe: suggestion) {
+                                selectedPantrySuggestionRecipe = recipeFromSuggestion(suggestion)
+                            }
+                        }
+
+                        if isGeneratingFromPantry {
+                            PantryCardLoadingView()
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 2)
+                }
+            } else if let pantry = currentPantry {
+                Button(action: { generateFromSelectedPantry(pantry) }) {
+                    Label("Generate ideas from \(pantry.name)", systemImage: "sparkles")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 15)
+                        .background(
+                            LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                        )
+                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 16)
             }
         }
     }
+
     private var suggestionsSection: some View {
         Group {
             if isLoadingInitialSuggestions && unsavedSuggestions.isEmpty {
@@ -1364,8 +1630,15 @@ struct RecipesView: View {
                 VStack(alignment: .leading, spacing: 12) {
 
                     HStack {
-                        Text("AI Suggestions")
+                        Text("ChefBuddy Picks")
                             .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                        SectionInfoButton {
+                            infoSheet = RecipesInfoSheet(
+                                title: "ChefBuddy Picks",
+                                message: "These are broader AI recipe ideas tuned to your preferences and past cooking behavior, even when they are not tied directly to pantry ingredients."
+                            )
+                        }
 
                         Spacer()
                     }
@@ -1399,32 +1672,39 @@ struct RecipesView: View {
     }
 
     private var spotlightSection: some View {
-        Group {
-            if vm.selectedFilter == "All" {
-                GenerateRecipeSpotlightCard(
-                    onTap: { showGenerateSheet = true },
-                    isGenerating: vm.isGenerating,
-                    step: vm.elapsedSeconds
-                )
-                .padding(.horizontal, 16)
-            }
-        }
+        GenerateRecipeSpotlightCard(
+            onTap: { showGenerateSheet = true },
+            isGenerating: vm.isGenerating,
+            step: vm.elapsedSeconds
+        )
+        .padding(.horizontal, 16)
     }
 
     private var recipesGridSection: some View {
         Group {
-            if vm.filteredRecipes.isEmpty && vm.selectedFilter == "All" {
-                RecipesEmptyState(filter: vm.selectedFilter) {
-                    showGenerateSheet = true
+            if vm.filteredRecipes.isEmpty {
+                VStack(alignment: .leading, spacing: 18) {
+                    RecipesEmptyState(filter: vm.selectedFilter) {
+                        showGenerateSheet = true
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 16)
+
+                    liveCookingLibrarySection
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.top, 20)
             } else {
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 18) {
 
                     HStack {
                         Text("Your Recipes")
                             .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                        SectionInfoButton {
+                            infoSheet = RecipesInfoSheet(
+                                title: "Your Recipes",
+                                message: "This is your saved recipe library. Filters here only affect recipes you’ve saved, not the AI discovery sections above."
+                            )
+                        }
 
                         Spacer()
 
@@ -1442,23 +1722,151 @@ struct RecipesView: View {
                     }
                     .padding(.horizontal, 20)
 
-                    LazyVGrid(
-                        columns: [GridItem(.flexible()), GridItem(.flexible())],
-                        spacing: 14
-                    ) {
-                        ForEach(vm.previewRecipes) { recipe in
-                            RecipeCard(
-                                recipe: recipe,
-                                onTap: { selectedRecipe = recipe },
-                                onFavorite: { toggleFavoriteEverywhere(recipe) },
-                                isCooked: recipe.hasBeenCooked
-                            )
+                    VStack(alignment: .leading, spacing: 18) {
+                        LazyVGrid(
+                            columns: [GridItem(.flexible()), GridItem(.flexible())],
+                            spacing: 14
+                        ) {
+                            ForEach(vm.previewRecipes) { recipe in
+                                RecipeCard(
+                                    recipe: recipe,
+                                    onTap: { selectedRecipe = recipe },
+                                    onFavorite: { toggleFavoriteEverywhere(recipe) },
+                                    isCooked: recipe.hasBeenCooked
+                                )
+                            }
                         }
+                        .padding(.horizontal, 16)
+
+                        liveCookingLibrarySection
                     }
-                    .padding(.horizontal, 16)
                 }
             }
         }
+    }
+
+    private var liveCookingLibrarySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Text("Live Cooking")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                SectionInfoButton {
+                    infoSheet = RecipesInfoSheet(
+                        title: "Live Cooking",
+                        message: "Pick one of your saved recipes and ChefBuddy will guide you step by step while you cook, so you don’t have to keep bouncing around the recipe card."
+                    )
+                }
+
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+
+            Button(action: onOpenLiveCookingPicker) {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(alignment: .top, spacing: 14) {
+                        ZStack {
+                            Circle()
+                                .fill(Color.white.opacity(0.14))
+                                .frame(width: 52, height: 52)
+
+                            Image(systemName: savedRecipes.isEmpty ? "book.closed.fill" : "video.fill")
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(savedRecipes.isEmpty ? "Save a recipe first" : "Start Live Cooking")
+                                .font(.system(size: 24, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.white)
+
+                            Text(
+                                savedRecipes.isEmpty
+                                ? "Save something from your library, then ChefBuddy can walk you through it in real time."
+                                : "Pick a saved recipe and get step-by-step help while you cook without bouncing around the screen."
+                            )
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .lineSpacing(3)
+                        }
+
+                        Spacer(minLength: 0)
+                    }
+
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 140), spacing: 10)],
+                        alignment: .leading,
+                        spacing: 10
+                    ) {
+                        LiveCookingFeaturePill(title: "Step-by-step", icon: "list.bullet")
+                        LiveCookingFeaturePill(title: "Hands-free", icon: "waveform")
+                        LiveCookingFeaturePill(title: "In the moment", icon: "sparkles")
+                    }
+
+                    HStack(spacing: 10) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "video.fill")
+                                .font(.system(size: 16, weight: .bold))
+
+                            Text(savedRecipes.isEmpty ? "Save Recipes First" : "Start Live Cooking")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.85)
+                        }
+                        .foregroundStyle(.orange)
+                        .padding(.horizontal, 18)
+                        .padding(.vertical, 13)
+                        .background(Color.white.opacity(0.96), in: Capsule())
+
+                        Spacer()
+
+                        Image(systemName: "arrow.up.right")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.white.opacity(0.92))
+                            .padding(12)
+                            .background(Color.white.opacity(0.12), in: Circle())
+                    }
+                }
+                .padding(22)
+                .background(
+                    LinearGradient(
+                        colors: [.orange.opacity(0.96), .green.opacity(0.84)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 30, style: .continuous)
+                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
+                )
+                .shadow(color: .orange.opacity(0.22), radius: 14, y: 8)
+                .opacity(savedRecipes.isEmpty ? 0.65 : 1)
+            }
+            .buttonStyle(.plain)
+            .disabled(savedRecipes.isEmpty)
+            .padding(.horizontal, 16)
+        }
+    }
+}
+
+private struct LiveCookingFeaturePill: View {
+    let title: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+            Text(title)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(.white.opacity(0.92))
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.12), in: Capsule())
     }
 }
 
@@ -1771,6 +2179,61 @@ struct GenerateRecipeSpotlightCard: View {
     }
 }
 
+private struct RecipesInfoSheet: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+}
+
+private struct SectionInfoButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "info.circle.fill")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.orange)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct InfoMessageSheet: View {
+    let title: String
+    let message: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ChefBuddyBackground()
+
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(title)
+                        .font(.system(size: 28, weight: .heavy, design: .rounded))
+
+                    Text(message)
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(4)
+
+                    Spacer()
+                }
+                .padding(24)
+            }
+            .navigationTitle("Section Info")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.fraction(0.34)])
+        .presentationDragIndicator(.visible)
+    }
+}
+
 
 private struct SuggestionsLoadingSection: View {
     @State private var scanAnimationStep: Int = 0
@@ -1779,7 +2242,7 @@ private struct SuggestionsLoadingSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("AI Suggestions")
+                Text("ChefBuddy Picks")
                     .font(.system(size: 20, weight: .bold, design: .rounded))
                 Spacer()
             }
@@ -1843,6 +2306,42 @@ private struct SuggestionsLoadingSection: View {
         .onDisappear {
             timer?.invalidate()
         }
+    }
+}
+
+private struct DiscoveryMessageCard: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                Circle()
+                    .fill(Color.orange.opacity(0.12))
+                    .frame(width: 42, height: 42)
+                Image(systemName: icon)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundStyle(.orange)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                Text(subtitle)
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(3)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
     }
 }
 

@@ -4,6 +4,7 @@ import FirebaseFirestore
 import SwiftUI
 import UserNotifications
 import Combine
+import UIKit
 
 @MainActor
 final class NotificationManager: ObservableObject {
@@ -32,6 +33,7 @@ final class NotificationManager: ObservableObject {
         let identifiers = pendingNotificationIdentifiers()
         center.removePendingNotificationRequests(withIdentifiers: identifiers)
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        clearBadgeCount()
         notificationsEnabled = false
         await refreshAuthorizationStatus()
     }
@@ -43,7 +45,7 @@ final class NotificationManager: ObservableObject {
 
         let granted: Bool
         do {
-            granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+            granted = try await center.requestAuthorization(options: [.alert, .sound])
         } catch {
             granted = false
         }
@@ -92,6 +94,7 @@ final class NotificationManager: ObservableObject {
         let identifiers = pendingNotificationIdentifiers()
         center.removePendingNotificationRequests(withIdentifiers: identifiers)
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
+        clearBadgeCount()
 
         let snapshot = await fetchKitchenSnapshot(userId: userId)
         let calendar = Calendar.current
@@ -130,6 +133,7 @@ final class NotificationManager: ObservableObject {
         }
 
         notificationsEnabled = true
+        clearBadgeCount()
     }
 
     func updatePreferences(
@@ -141,7 +145,7 @@ final class NotificationManager: ObservableObject {
         notificationsEnabled = isEnabled
         await refreshAuthorizationStatus()
 
-        if isEnabled, authorizationStatus == .authorized || authorizationStatus == .provisional {
+        if isEnabled, (authorizationStatus == .authorized || authorizationStatus == .provisional) {
             var updatedProfile = profile
             updatedProfile.notificationsEnabled = isEnabled
             updatedProfile.notificationPreferences = preferences
@@ -241,7 +245,6 @@ final class NotificationManager: ObservableObject {
         content.title = selected.0
         content.body = selected.1
         content.sound = .default
-        content.badge = 1
         content.userInfo = ["slot": slot.slotId, "kind": slot.kind.rawValue]
         return content
     }
@@ -261,6 +264,10 @@ final class NotificationManager: ObservableObject {
             }
         }
         return merged
+    }
+
+    func clearBadgeCount() {
+        UIApplication.shared.applicationIconBadgeNumber = 0
     }
 }
 

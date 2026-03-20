@@ -173,9 +173,10 @@ struct ProfileSettingsView: View {
     @EnvironmentObject var authVM: AuthViewModel
     @EnvironmentObject var notificationManager: NotificationManager
     @Environment(\.dismiss) var dismiss
+    var showsDismissButton = true
+    var showsSignOutButton = false
     @StateObject private var formState = ProfileFormState()
     @State private var isSaving = false
-    @State private var showNotificationSettings = false
 
     var body: some View {
         ZStack {
@@ -185,62 +186,74 @@ struct ProfileSettingsView: View {
                 title: "Your Kitchen Profile",
                 subtitle: "Tweak your preferences for better AI suggestions."
             )
-
-            VStack {
-                Spacer()
-                Button(action: saveChanges) {
-                    HStack {
-                        if isSaving {
-                            ProgressView().tint(.white)
-                        } else {
-                            Text("Save Changes")
-                                .font(.system(size: 18, weight: .bold, design: .rounded))
+        }
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack {
+                HStack(spacing: 12) {
+                    if showsDismissButton {
+                        Button(action: { dismiss() }) {
+                            Image(systemName: "arrow.left.circle.fill")
+                                .font(.system(size: 28))
+                                .foregroundStyle(Color.primary.opacity(0.8), .ultraThinMaterial)
                         }
                     }
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 60)
-                    .background(
-                        LinearGradient(
-                            colors: [.orange, .green.opacity(0.9)],
-                            startPoint: .leading,
-                            endPoint: .trailing
+
+                    Button(action: saveChanges) {
+                        HStack(spacing: 8) {
+                            if isSaving {
+                                ProgressView()
+                                    .tint(.white)
+                                    .controlSize(.small)
+                            } else {
+                                Image(systemName: "checkmark")
+                                    .font(.system(size: 12, weight: .bold))
+                            }
+
+                            Text(isSaving ? "Saving..." : "Save Changes")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 11)
+                        .background(
+                            LinearGradient(
+                                colors: [.orange, .green.opacity(0.9)],
+                                startPoint: .leading,
+                                endPoint: .trailing
+                            )
                         )
-                    )
-                    .clipShape(Capsule())
-                    .shadow(color: .orange.opacity(0.3), radius: 10, y: 5)
+                        .clipShape(Capsule())
+                        .shadow(color: .orange.opacity(0.22), radius: 10, y: 5)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isSaving)
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 20)
-                .disabled(isSaving)
+
+                Spacer()
+
+                if showsSignOutButton {
+                    Button("Log Out") {
+                        authVM.signOut()
+                    }
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(.red)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 12)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(
+                        Capsule()
+                            .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    )
+                }
             }
+            .padding(.horizontal, 24)
+            .padding(.top, 4)
+            .padding(.bottom, 10)
+            .background(Color.clear)
         }
         .navigationBarBackButtonHidden(true)
-        .toolbar {
-            ToolbarItem(placement: .topBarLeading) {
-                Button(action: { dismiss() }) {
-                    Image(systemName: "arrow.left.circle.fill")
-                        .font(.system(size: 28))
-                        .foregroundStyle(Color.primary.opacity(0.8), .ultraThinMaterial)
-                }
-            }
-            ToolbarItem(placement: .topBarTrailing) {
-                Button(action: { showNotificationSettings = true }) {
-                    Image(systemName: notificationManager.notificationsEnabled ? "bell.badge.fill" : "bell.slash.fill")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(notificationManager.notificationsEnabled ? .orange : .secondary)
-                }
-            }
-        }
         .onAppear {
             formState.load(from: authVM.currentUserProfile)
-        }
-        .sheet(isPresented: $showNotificationSettings) {
-            NavigationStack {
-                NotificationPermissionView(isPresentedFromSettings: true)
-                    .environmentObject(authVM)
-                    .environmentObject(notificationManager)
-            }
         }
     }
 
@@ -293,7 +306,9 @@ struct ProfileSettingsView: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             isSaving = false
-            dismiss()
+            if showsDismissButton {
+                dismiss()
+            }
         }
     }
 }

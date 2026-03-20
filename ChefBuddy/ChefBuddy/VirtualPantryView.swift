@@ -24,6 +24,14 @@ enum PantryScanMode {
     case replace
 }
 
+private struct PantryScanNotice: Identifiable {
+    let id = UUID()
+    let title: String
+    let message: String
+    let symbol: String
+    let tint: Color
+}
+
 struct VirtualPantryView: View {
     @Environment(\.dismiss) var dismiss
     @EnvironmentObject var authVM: AuthViewModel
@@ -87,6 +95,7 @@ struct VirtualPantryView: View {
     @State private var scanProgressTimer: Timer? = nil
     @State private var scanStatusText: String = "Waking up ChefBuddy..."
     @State private var scanAnimationStep: Int = 0
+    @State private var scanNotice: PantryScanNotice? = nil
     let scanStatusMessages = [
         "Waking up ChefBuddy...",
         "Looking through your ingredients...",
@@ -203,7 +212,7 @@ struct VirtualPantryView: View {
                             .padding(.horizontal, 24)
                         }
 
-                        if let lastScannedRelativeText, !isScanning {
+                        if let lastScannedRelativeText, !isScanning, scanNotice == nil {
                             HStack(spacing: 10) {
                                 Image(systemName: "checkmark.circle.fill")
                                     .foregroundStyle(.green)
@@ -226,6 +235,33 @@ struct VirtualPantryView: View {
                             .overlay(
                                 RoundedRectangle(cornerRadius: 14)
                                     .stroke(Color.green.opacity(0.15), lineWidth: 1)
+                            )
+                            .padding(.horizontal, 24)
+                        }
+
+                        if let scanNotice, !isScanning {
+                            HStack(spacing: 12) {
+                                Image(systemName: scanNotice.symbol)
+                                    .foregroundStyle(scanNotice.tint)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(scanNotice.title)
+                                        .font(.callout.weight(.semibold))
+                                        .foregroundStyle(.primary)
+
+                                    Text(scanNotice.message)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 12)
+                            .background(scanNotice.tint.opacity(0.10))
+                            .clipShape(RoundedRectangle(cornerRadius: 14))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 14)
+                                    .stroke(scanNotice.tint.opacity(0.20), lineWidth: 1)
                             )
                             .padding(.horizontal, 24)
                         }
@@ -875,6 +911,7 @@ struct VirtualPantryView: View {
 
         await MainActor.run {
             guard let selectedPantryId else { return }
+            scanNotice = nil
             startScanAnimation()
             assistant.startPantryScan(
                 images: images,
@@ -891,6 +928,7 @@ struct VirtualPantryView: View {
 
     private func processCameraImage(_ image: UIImage, mode: PantryScanMode) async {
         await MainActor.run {
+            scanNotice = nil
             startScanAnimation()
             guard let selectedPantryId else { return }
             assistant.startPantryScan(
@@ -927,17 +965,36 @@ struct VirtualPantryView: View {
                 startScanAnimation()
             }
             selectedPantryName = session.pantryName
+            scanNotice = nil
         case .completed:
             if !session.didApplyResult {
                 applyScannedIngredients(session.scannedCategories, mode: session.mode)
                 assistant.markPantryScanApplied(session.id)
             }
+            scanNotice = nil
             finishScanAnimation()
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.1) {
                 assistant.clearPantryScanIfFinished(for: session.pantryId)
             }
-        case .failed:
+        case .emptyResult:
             stopScanAnimation(resetProgress: true)
+            scanNotice = PantryScanNotice(
+                title: "ChefBuddy couldn’t detect ingredients",
+                message: "Try a brighter photo, get closer to the shelves, or make sure items aren’t blocked.",
+                symbol: "camera.metering.unknown",
+                tint: .orange
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                assistant.clearPantryScanIfFinished(for: session.pantryId)
+            }
+        case .failed(let message):
+            stopScanAnimation(resetProgress: true)
+            scanNotice = PantryScanNotice(
+                title: "Pantry scan didn’t finish",
+                message: message,
+                symbol: "exclamationmark.triangle.fill",
+                tint: .red
+            )
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 assistant.clearPantryScanIfFinished(for: session.pantryId)
             }

@@ -9,6 +9,7 @@ import SwiftUI
 import FirebaseAuth
 
 struct ContentView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var authVM = AuthViewModel()
     @StateObject private var notificationManager = NotificationManager.shared
     @State private var showHallucinationWarning = true
@@ -39,7 +40,7 @@ struct ContentView: View {
                         .environmentObject(notificationManager)
                 } else {
 
-                    HomeView()
+                    MainTabShellView()
                         .environmentObject(authVM)
                         .environmentObject(notificationManager)
                 }
@@ -67,6 +68,11 @@ struct ContentView: View {
             if let profile = authVM.currentUserProfile,
                let uid = authVM.userSession?.uid {
                 await notificationManager.rescheduleNotificationsIfPossible(profile: profile, userId: uid)
+            }
+        }
+        .onChange(of: scenePhase) { phase in
+            if phase == .active {
+                notificationManager.clearBadgeCount()
             }
         }
     }

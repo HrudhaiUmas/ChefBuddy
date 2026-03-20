@@ -14,6 +14,7 @@ struct PantryScanSession: Identifiable, Equatable {
     enum State: Equatable {
         case running
         case completed
+        case emptyResult
         case failed(String)
     }
 
@@ -1060,7 +1061,7 @@ class CookingAssistant: ObservableObject {
                 await MainActor.run {
                     guard self.pantryScanSession?.id == sessionId else { return }
                     self.pantryScanSession?.scannedCategories = scannedCategories
-                    self.pantryScanSession?.state = .completed
+                    self.pantryScanSession?.state = self.hasDetectedPantryIngredients(scannedCategories) ? .completed : .emptyResult
                 }
             } catch {
                 await MainActor.run {
@@ -1087,11 +1088,19 @@ class CookingAssistant: ObservableObject {
             return
         case .completed where session.didApplyResult:
             pantryScanSession = nil
+        case .emptyResult:
+            pantryScanSession = nil
         case .failed:
             pantryScanSession = nil
         default:
             return
         }
+    }
+
+    private func hasDetectedPantryIngredients(_ categories: [String: [String]]) -> Bool {
+        categories.values
+            .flatMap { $0 }
+            .contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     // Accepts one or more fridge/pantry photos and returns a categorised
