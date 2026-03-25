@@ -17,6 +17,7 @@ import SwiftUI
 import FirebaseAuth
 import FirebaseFirestore
 import Combine
+import UIKit
 
 
 // Embeds as a sub-document inside each Recipe. Stored separately from the
@@ -275,6 +276,43 @@ func detectedCuisineTag(title: String, description: String, tags: [String]) -> S
     }
 
     return "Fusion"
+}
+
+func primaryCuisineTag(for tags: [String], title: String, description: String) -> String {
+    detectedCuisineTag(title: title, description: description, tags: tags)
+}
+
+func prepMinutes(from raw: String) -> Int? {
+    let lowered = raw.lowercased()
+    let numbers = lowered
+        .components(separatedBy: CharacterSet.decimalDigits.inverted)
+        .compactMap { Int($0) }
+
+    guard let first = numbers.first else { return nil }
+
+    if lowered.contains("hour") || lowered.contains("hr") {
+        let minutes = numbers.dropFirst().first ?? 0
+        return (first * 60) + minutes
+    }
+
+    return first
+}
+
+func calorieNumber(from raw: String) -> Int? {
+    raw
+        .components(separatedBy: CharacterSet.decimalDigits.inverted)
+        .compactMap { Int($0) }
+        .first
+}
+
+func pantryOverlapRatio(ingredients: [String], pantryIngredients: [String]) -> Double {
+    guard !ingredients.isEmpty, !pantryIngredients.isEmpty else { return 0 }
+
+    let matches = ingredients.reduce(0) { partial, ingredient in
+        partial + (pantryContainsIngredient(ingredient, pantryIngredients: pantryIngredients) ? 1 : 0)
+    }
+
+    return Double(matches) / Double(max(ingredients.count, 1))
 }
 
 extension CookingAssistant {
@@ -559,7 +597,7 @@ class RecipesViewModel: ObservableObject {
             .collection("reviews").addDocument(data: data)
     }
 
-    func saveSuggestedRecipe(_ recipe: Recipe, userId: String) {
+    func saveSuggestedRecipe(_ recipe: Recipe, userId: String, openAfterSave: Bool = true) {
         guard !userId.isEmpty else { return }
 
         Task {
@@ -574,7 +612,9 @@ class RecipesViewModel: ObservableObject {
                 savedRecipe.id = ref.documentID
 
                 await MainActor.run {
-                    self.justGeneratedRecipe = savedRecipe
+                    if openAfterSave {
+                        self.justGeneratedRecipe = savedRecipe
+                    }
                 }
             } catch {
                 await MainActor.run {
@@ -751,6 +791,60 @@ class RecipesViewModel: ObservableObject {
     }
 }
 
+private enum DiscoveryFeedbackAction: String {
+    case saved
+    case skipped
+}
+
+private struct DiscoveryBehaviorSnapshot: Equatable {
+    var favoriteCuisines: [String] = []
+    var skippedCuisines: [String] = []
+    var averagePrepMinutes: Int? = nil
+    var averageCalories: Int? = nil
+    var pantryUsageRate: Double = 0
+    var savedCount: Int = 0
+    var cookedCount: Int = 0
+
+    static let empty = DiscoveryBehaviorSnapshot()
+
+    var dominantCuisine: String? {
+        favoriteCuisines.first
+    }
+
+    var highlightPills: [String] {
+        var items: [String] = []
+
+        if let dominantCuisine {
+            items.append("Usually \(dominantCuisine)")
+        }
+
+        if let averagePrepMinutes {
+            items.append("\(averagePrepMinutes) min sweet spot")
+        }
+
+        if let averageCalories {
+            items.append("Around \(averageCalories) kcal")
+        }
+
+        if pantryUsageRate >= 0.55 {
+            items.append("Pantry-first")
+        } else if pantryUsageRate >= 0.25 {
+            items.append("Some pantry pull")
+        }
+
+        if items.isEmpty {
+            items.append("Learns as you swipe")
+        }
+
+        return Array(items.prefix(4))
+    }
+}
+
+private struct DiscoveryPersonalizationContext {
+    let summary: String
+    let snapshot: DiscoveryBehaviorSnapshot
+}
+
 
 struct RecipesView: View {
     @EnvironmentObject var authVM: AuthViewModel
@@ -765,8 +859,12 @@ struct RecipesView: View {
     @State private var showAllRecipesScreen = false
     @State private var appeared = false
     @State private var recipeToReview: Recipe? = nil
-    @State private var isLoadingInitialSuggestions = false
-    @State private var isLoadingMoreSuggestion = false
+    @State private var chefBuddyPickSuggestions: [RecipeSuggestion] = []
+    @State private var swipeDiscoveryDeck: [RecipeSuggestion] = []
+    @State private var swipeDiscoverySeenTitles: Set<String> = []
+    @State private var isLoadingChefBuddyPicks = false
+    @State private var isLoadingSwipeDiscoveryDeck = false
+    @State private var isToppingUpSwipeDiscoveryDeck = false
     @State private var liveHelpRecipe: Recipe? = nil
     @State private var pantryIngredients: [String] = []
     @State private var pantryListener: ListenerRegistration? = nil
@@ -778,6 +876,8 @@ struct RecipesView: View {
     @State private var pantryIngredientSignatures: [String: String] = [:]
     @State private var selectedPantrySuggestionRecipe: Recipe? = nil
     @State private var infoSheet: RecipesInfoSheet? = nil
+    @State private var discoverySnapshot: DiscoveryBehaviorSnapshot = .empty
+    @State private var showSwipeDiscovery = false
 
     private var userId: String { authVM.userSession?.uid ?? "" }
     private var budgetPreference: String {
@@ -831,8 +931,31 @@ struct RecipesView: View {
         )
     }
 
-    private var unsavedSuggestions: [RecipeSuggestion] {
-        assistant.suggestions
+    private func feedbackSuggestion(from recipe: Recipe) -> RecipeSuggestion {
+        RecipeSuggestion(
+            title: recipe.title,
+            emoji: recipe.emoji,
+            description: recipe.description,
+            prepTime: recipe.cookTime,
+            servings: recipe.servings,
+            difficulty: recipe.difficulty,
+            calories: recipe.calories,
+            carbs: recipe.nutrition.carbs,
+            protein: recipe.nutrition.protein,
+            fat: recipe.nutrition.fat,
+            saturatedFat: recipe.nutrition.saturatedFat,
+            sugar: recipe.nutrition.sugar,
+            fiber: recipe.nutrition.fiber,
+            sodium: recipe.nutrition.sodium,
+            tags: recipe.tags,
+            ingredients: recipe.ingredients,
+            steps: recipe.steps,
+            matchReason: ""
+        )
+    }
+
+    private var chefBuddyPicks: [RecipeSuggestion] {
+        Array(chefBuddyPickSuggestions.prefix(3))
     }
 
     private var currentPantry: SimplePantrySpace? {
@@ -1069,34 +1192,316 @@ struct RecipesView: View {
         }
     }
 
-    private func loadInitialSuggestions() async {
-        guard !isLoadingInitialSuggestions else { return }
-        await MainActor.run { isLoadingInitialSuggestions = true }
-        do {
-            try await assistant.waitUntilReady()
-
-            let feedback = await loadReviewFeedbackSummary()
-            await assistant.fetchRecipeSuggestions(reviewFeedback: feedback)
-        } catch {
-            print("Initial suggestion fetch failed: \(error)")
-        }
-        await MainActor.run { isLoadingInitialSuggestions = false }
+    private func normalizedSuggestionTitle(_ title: String) -> String {
+        title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 
-    private func loadOneMoreSuggestion() async {
-        guard !isLoadingMoreSuggestion else { return }
-        await MainActor.run { isLoadingMoreSuggestion = true }
+    private func discoveryExclusionTitles(
+        includeChefBuddyPicks: Bool,
+        includeSwipeDeck: Bool,
+        additional: [String] = []
+    ) -> [String] {
+        var titles = vm.recipes.map(\.title)
+        titles.append(contentsOf: additional)
+
+        if includeChefBuddyPicks {
+            titles.append(contentsOf: chefBuddyPickSuggestions.map(\.title))
+        }
+
+        if includeSwipeDeck {
+            titles.append(contentsOf: swipeDiscoveryDeck.map(\.title))
+            titles.append(contentsOf: swipeDiscoverySeenTitles)
+        }
+
+        var seen: Set<String> = []
+        return titles.filter { title in
+            let normalized = normalizedSuggestionTitle(title)
+            guard !normalized.isEmpty else { return false }
+            return seen.insert(normalized).inserted
+        }
+    }
+
+    private func requestPersonalizedSuggestions(
+        count: Int,
+        excludingTitles: [String]
+    ) async -> [RecipeSuggestion] {
         do {
             try await assistant.waitUntilReady()
-            let feedback = await loadReviewFeedbackSummary()
-            try await assistant.fetchOneMoreRecipeSuggestion(
-                excludingTitles: vm.recipes.map { $0.title } + assistant.suggestions.map { $0.title },
-                reviewFeedback: feedback
+            let context = await loadDiscoveryPersonalizationContext()
+            await MainActor.run {
+                discoverySnapshot = context.snapshot
+            }
+
+            return try await assistant.generateRecipeSuggestions(
+                personalizationSummary: context.summary,
+                count: count,
+                excludingTitles: excludingTitles
             )
         } catch {
-            print("Load one more suggestion failed: \(error)")
+            print("Personalized suggestion fetch failed: \(error)")
+            return []
         }
-        await MainActor.run { isLoadingMoreSuggestion = false }
+    }
+
+    private func markSwipeDiscoveryTitlesSeen(_ suggestions: [RecipeSuggestion]) {
+        for suggestion in suggestions {
+            swipeDiscoverySeenTitles.insert(normalizedSuggestionTitle(suggestion.title))
+        }
+    }
+
+    private func loadChefBuddyPicks(force: Bool = false) async {
+        guard !isLoadingChefBuddyPicks else { return }
+        if !force, !chefBuddyPicks.isEmpty { return }
+
+        await MainActor.run {
+            isLoadingChefBuddyPicks = true
+            if force {
+                chefBuddyPickSuggestions = []
+            }
+        }
+
+        let generated = await requestPersonalizedSuggestions(
+            count: 3,
+            excludingTitles: await MainActor.run {
+                discoveryExclusionTitles(includeChefBuddyPicks: false, includeSwipeDeck: true)
+            }
+        )
+
+        await MainActor.run {
+            chefBuddyPickSuggestions = Array(generated.prefix(3))
+            isLoadingChefBuddyPicks = false
+        }
+    }
+
+    private func topUpChefBuddyPicksIfNeeded() async {
+        let currentCount = await MainActor.run { chefBuddyPickSuggestions.count }
+        guard currentCount < 3 else { return }
+        guard !isLoadingChefBuddyPicks else { return }
+
+        await MainActor.run { isLoadingChefBuddyPicks = true }
+
+        let needed = max(1, 3 - currentCount)
+        let generated = await requestPersonalizedSuggestions(
+            count: needed,
+            excludingTitles: await MainActor.run {
+                discoveryExclusionTitles(includeChefBuddyPicks: true, includeSwipeDeck: true)
+            }
+        )
+
+        await MainActor.run {
+            let existingTitles = Set(chefBuddyPickSuggestions.map { normalizedSuggestionTitle($0.title) })
+            let filtered = generated.filter { !existingTitles.contains(normalizedSuggestionTitle($0.title)) }
+            chefBuddyPickSuggestions.append(contentsOf: filtered)
+            chefBuddyPickSuggestions = Array(chefBuddyPickSuggestions.prefix(3))
+            isLoadingChefBuddyPicks = false
+        }
+    }
+
+    private func loadSwipeDiscoveryDeck(force: Bool = false) async {
+        let currentCount = await MainActor.run { swipeDiscoveryDeck.count }
+        guard force || currentCount < 10 else { return }
+        guard !isLoadingSwipeDiscoveryDeck else { return }
+
+        await MainActor.run {
+            isLoadingSwipeDiscoveryDeck = true
+            if force {
+                swipeDiscoveryDeck = []
+                swipeDiscoverySeenTitles = []
+            }
+        }
+
+        let needed = force ? 10 : max(1, 10 - currentCount)
+        let generated = await requestPersonalizedSuggestions(
+            count: needed,
+            excludingTitles: await MainActor.run {
+                discoveryExclusionTitles(includeChefBuddyPicks: true, includeSwipeDeck: true)
+            }
+        )
+
+        await MainActor.run {
+            if force {
+                swipeDiscoveryDeck = generated
+            } else {
+                let existingTitles = Set(swipeDiscoveryDeck.map { normalizedSuggestionTitle($0.title) })
+                let filtered = generated.filter { !existingTitles.contains(normalizedSuggestionTitle($0.title)) }
+                swipeDiscoveryDeck.append(contentsOf: filtered)
+            }
+            markSwipeDiscoveryTitlesSeen(swipeDiscoveryDeck)
+            isLoadingSwipeDiscoveryDeck = false
+        }
+    }
+
+    private func topUpSwipeDiscoveryDeckIfNeeded() async {
+        let currentCount = await MainActor.run { swipeDiscoveryDeck.count }
+        guard currentCount < 10 else { return }
+        guard !isToppingUpSwipeDiscoveryDeck else { return }
+
+        await MainActor.run { isToppingUpSwipeDiscoveryDeck = true }
+
+        let generated = await requestPersonalizedSuggestions(
+            count: max(1, 10 - currentCount),
+            excludingTitles: await MainActor.run {
+                discoveryExclusionTitles(includeChefBuddyPicks: true, includeSwipeDeck: true)
+            }
+        )
+
+        await MainActor.run {
+            let existingTitles = Set(swipeDiscoveryDeck.map { normalizedSuggestionTitle($0.title) })
+            let filtered = generated.filter { !existingTitles.contains(normalizedSuggestionTitle($0.title)) }
+            swipeDiscoveryDeck.append(contentsOf: filtered)
+            markSwipeDiscoveryTitlesSeen(filtered)
+            isToppingUpSwipeDiscoveryDeck = false
+        }
+    }
+
+    private func loadDiscoveryPersonalizationContext() async -> DiscoveryPersonalizationContext {
+        guard !userId.isEmpty else {
+            return DiscoveryPersonalizationContext(summary: "", snapshot: .empty)
+        }
+
+        let recipes = await MainActor.run { vm.recipes }
+        let currentPantryIngredients = await MainActor.run { pantryIngredients }
+        let profile = await MainActor.run { authVM.currentUserProfile }
+
+        let cookedRecipes = recipes.filter { $0.hasBeenCooked }
+        let allBehaviorRecipes = cookedRecipes.isEmpty ? recipes : cookedRecipes + recipes
+
+        var cuisineWeights: [String: Int] = [:]
+        var prepValues: [Int] = []
+        var calorieValues: [Int] = []
+        var pantryOverlapValues: [Double] = []
+
+        for recipe in allBehaviorRecipes {
+            let cuisine = primaryCuisineTag(for: recipe.tags, title: recipe.title, description: recipe.description)
+            cuisineWeights[cuisine, default: 0] += max(1, recipe.cookedCount + (recipe.isFavorite ? 1 : 0))
+
+            if let minutes = prepMinutes(from: recipe.cookTime) {
+                prepValues.append(minutes)
+            }
+
+            if let calories = calorieNumber(from: recipe.calories) {
+                calorieValues.append(calories)
+            }
+
+            pantryOverlapValues.append(
+                pantryOverlapRatio(ingredients: recipe.ingredients, pantryIngredients: currentPantryIngredients)
+            )
+        }
+
+        let db = Firestore.firestore()
+        var skippedCuisines: [String: Int] = [:]
+        var skippedTitles: [String] = []
+
+        do {
+            let feedbackDocuments = try await db.collection("users")
+                .document(userId)
+                .collection("discoveryFeedback")
+                .order(by: "createdAt", descending: true)
+                .limit(to: 40)
+                .getDocuments()
+
+            for document in feedbackDocuments.documents {
+                let data = document.data()
+                guard let action = data["action"] as? String, action == DiscoveryFeedbackAction.skipped.rawValue else {
+                    continue
+                }
+
+                let cuisine = (data["cuisine"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cuisine.isEmpty {
+                    skippedCuisines[cuisine, default: 0] += 1
+                }
+
+                let title = (data["title"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if !title.isEmpty {
+                    skippedTitles.append(title)
+                }
+            }
+        } catch {
+            print("Failed to load discovery feedback: \(error)")
+        }
+
+        let sortedFavoriteCuisines = cuisineWeights
+            .sorted { lhs, rhs in
+                if lhs.value == rhs.value {
+                    return lhs.key < rhs.key
+                }
+                return lhs.value > rhs.value
+            }
+            .map(\.key)
+
+        let sortedSkippedCuisines = skippedCuisines
+            .sorted { lhs, rhs in
+                if lhs.value == rhs.value {
+                    return lhs.key < rhs.key
+                }
+                return lhs.value > rhs.value
+            }
+            .map(\.key)
+
+        let averagePrep = prepValues.isEmpty ? nil : Int((Double(prepValues.reduce(0, +)) / Double(prepValues.count)).rounded())
+        let averageCalories = calorieValues.isEmpty ? nil : Int((Double(calorieValues.reduce(0, +)) / Double(calorieValues.count)).rounded())
+        let pantryUsageRate = pantryOverlapValues.isEmpty ? 0 : pantryOverlapValues.reduce(0, +) / Double(pantryOverlapValues.count)
+        let reviewSummary = await loadReviewFeedbackSummary()
+
+        var summaryParts: [String] = []
+
+        if let profile, !profile.cuisines.isEmpty {
+            summaryParts.append("Profile cuisine interests: \(profile.cuisines.prefix(5).joined(separator: ", ")).")
+        }
+
+        if !sortedFavoriteCuisines.isEmpty {
+            summaryParts.append("Recent saved/cooked cuisines lean toward: \(sortedFavoriteCuisines.prefix(3).joined(separator: ", ")).")
+        }
+
+        if !sortedSkippedCuisines.isEmpty {
+            summaryParts.append("Recently skipped cuisines or vibes: \(sortedSkippedCuisines.prefix(3).joined(separator: ", ")).")
+        }
+
+        if !skippedTitles.isEmpty {
+            summaryParts.append("Recently passed on titles similar to: \(Array(skippedTitles.prefix(4)).joined(separator: ", ")).")
+        }
+
+        if let averagePrep {
+            summaryParts.append("Comfort prep window is around \(averagePrep) minutes.")
+        }
+
+        if let averageCalories {
+            summaryParts.append("Typical calorie style is around \(averageCalories) kcal per serving.")
+        }
+
+        if pantryUsageRate > 0 {
+            let usageLabel: String
+            switch pantryUsageRate {
+            case 0.55...:
+                usageLabel = "high"
+            case 0.25...:
+                usageLabel = "moderate"
+            default:
+                usageLabel = "light"
+            }
+            summaryParts.append("Pantry usage rate is \(usageLabel), based on overlap between cooked/saved recipes and the active pantry.")
+        }
+
+        if !reviewSummary.isEmpty {
+            summaryParts.append(reviewSummary)
+        }
+
+        summaryParts.append("Use their habits as guidance, but avoid making every suggestion the same cuisine. Keep the deck balanced between comfort-zone picks and fresh cuisines that still fit their time, calorie style, budget, and restrictions.")
+
+        let snapshot = DiscoveryBehaviorSnapshot(
+            favoriteCuisines: Array(sortedFavoriteCuisines.prefix(3)),
+            skippedCuisines: Array(sortedSkippedCuisines.prefix(3)),
+            averagePrepMinutes: averagePrep,
+            averageCalories: averageCalories,
+            pantryUsageRate: pantryUsageRate,
+            savedCount: recipes.count,
+            cookedCount: cookedRecipes.count
+        )
+
+        return DiscoveryPersonalizationContext(
+            summary: summaryParts.joined(separator: " "),
+            snapshot: snapshot
+        )
     }
 
 
@@ -1156,15 +1561,117 @@ struct RecipesView: View {
         }
     }
 
-    private func dislikeSuggestion(_ recipe: Recipe) {
+    private func trackDiscoveryFeedback(_ suggestion: RecipeSuggestion, action: DiscoveryFeedbackAction) async {
+        guard !userId.isEmpty else { return }
+
+        let db = Firestore.firestore()
+        let cuisine = primaryCuisineTag(for: suggestion.tags, title: suggestion.title, description: suggestion.description)
+
+        var payload: [String: Any] = [
+            "title": suggestion.title,
+            "emoji": suggestion.emoji,
+            "action": action.rawValue,
+            "cuisine": cuisine,
+            "tags": suggestion.tags,
+            "source": "chefbuddy_swipe",
+            "createdAt": Date()
+        ]
+
+        if let prep = prepMinutes(from: suggestion.prepTime) {
+            payload["prepMinutes"] = prep
+        }
+
+        if let calories = calorieNumber(from: suggestion.calories) {
+            payload["calories"] = calories
+        }
+
+        do {
+            _ = try await db.collection("users")
+                .document(userId)
+                .collection("discoveryFeedback")
+                .addDocument(data: payload)
+        } catch {
+            print("Failed to track discovery feedback: \(error)")
+        }
+    }
+
+    private func refreshDiscoverySnapshot() async {
+        let context = await loadDiscoveryPersonalizationContext()
+        await MainActor.run {
+            discoverySnapshot = context.snapshot
+        }
+    }
+
+    private func saveChefBuddyPick(_ suggestion: RecipeSuggestion) {
+        let recipe = recipeFromSuggestion(suggestion)
+        vm.saveSuggestedRecipe(recipe, userId: userId)
+        removeSuggestionFromChefBuddyPicks(recipe)
+
+        Task {
+            await trackDiscoveryFeedback(suggestion, action: .saved)
+            await refreshDiscoverySnapshot()
+            await topUpChefBuddyPicksIfNeeded()
+        }
+    }
+
+    private func dislikeChefBuddyPick(_ recipe: Recipe) {
+        let suggestion = feedbackSuggestion(from: recipe)
+        removeSuggestionFromChefBuddyPicks(recipe)
+
+        Task {
+            await trackDiscoveryFeedback(suggestion, action: .skipped)
+            await refreshDiscoverySnapshot()
+            await topUpChefBuddyPicksIfNeeded()
+        }
+    }
+
+    private func removeSuggestionFromChefBuddyPicks(_ recipe: Recipe) {
         let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        assistant.suggestions.removeAll {
+        chefBuddyPickSuggestions.removeAll {
             $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
         }
         selectedSuggestionRecipe = nil
+    }
+
+    private func saveSuggestionFromDiscovery(_ suggestion: RecipeSuggestion) {
+        let recipe = recipeFromSuggestion(suggestion)
+        vm.saveSuggestedRecipe(recipe, userId: userId, openAfterSave: false)
+        removeSuggestionFromSwipeDeck(suggestion)
 
         Task {
-            await loadOneMoreSuggestion()
+            await trackDiscoveryFeedback(suggestion, action: .saved)
+            await refreshDiscoverySnapshot()
+            await topUpSwipeDiscoveryDeckIfNeeded()
+        }
+    }
+
+    private func skipSuggestionFromDiscovery(_ suggestion: RecipeSuggestion) {
+        removeSuggestionFromSwipeDeck(suggestion)
+
+        Task {
+            await trackDiscoveryFeedback(suggestion, action: .skipped)
+            await refreshDiscoverySnapshot()
+            await topUpSwipeDiscoveryDeckIfNeeded()
+        }
+    }
+
+    private func removeSuggestionFromSwipeDeck(_ suggestion: RecipeSuggestion) {
+        let normalizedTitle = normalizedSuggestionTitle(suggestion.title)
+        swipeDiscoveryDeck.removeAll {
+            normalizedSuggestionTitle($0.title) == normalizedTitle
+        }
+    }
+
+    private func openSwipeDiscovery() {
+        showSwipeDiscovery = true
+
+        Task {
+            if swipeDiscoveryDeck.isEmpty {
+                await loadSwipeDiscoveryDeck(force: true)
+            } else {
+                await refreshDiscoverySnapshot()
+                await topUpSwipeDiscoveryDeckIfNeeded()
+            }
         }
     }
 
@@ -1212,8 +1719,11 @@ struct RecipesView: View {
                 stopPantryListener()
             }
             .task {
-                if assistant.suggestions.isEmpty {
-                    await loadInitialSuggestions()
+                if chefBuddyPickSuggestions.isEmpty {
+                    await loadChefBuddyPicks(force: true)
+                }
+                if swipeDiscoveryDeck.isEmpty {
+                    await loadSwipeDiscoveryDeck(force: true)
                 }
             }
         .onChange(of: vm.justGeneratedRecipe) { recipe in
@@ -1232,6 +1742,28 @@ struct RecipesView: View {
                pantrySuggestionsById[pantry.id] == nil,
                !isGeneratingFromPantry {
                 generateFromSelectedPantry(pantry)
+            }
+        }
+        .onChange(of: authVM.currentUserProfile?.activePantryId) { pantryId in
+            guard pantryId != selectedPantryId else { return }
+            if let pantryId,
+               pantrySpaces.contains(where: { $0.id == pantryId }) {
+                selectedPantryId = pantryId
+            } else if pantryId == nil, selectedPantryId != nil {
+                selectedPantryId = pantrySpaces.first?.id
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("DiscoveryFeedbackDidReset"))) { _ in
+            Task {
+                await MainActor.run {
+                    swipeDiscoverySeenTitles.removeAll()
+                    swipeDiscoveryDeck.removeAll()
+                    chefBuddyPickSuggestions.removeAll()
+                    discoverySnapshot = .empty
+                }
+                await refreshDiscoverySnapshot()
+                await loadChefBuddyPicks(force: true)
+                await loadSwipeDiscoveryDeck(force: true)
             }
         }
         .sheet(isPresented: $showGenerateSheet) {
@@ -1283,22 +1815,28 @@ struct RecipesView: View {
         }
         .sheet(item: $selectedSuggestionRecipe) { recipe in
             SuggestedRecipeDetailView(
-                    recipe: recipe,
-                    assistant: assistant,
-                    pantryIngredients: pantryIngredients,
-                    onSave: {
-                        vm.saveSuggestedRecipe(recipe, userId: userId)
-                        dislikeSuggestion(recipe)
+                recipe: recipe,
+                assistant: assistant,
+                pantryIngredients: pantryIngredients,
+                onSave: {
+                    let suggestion = feedbackSuggestion(from: recipe)
+                    vm.saveSuggestedRecipe(recipe, userId: userId)
+                    removeSuggestionFromChefBuddyPicks(recipe)
+                    Task {
+                        await trackDiscoveryFeedback(suggestion, action: .saved)
+                        await refreshDiscoverySnapshot()
+                        await topUpChefBuddyPicksIfNeeded()
+                    }
                     },
                 onDislike: {
-                    dislikeSuggestion(recipe)
+                    dislikeChefBuddyPick(recipe)
                 },
                 onRecipeUpdated: { updated in
                     let normalizedTitle = recipe.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    if let idx = assistant.suggestions.firstIndex(where: {
+                    if let idx = chefBuddyPickSuggestions.firstIndex(where: {
                         $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
                     }) {
-                        assistant.suggestions[idx] = suggestionFromRecipe(updated, previous: assistant.suggestions[idx])
+                        chefBuddyPickSuggestions[idx] = suggestionFromRecipe(updated, previous: chefBuddyPickSuggestions[idx])
                         selectedSuggestionRecipe = updated
                     }
                 },
@@ -1373,6 +1911,24 @@ struct RecipesView: View {
         }
         .sheet(item: $infoSheet) { item in
             InfoMessageSheet(title: item.title, message: item.message)
+        }
+        .fullScreenCover(isPresented: $showSwipeDiscovery) {
+            SwipeDiscoveryScreen(
+                suggestions: swipeDiscoveryDeck,
+                behaviorSnapshot: discoverySnapshot,
+                isLoadingInitial: isLoadingSwipeDiscoveryDeck && swipeDiscoveryDeck.isEmpty,
+                isLoadingMore: isToppingUpSwipeDiscoveryDeck,
+                onDismiss: { showSwipeDiscovery = false },
+                onRefresh: {
+                    Task { await loadSwipeDiscoveryDeck(force: true) }
+                },
+                onSave: { suggestion in
+                    saveSuggestionFromDiscovery(suggestion)
+                },
+                onSkip: { suggestion in
+                    skipSuggestionFromDiscovery(suggestion)
+                }
+            )
         }
         .sheet(item: $recipeToReview) { recipe in
             RecipeReviewView(
@@ -1620,55 +2176,59 @@ struct RecipesView: View {
     }
 
     private var suggestionsSection: some View {
-        Group {
-            if isLoadingInitialSuggestions && unsavedSuggestions.isEmpty {
-                SuggestionsLoadingSection()
-                    .padding(.top, 10)
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("ChefBuddy Picks")
+                    .font(.system(size: 20, weight: .bold, design: .rounded))
 
-            } else if !unsavedSuggestions.isEmpty || isLoadingMoreSuggestion {
-
-                VStack(alignment: .leading, spacing: 12) {
-
-                    HStack {
-                        Text("ChefBuddy Picks")
-                            .font(.system(size: 20, weight: .bold, design: .rounded))
-
-                        SectionInfoButton {
-                            infoSheet = RecipesInfoSheet(
-                                title: "ChefBuddy Picks",
-                                message: "These are broader AI recipe ideas tuned to your preferences and past cooking behavior, even when they are not tied directly to pantry ingredients."
-                            )
-                        }
-
-                        Spacer()
-                    }
-                    .padding(.horizontal, 20)
-
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 14) {
-
-                            ForEach(unsavedSuggestions) { suggestion in
-                                let suggestionRecipe = recipeFromSuggestion(suggestion)
-
-                                RecipeCard(
-                                    recipe: suggestionRecipe,
-                                    onTap: { selectedSuggestionRecipe = suggestionRecipe },
-                                    onFavorite: { },
-                                    showFavorite: false
-                                )
-                                .frame(width: 180)
-                            }
-
-                            if isLoadingMoreSuggestion {
-                                SuggestionCookingCard()
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
+                SectionInfoButton {
+                    infoSheet = RecipesInfoSheet(
+                        title: "ChefBuddy Picks",
+                        message: "These are broader AI recipe ideas tuned to your preferences and cooking behavior, while Swipe Discovery gives you a dedicated place to train ChefBuddy more directly."
+                    )
                 }
-                .padding(.top, 10)
+
+                Spacer()
             }
+            .padding(.horizontal, 20)
+
+            if isLoadingChefBuddyPicks && chefBuddyPicks.isEmpty {
+                SuggestionsLoadingSection()
+            } else if !chefBuddyPicks.isEmpty {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 14) {
+                        ForEach(chefBuddyPicks) { suggestion in
+                            let suggestionRecipe = recipeFromSuggestion(suggestion)
+
+                            RecipeCard(
+                                recipe: suggestionRecipe,
+                                onTap: { selectedSuggestionRecipe = suggestionRecipe },
+                                onFavorite: { },
+                                showFavorite: false
+                            )
+                            .frame(width: 180)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                }
+            } else {
+                DiscoveryMessageCard(
+                    title: "No fresh picks yet",
+                    subtitle: "ChefBuddy is refreshing picks automatically in the background. Swipe Discovery is ready while it updates.",
+                    icon: "sparkles"
+                )
+                .padding(.horizontal, 16)
+            }
+
+            SwipeDiscoveryEntryCard(
+                pills: discoverySnapshot.highlightPills,
+                readyCount: swipeDiscoveryDeck.count,
+                isLoading: isLoadingSwipeDiscoveryDeck && swipeDiscoveryDeck.isEmpty,
+                onTap: openSwipeDiscovery
+            )
+            .padding(.horizontal, 16)
         }
+        .padding(.top, 10)
     }
 
     private var spotlightSection: some View {
@@ -1689,8 +2249,6 @@ struct RecipesView: View {
                     }
                     .frame(maxWidth: .infinity)
                     .padding(.top, 16)
-
-                    liveCookingLibrarySection
                 }
             } else {
                 VStack(alignment: .leading, spacing: 18) {
@@ -1737,136 +2295,10 @@ struct RecipesView: View {
                             }
                         }
                         .padding(.horizontal, 16)
-
-                        liveCookingLibrarySection
                     }
                 }
             }
         }
-    }
-
-    private var liveCookingLibrarySection: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Text("Live Cooking")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-
-                SectionInfoButton {
-                    infoSheet = RecipesInfoSheet(
-                        title: "Live Cooking",
-                        message: "Pick one of your saved recipes and ChefBuddy will guide you step by step while you cook, so you don’t have to keep bouncing around the recipe card."
-                    )
-                }
-
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-
-            Button(action: onOpenLiveCookingPicker) {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack(alignment: .top, spacing: 14) {
-                        ZStack {
-                            Circle()
-                                .fill(Color.white.opacity(0.14))
-                                .frame(width: 52, height: 52)
-
-                            Image(systemName: savedRecipes.isEmpty ? "book.closed.fill" : "video.fill")
-                                .font(.system(size: 20, weight: .bold))
-                                .foregroundStyle(.white)
-                        }
-
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(savedRecipes.isEmpty ? "Save a recipe first" : "Start Live Cooking")
-                                .font(.system(size: 24, weight: .heavy, design: .rounded))
-                                .foregroundStyle(.white)
-
-                            Text(
-                                savedRecipes.isEmpty
-                                ? "Save something from your library, then ChefBuddy can walk you through it in real time."
-                                : "Pick a saved recipe and get step-by-step help while you cook without bouncing around the screen."
-                            )
-                            .font(.system(size: 14, weight: .medium, design: .rounded))
-                            .foregroundStyle(.white.opacity(0.88))
-                            .lineSpacing(3)
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-
-                    LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 140), spacing: 10)],
-                        alignment: .leading,
-                        spacing: 10
-                    ) {
-                        LiveCookingFeaturePill(title: "Step-by-step", icon: "list.bullet")
-                        LiveCookingFeaturePill(title: "Hands-free", icon: "waveform")
-                        LiveCookingFeaturePill(title: "In the moment", icon: "sparkles")
-                    }
-
-                    HStack(spacing: 10) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "video.fill")
-                                .font(.system(size: 16, weight: .bold))
-
-                            Text(savedRecipes.isEmpty ? "Save Recipes First" : "Start Live Cooking")
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.85)
-                        }
-                        .foregroundStyle(.orange)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 13)
-                        .background(Color.white.opacity(0.96), in: Capsule())
-
-                        Spacer()
-
-                        Image(systemName: "arrow.up.right")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white.opacity(0.92))
-                            .padding(12)
-                            .background(Color.white.opacity(0.12), in: Circle())
-                    }
-                }
-                .padding(22)
-                .background(
-                    LinearGradient(
-                        colors: [.orange.opacity(0.96), .green.opacity(0.84)],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                )
-                .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 30, style: .continuous)
-                        .stroke(Color.white.opacity(0.10), lineWidth: 1)
-                )
-                .shadow(color: .orange.opacity(0.22), radius: 14, y: 8)
-                .opacity(savedRecipes.isEmpty ? 0.65 : 1)
-            }
-            .buttonStyle(.plain)
-            .disabled(savedRecipes.isEmpty)
-            .padding(.horizontal, 16)
-        }
-    }
-}
-
-private struct LiveCookingFeaturePill: View {
-    let title: String
-    let icon: String
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .bold))
-            Text(title)
-                .font(.system(size: 12, weight: .bold, design: .rounded))
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .foregroundStyle(.white.opacity(0.92))
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color.white.opacity(0.12), in: Capsule())
     }
 }
 
@@ -2241,13 +2673,6 @@ private struct SuggestionsLoadingSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("ChefBuddy Picks")
-                    .font(.system(size: 20, weight: .bold, design: .rounded))
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-
             HStack(alignment: .center, spacing: 14) {
                 ZStack {
                     Circle()
@@ -2342,6 +2767,1267 @@ private struct DiscoveryMessageCard: View {
             RoundedRectangle(cornerRadius: 22, style: .continuous)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
         )
+    }
+}
+
+private struct SwipeDiscoveryEntryCard: View {
+    let pills: [String]
+    let readyCount: Int
+    let isLoading: Bool
+    let onTap: () -> Void
+
+    private var statusLabel: String {
+        if isLoading && readyCount == 0 {
+            return "Building your swipe deck"
+        }
+        return "Open Swipe Discovery"
+    }
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Swipe Discovery")
+                            .font(.system(size: 20, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.white)
+
+                        Text("Train ChefBuddy with quick save-or-skip decisions and keep the discovery feed learning from your cooking style.")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.88))
+                            .lineSpacing(3)
+                    }
+
+                    Spacer(minLength: 12)
+
+                    ZStack {
+                        Circle()
+                            .fill(Color.white.opacity(0.14))
+                            .frame(width: 48, height: 48)
+
+                        Image(systemName: "rectangle.stack.badge.person.crop")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+                }
+
+                if !pills.isEmpty {
+                    HStack(spacing: 8) {
+                        ForEach(Array(pills.prefix(3)), id: \.self) { pill in
+                            Text(pill)
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 10)
+                                .padding(.vertical, 7)
+                                .background(Color.white.opacity(0.14), in: Capsule())
+                        }
+                    }
+                }
+
+                HStack {
+                    HStack(spacing: 8) {
+                        if isLoading && readyCount == 0 {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(.white)
+                        }
+
+                        Text(statusLabel)
+                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                            .foregroundStyle(.orange)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.white.opacity(0.96), in: Capsule())
+
+                    Spacer()
+
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.94))
+                        .frame(width: 42, height: 42)
+                        .background(Color.white.opacity(0.14), in: Circle())
+                }
+            }
+            .padding(20)
+            .background(
+                LinearGradient(
+                    colors: [Color.orange.opacity(0.96), Color.green.opacity(0.84)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 28, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Color.white.opacity(0.12), lineWidth: 1)
+            )
+            .shadow(color: .orange.opacity(0.18), radius: 14, y: 8)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private enum SwipeDeckFeedbackKind: Equatable {
+    case saved
+    case skipped
+
+    var icon: String {
+        switch self {
+        case .saved:
+            return "heart.fill"
+        case .skipped:
+            return "xmark"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .saved:
+            return "That’s a match"
+        case .skipped:
+            return "Passed for now"
+        }
+    }
+
+    var subtitle: String {
+        switch self {
+        case .saved:
+            return "Saved to your recipe list."
+        case .skipped:
+            return "ChefBuddy will steer away from this vibe."
+        }
+    }
+
+    var accent: Color {
+        switch self {
+        case .saved:
+            return .green
+        case .skipped:
+            return .red
+        }
+    }
+}
+
+private struct SwipeDiscoveryLoadingSection: View {
+    @State private var animationStep = 0
+    @State private var timer: Timer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 12) {
+                ZStack {
+                    Circle()
+                        .fill(
+                            LinearGradient(
+                                colors: [Color.orange.opacity(0.22), Color.green.opacity(0.18)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 54, height: 54)
+
+                    Text("🍜")
+                        .font(.system(size: 28))
+                        .scaleEffect(animationStep.isMultiple(of: 2) ? 1.0 : 1.08)
+                        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: animationStep)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Shuffling your discovery deck...")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+
+                    Text("ChefBuddy is lining up some familiar wins and a couple fresh cuisines too.")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 6) {
+                        Text("Building picks")
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                        RecipeBouncingDotsView(step: animationStep, color: .orange)
+                    }
+                }
+            }
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(Color.white.opacity(0.03))
+                    .frame(height: 186)
+
+                VStack(spacing: 0) {
+                    loadingGhostCard(widthInset: 106, height: 96, yOffset: 10, tilt: -6)
+                    loadingGhostCard(widthInset: 72, height: 108, yOffset: 3, tilt: 4)
+                    loadingCenterCard(step: animationStep)
+                }
+                .padding(.top, 2)
+            }
+        }
+        .padding(.horizontal, 8)
+        .onAppear {
+            timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { _ in
+                animationStep += 1
+            }
+        }
+        .onDisappear {
+            timer?.invalidate()
+        }
+    }
+
+    private func loadingGhostCard(widthInset: CGFloat, height: CGFloat, yOffset: CGFloat, tilt: Double) -> some View {
+        RoundedRectangle(cornerRadius: 28, style: .continuous)
+            .fill(Color.white.opacity(0.05))
+            .overlay(
+                RoundedRectangle(cornerRadius: 28, style: .continuous)
+                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+            )
+            .frame(maxWidth: .infinity)
+            .frame(height: height)
+            .padding(.horizontal, widthInset)
+            .rotationEffect(.degrees(tilt))
+            .offset(y: yOffset)
+    }
+
+    private func loadingCenterCard(step: Int) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.12))
+                        .frame(width: 48, height: 48)
+
+                    Circle()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1.2)
+                        .frame(width: 62, height: 62)
+                        .scaleEffect(step.isMultiple(of: 2) ? 1.0 : 1.05)
+
+                    Text("🍽️")
+                        .font(.system(size: 26))
+                        .scaleEffect(step.isMultiple(of: 2) ? 1.0 : 1.08)
+                        .animation(.spring(response: 0.35, dampingFraction: 0.72), value: step)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Dealing your next plate")
+                        .font(.system(size: 16, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+
+                    Text("Fresh favorites and a few new cuisines are already sliding into place.")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .lineSpacing(2)
+                        .lineLimit(2)
+                }
+            }
+
+            HStack(spacing: 8) {
+                loadingMetric(title: "20 mins", accent: .orange)
+                loadingMetric(title: "410 kcal", accent: .yellow)
+                loadingMetric(title: "Easy", accent: .green)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity)
+        .frame(height: 124)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(Color(red: 0.11, green: 0.11, blue: 0.13))
+
+                RoundedRectangle(cornerRadius: 30, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.orange.opacity(0.88), Color(red: 0.48, green: 0.76, blue: 0.36)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 30, style: .continuous)
+                .stroke(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .padding(.horizontal, 40)
+    }
+
+    private func loadingPill(icon: String, title: String) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.12), in: Capsule())
+    }
+
+    private func loadingMetric(title: String, accent: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(accent.opacity(0.95))
+                .frame(width: 8, height: 8)
+
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.black.opacity(0.16), in: Capsule())
+    }
+}
+
+private struct SwipeDiscoveryScreen: View {
+    let suggestions: [RecipeSuggestion]
+    let behaviorSnapshot: DiscoveryBehaviorSnapshot
+    let isLoadingInitial: Bool
+    let isLoadingMore: Bool
+    let onDismiss: () -> Void
+    let onRefresh: () -> Void
+    let onSave: (RecipeSuggestion) -> Void
+    let onSkip: (RecipeSuggestion) -> Void
+
+    @State private var showInfo = false
+    @State private var animateHeader = false
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack {
+                ChefBuddyBackground()
+
+                VStack(alignment: .leading, spacing: 18) {
+                    HStack {
+                        Button(action: onDismiss) {
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.primary)
+                                .frame(width: 42, height: 42)
+                                .background(.ultraThinMaterial, in: Circle())
+                        }
+                        .buttonStyle(.plain)
+
+                        Spacer()
+
+                        Button(action: { showInfo = true }) {
+                            Image(systemName: "info.circle.fill")
+                                .font(.system(size: 24, weight: .bold))
+                                .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                        Text("Swipe Discovery")
+                                .font(.system(size: 34, weight: .heavy, design: .rounded))
+                                .foregroundStyle(.primary)
+
+                            Image(systemName: "sparkles")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(.orange)
+                                .offset(y: animateHeader ? -2 : 2)
+                        }
+
+                        Text("Save what feels worth cooking, skip what doesn’t, and let ChefBuddy keep discovery fresh without becoming repetitive.")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .lineSpacing(4)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        HStack(spacing: 8) {
+                            ForEach(Array(behaviorSnapshot.highlightPills.prefix(4)), id: \.self) { pill in
+                                Text(pill)
+                                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.primary)
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 7)
+                                    .background(Color.primary.opacity(0.07), in: Capsule())
+                            }
+                        }
+                    }
+
+                    if suggestions.isEmpty {
+                        if isLoadingInitial || isLoadingMore {
+                            SwipeDiscoveryLoadingSection()
+                                .padding(.top, 38)
+                        } else {
+                            VStack(alignment: .leading, spacing: 16) {
+                                DiscoveryMessageCard(
+                                    title: "The deck is catching its breath",
+                                    subtitle: "ChefBuddy can line up a fresh swipe stack right away, with a mix of familiar favorites and a few new cuisines.",
+                                    icon: "wand.and.stars"
+                                )
+
+                                Button(action: onRefresh) {
+                                    Label("Keep Swiping", systemImage: "arrow.clockwise")
+                                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.white)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 15)
+                                        .background(
+                                            LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                                        )
+                                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 4)
+                            .padding(.top, 28)
+                        }
+                    } else {
+                        if isLoadingMore {
+                            HStack(spacing: 10) {
+                                ProgressView()
+                                    .controlSize(.small)
+                                    .tint(.orange)
+
+                                Text("ChefBuddy is already sliding the next plate into your stack.")
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+                            .padding(.horizontal, 4)
+                        }
+
+                        SwipeDiscoveryDeckView(
+                            suggestions: suggestions,
+                            behaviorSnapshot: behaviorSnapshot,
+                            isLoadingMore: isLoadingMore,
+                            cardHeight: min(max(geometry.size.height * 0.34, 286), 352),
+                            onSave: onSave,
+                            onSkip: onSkip
+                        )
+                        .padding(.top, max(160, geometry.size.height * 0.18))
+                    }
+
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 30)
+            }
+        }
+        .sheet(isPresented: $showInfo) {
+            InfoMessageSheet(
+                title: "Swipe Discovery",
+                message: "Swipe right to save, left to skip, and tap any card to flip it for the full recipe. ChefBuddy learns from what you save, cook, and skip, while still mixing in fresh cuisines so discovery stays interesting."
+            )
+        }
+        .onAppear {
+            if suggestions.isEmpty {
+                onRefresh()
+            }
+            withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
+                animateHeader = true
+            }
+        }
+    }
+}
+
+private struct SwipeDiscoveryDeckView: View {
+    let suggestions: [RecipeSuggestion]
+    let behaviorSnapshot: DiscoveryBehaviorSnapshot
+    let isLoadingMore: Bool
+    let cardHeight: CGFloat
+    let onSave: (RecipeSuggestion) -> Void
+    let onSkip: (RecipeSuggestion) -> Void
+
+    @State private var dragOffset: CGSize = .zero
+    @State private var exitOffset: CGSize = .zero
+    @State private var flippedCardTitle: String? = nil
+    @State private var feedbackKind: SwipeDeckFeedbackKind? = nil
+
+    private var topSuggestions: [RecipeSuggestion] {
+        Array(suggestions.prefix(3))
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            ZStack(alignment: .top) {
+                ForEach(Array(topSuggestions.enumerated().reversed()), id: \.element.id) { index, suggestion in
+                    let isTopCard = index == 0
+                    let isFlipped = flippedCardTitle == normalizedTitle(for: suggestion)
+
+                    DiscoverySwipeCard(
+                        suggestion: suggestion,
+                        behaviorSnapshot: behaviorSnapshot,
+                        dragOffset: isTopCard ? activeOffset : .zero,
+                        isTopCard: isTopCard,
+                        isFlipped: isFlipped
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+                    .onTapGesture {
+                        guard isTopCard else { return }
+                        withAnimation(.spring(response: 0.45, dampingFraction: 0.82)) {
+                            flippedCardTitle = isFlipped ? nil : normalizedTitle(for: suggestion)
+                        }
+                    }
+                    .simultaneousGesture(
+                        isTopCard ? dragGesture(for: suggestion) : nil
+                    )
+                    .scaleEffect(1 - (CGFloat(index) * 0.05))
+                    .offset(
+                        x: isTopCard ? activeOffset.width : 0,
+                        y: CGFloat(index) * 14 + (isTopCard ? max(-8, min(8, activeOffset.height * 0.04)) : 0)
+                    )
+                    .rotationEffect(isTopCard ? .degrees(Double(activeOffset.width / 24)) : .zero)
+                    .shadow(color: Color.black.opacity(index == 0 ? 0.2 : 0.08), radius: 18, y: 12)
+                }
+
+                if let feedbackKind {
+                    SwipeDeckFeedbackBanner(kind: feedbackKind)
+                        .padding(.top, 16)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+            }
+
+            HStack(spacing: 14) {
+                deckActionButton(icon: "xmark", accent: .red.opacity(0.92)) {
+                    if let top = suggestions.first {
+                        completeSwipe(for: top, direction: .left)
+                    }
+                }
+
+                Text(isLoadingMore ? "Another pick is already on the way." : "Tap the card to flip • swipe left or right")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.92))
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.black.opacity(0.20), in: Capsule())
+
+                deckActionButton(icon: "heart.fill", accent: .green.opacity(0.95)) {
+                    if let top = suggestions.first {
+                        completeSwipe(for: top, direction: .right)
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.bottom, 14)
+        }
+        .frame(height: cardHeight)
+        .onChange(of: suggestions.first?.title) { _ in
+            exitOffset = .zero
+            dragOffset = .zero
+        }
+    }
+
+    private var activeOffset: CGSize {
+        if exitOffset != .zero {
+            return exitOffset
+        }
+        return dragOffset
+    }
+
+    private enum SwipeDirection {
+        case left
+        case right
+    }
+
+    private func normalizedTitle(for suggestion: RecipeSuggestion) -> String {
+        suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private func dragGesture(for suggestion: RecipeSuggestion) -> some Gesture {
+        DragGesture(minimumDistance: 8)
+            .onChanged { value in
+                guard abs(value.translation.width) > abs(value.translation.height) else { return }
+                dragOffset = value.translation
+            }
+            .onEnded { value in
+                let projectedWidth = value.predictedEndTranslation.width
+                let finalWidth = value.translation.width + (projectedWidth * 0.18)
+
+                if finalWidth > 110 {
+                    completeSwipe(for: suggestion, direction: .right)
+                } else if finalWidth < -110 {
+                    completeSwipe(for: suggestion, direction: .left)
+                } else {
+                    withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                        dragOffset = .zero
+                    }
+                }
+            }
+    }
+
+    private func completeSwipe(for suggestion: RecipeSuggestion, direction: SwipeDirection) {
+        let targetX = direction == .right ? UIScreen.main.bounds.width : -UIScreen.main.bounds.width
+
+        withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.84, blendDuration: 0.12)) {
+            exitOffset = CGSize(width: targetX, height: 8)
+        }
+
+        switch direction {
+        case .left:
+            UINotificationFeedbackGenerator().notificationOccurred(.warning)
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                feedbackKind = .skipped
+            }
+        case .right:
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                feedbackKind = .saved
+            }
+        }
+
+        flippedCardTitle = nil
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            switch direction {
+            case .left:
+                onSkip(suggestion)
+            case .right:
+                onSave(suggestion)
+            }
+
+            exitOffset = .zero
+            dragOffset = .zero
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
+            withAnimation(.easeOut(duration: 0.22)) {
+                feedbackKind = nil
+            }
+        }
+    }
+
+    private func deckActionButton(icon: String, accent: Color, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 58, height: 58)
+                .background(accent, in: Circle())
+                .shadow(color: accent.opacity(0.32), radius: 10, y: 6)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct DiscoverySwipeCard: View {
+    let suggestion: RecipeSuggestion
+    let behaviorSnapshot: DiscoveryBehaviorSnapshot
+    let dragOffset: CGSize
+    let isTopCard: Bool
+    let isFlipped: Bool
+
+    @State private var animateOrb = false
+
+    private var cuisine: String {
+        primaryCuisineTag(for: suggestion.tags, title: suggestion.title, description: suggestion.description)
+    }
+
+    private var discoveryModeLabel: String {
+        if behaviorSnapshot.favoriteCuisines.contains(cuisine) {
+            return "Comfort Pick"
+        }
+        if let dominant = behaviorSnapshot.dominantCuisine, dominant != cuisine {
+            return "Fresh Lane"
+        }
+        return "ChefBuddy Pick"
+    }
+
+    private var shortHook: String {
+        compactText(from: suggestion.description, maxLength: 62, fallback: "A quick plate tuned to your vibe.")
+    }
+
+    private var fullHook: String {
+        compactText(from: suggestion.description, maxLength: 240, fallback: "ChefBuddy built this recipe to fit your current cooking style.")
+    }
+
+    private var visibleTags: [String] {
+        Array(
+            suggestion.tags
+                .filter { $0.caseInsensitiveCompare(cuisine) != .orderedSame }
+                .prefix(2)
+        )
+    }
+
+    private var swipeLabel: String? {
+        if dragOffset.width > 30 {
+            return "SAVE"
+        }
+        if dragOffset.width < -30 {
+            return "SKIP"
+        }
+        return nil
+    }
+
+    private var swipeColor: Color {
+        dragOffset.width >= 0 ? .green : .red
+    }
+
+    private var compactServings: String {
+        let raw = suggestion.servings.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return "1 srv" }
+
+        if let number = raw.split(separator: " ").first, Int(number) != nil {
+            let numeric = String(number)
+            let suffix = "srv"
+            return "\(numeric) \(suffix)"
+        }
+
+        if raw.localizedCaseInsensitiveContains("person") {
+            return raw.replacingOccurrences(of: "person", with: "serving", options: .caseInsensitive)
+                .replacingOccurrences(of: "people", with: "servings", options: .caseInsensitive)
+        }
+
+        return raw
+    }
+
+    private var flavorNotes: [(icon: String, label: String)] {
+        let source = "\(suggestion.description) \(suggestion.matchReason) \(suggestion.tags.joined(separator: " "))".lowercased()
+        var notes: [(String, String)] = []
+
+        func append(_ icon: String, _ label: String, ifAny keywords: [String]) {
+            guard notes.count < 3 else { return }
+            guard keywords.contains(where: { source.contains($0) }) else { return }
+            guard notes.contains(where: { $0.1 == label }) == false else { return }
+            notes.append((icon, label))
+        }
+
+        append("sun.max.fill", "Bright", ifAny: ["lime", "lemon", "zesty", "fresh", "citrus", "herb"])
+        append("flame.fill", "Spiced", ifAny: ["spicy", "heat", "chili", "curry", "pepper"])
+        append("drop.fill", "Creamy", ifAny: ["creamy", "yogurt", "coconut", "buttery"])
+        append("fork.knife", "Savory", ifAny: ["savory", "umami", "garlic", "toasted"])
+        append("heart.fill", "Comforting", ifAny: ["comfort", "cozy", "hearty", "warm"])
+        append("leaf.fill", "Fresh", ifAny: ["greens", "fresh", "crisp", "salad", "garden"])
+        append("sparkles", "Balanced", ifAny: ["balanced", "high protein", "healthy", "light"])
+
+        while notes.count < 3 {
+            let fallbacks: [(String, String)] = [("fork.knife", "Savory"), ("sparkles", "Balanced"), ("heart.fill", "Comforting")]
+            if let next = fallbacks.first(where: { fallback in notes.contains(where: { $0.1 == fallback.1 }) == false }) {
+                notes.append(next)
+            } else {
+                break
+            }
+        }
+
+        return Array(notes.prefix(3))
+    }
+
+    private var frontGradient: LinearGradient {
+        LinearGradient(
+            colors: [
+                Color(red: 0.35, green: 0.21, blue: 0.11),
+                Color(red: 0.57, green: 0.48, blue: 0.20),
+                Color(red: 0.28, green: 0.52, blue: 0.23)
+            ],
+            startPoint: .topLeading,
+            endPoint: .bottomTrailing
+        )
+    }
+
+    var body: some View {
+        ZStack {
+            frontFace
+                .opacity(isFlipped ? 0 : 1)
+                .rotation3DEffect(.degrees(isFlipped ? 180 : 0), axis: (x: 0, y: 1, z: 0))
+
+            backFace
+                .opacity(isFlipped ? 1 : 0)
+                .rotation3DEffect(.degrees(isFlipped ? 0 : -180), axis: (x: 0, y: 1, z: 0))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            ZStack {
+                RoundedRectangle(cornerRadius: 34, style: .continuous)
+                    .fill(Color(red: 0.10, green: 0.10, blue: 0.12))
+
+                RoundedRectangle(cornerRadius: 34, style: .continuous)
+                    .fill(frontGradient)
+                    .opacity(0.96)
+
+                Circle()
+                    .fill(Color.orange.opacity(0.28))
+                    .frame(width: 220, height: 220)
+                    .blur(radius: 55)
+                    .offset(x: -92, y: -118)
+
+                Circle()
+                    .fill(Color.green.opacity(0.32))
+                    .frame(width: 240, height: 240)
+                    .blur(radius: 60)
+                    .offset(x: 118, y: 134)
+
+                RoundedRectangle(cornerRadius: 34, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.black.opacity(0.18), .clear, Color.black.opacity(0.24)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+
+                RoundedRectangle(cornerRadius: 34, style: .continuous)
+                    .stroke(Color.white.opacity(isTopCard ? 0.14 : 0.08), lineWidth: 1)
+            }
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 34, style: .continuous)
+                .stroke(Color.white.opacity(isTopCard ? 0.12 : 0.06), lineWidth: 1)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 34, style: .continuous))
+        .animation(.spring(response: 0.46, dampingFraction: 0.84), value: isFlipped)
+        .onAppear {
+            withAnimation(.easeInOut(duration: 2.1).repeatForever(autoreverses: true)) {
+                animateOrb = true
+            }
+        }
+    }
+
+    private var frontFace: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        Text(discoveryModeLabel)
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.12), in: Capsule())
+
+                        if let swipeLabel {
+                            Text(swipeLabel)
+                                .font(.system(size: 12, weight: .black, design: .rounded))
+                                .foregroundStyle(swipeColor)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .background(Color.white.opacity(0.94), in: Capsule())
+                        }
+                    }
+
+                    Text(suggestion.title)
+                        .font(.system(size: 29, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.white)
+                        .lineLimit(3)
+                        .minimumScaleFactor(0.82)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(shortHook)
+                        .font(.system(size: 13, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.white.opacity(0.88))
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 8)
+
+                ZStack {
+                    Circle()
+                        .fill(Color.white.opacity(0.12))
+                        .frame(width: 96, height: 96)
+                        .scaleEffect(animateOrb ? 1.04 : 0.96)
+
+                    Circle()
+                        .stroke(
+                            AngularGradient(
+                                colors: [.white.opacity(0.0), .white.opacity(0.55), .white.opacity(0.0)],
+                                center: .center
+                            ),
+                            lineWidth: 2.2
+                        )
+                        .frame(width: 92, height: 92)
+                        .rotationEffect(.degrees(animateOrb ? 360 : 0))
+
+                    Circle()
+                        .stroke(Color.white.opacity(0.18), lineWidth: 1.2)
+                        .frame(width: 78, height: 78)
+
+                    Text(suggestion.emoji)
+                        .font(.system(size: 46))
+
+                    Circle()
+                        .fill(Color.orange.opacity(0.9))
+                        .frame(width: 8, height: 8)
+                        .offset(x: 34, y: -28)
+                        .opacity(animateOrb ? 0.9 : 0.45)
+
+                    Circle()
+                        .fill(Color.green.opacity(0.9))
+                        .frame(width: 10, height: 10)
+                        .offset(x: -32, y: 26)
+                        .opacity(animateOrb ? 0.42 : 0.92)
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                DiscoveryIconStatTile(icon: "globe.americas.fill", title: cuisine)
+                DiscoveryIconStatTile(icon: "clock.fill", title: suggestion.prepTime)
+                DiscoveryIconStatTile(icon: "flame.fill", title: suggestion.calories)
+                DiscoveryIconStatTile(icon: "sparkles", title: suggestion.difficulty)
+            }
+
+            HStack(spacing: 10) {
+                ForEach(visibleTags, id: \.self) { tag in
+                    DiscoveryTraitPill(title: tag)
+                }
+            }
+
+            HStack(spacing: 10) {
+                DiscoveryMiniMetric(icon: "bolt.heart.fill", title: suggestion.protein, subtitle: "Protein", accent: .green)
+                DiscoveryMiniMetric(icon: "chart.bar.fill", title: suggestion.carbs, subtitle: "Carbs", accent: .orange)
+                DiscoveryMiniMetric(icon: "drop.fill", title: suggestion.fat, subtitle: "Fat", accent: .pink)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(22)
+        .padding(.bottom, 74)
+    }
+
+    private var backFace: some View {
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(suggestion.title)
+                            .font(.system(size: 22, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.white)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text(fullHook)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white.opacity(0.9))
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 8)
+
+                    VStack(alignment: .trailing, spacing: 8) {
+                        HStack(spacing: 6) {
+                            DiscoveryStatPill(icon: "clock.fill", label: suggestion.prepTime)
+                            DiscoveryStatPill(icon: "person.2.fill", label: compactServings)
+                        }
+
+                        ZStack {
+                            Circle()
+                                .fill(Color.white.opacity(0.10))
+                                .frame(width: 58, height: 58)
+
+                            Text(suggestion.emoji)
+                                .font(.system(size: 30))
+                        }
+                    }
+                }
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    DiscoveryNutritionTile(title: "Calories", value: suggestion.calories, accent: .orange)
+                    DiscoveryNutritionTile(title: "Protein", value: suggestion.protein, accent: .green)
+                    DiscoveryNutritionTile(title: "Carbs", value: suggestion.carbs, accent: .blue)
+                    DiscoveryNutritionTile(title: "Fat", value: suggestion.fat, accent: .pink)
+                }
+
+                DiscoveryBackSection(title: "Tastes like", icon: "sparkles") {
+                    HStack(spacing: 10) {
+                        ForEach(Array(flavorNotes.enumerated()), id: \.offset) { _, note in
+                            HStack(spacing: 7) {
+                                Image(systemName: note.icon)
+                                    .font(.system(size: 11, weight: .bold))
+                                Text(note.label)
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(Color.white.opacity(0.08), in: Capsule())
+                        }
+                    }
+                }
+
+                if !suggestion.matchReason.isEmpty {
+                    DiscoveryBackSection(title: "Why it fits", icon: "sparkles") {
+                        Text(suggestion.matchReason)
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                DiscoveryBackSection(title: "Ingredients", icon: "carrot.fill") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(suggestion.ingredients.enumerated()), id: \.offset) { _, ingredient in
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "circle.fill")
+                                    .font(.system(size: 7))
+                                    .foregroundStyle(.white.opacity(0.72))
+                                    .padding(.top, 6)
+
+                                Text(ingredient)
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+
+                DiscoveryBackSection(title: "Steps", icon: "list.number") {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(Array(suggestion.steps.enumerated()), id: \.offset) { index, step in
+                            HStack(alignment: .top, spacing: 10) {
+                                Text("\(index + 1)")
+                                    .font(.system(size: 12, weight: .black, design: .rounded))
+                                    .foregroundStyle(.orange)
+                                    .frame(width: 24, height: 24)
+                                    .background(Color.white.opacity(0.95), in: Circle())
+
+                                Text(step)
+                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .lineSpacing(3)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                    }
+                }
+            }
+            .padding(24)
+            .padding(.bottom, 74)
+        }
+    }
+
+    private func compactText(from raw: String, maxLength: Int, fallback: String) -> String {
+        let cleaned = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard !cleaned.isEmpty else { return fallback }
+        guard cleaned.count > maxLength else { return cleaned }
+
+        let prefix = String(cleaned.prefix(maxLength))
+        if let split = prefix.lastIndex(of: " ") {
+            return String(prefix[..<split]).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return prefix.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func frontHintPill(icon: String, label: String) -> some View {
+        HStack(spacing: 7) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .bold))
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.10), in: Capsule())
+    }
+}
+
+private struct SwipeDeckFeedbackBanner: View {
+    let kind: SwipeDeckFeedbackKind
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: kind.icon)
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 34, height: 34)
+                .background(kind.accent, in: Circle())
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(kind.title)
+                    .font(.system(size: 14, weight: .heavy, design: .rounded))
+                Text(kind.subtitle)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(
+            Capsule()
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+        .padding(.horizontal, 28)
+    }
+}
+
+private struct DiscoveryIconStatTile: View {
+    let icon: String
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.white)
+                .frame(width: 24, height: 24)
+                .background(Color.black.opacity(0.18), in: Circle())
+
+            Text(title)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .multilineTextAlignment(.leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+}
+
+private struct DiscoveryMiniMetric: View {
+    let icon: String
+    let title: String
+    let subtitle: String
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accent.opacity(0.94))
+                    .frame(width: 16, height: 16)
+                    .overlay(
+                        Image(systemName: icon)
+                            .font(.system(size: 8, weight: .black))
+                            .foregroundStyle(.white)
+                    )
+
+                Text(subtitle)
+                    .font(.system(size: 10, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.74))
+            }
+
+            Text(title)
+                .font(.system(size: 16, weight: .heavy, design: .rounded))
+                .foregroundStyle(.white)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 12)
+        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+}
+
+private struct DiscoveryBackSection<Content: View>: View {
+    let title: String
+    let icon: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: icon)
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.88))
+                Text(title)
+                    .font(.system(size: 14, weight: .heavy, design: .rounded))
+                    .foregroundStyle(.white)
+            }
+
+            content
+        }
+        .padding(16)
+        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+}
+
+private struct DiscoveryNutritionTile: View {
+    let title: String
+    let value: String
+    let accent: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(accent.opacity(0.9))
+                    .frame(width: 10, height: 10)
+
+                Text(title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.72))
+            }
+
+            Text(value)
+                .font(.system(size: 16, weight: .heavy, design: .rounded))
+                .foregroundStyle(.white)
+
+            Capsule()
+                .fill(accent.opacity(0.9))
+                .frame(width: 42, height: 5)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
+        .background(Color.black.opacity(0.18), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.white.opacity(0.07), lineWidth: 1)
+        )
+    }
+}
+
+private struct DiscoveryStatPill: View {
+    let icon: String
+    let label: String
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: icon)
+                .font(.system(size: 10, weight: .bold))
+            Text(label)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.68)
+                .allowsTightening(true)
+        }
+        .foregroundStyle(.white)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.12), in: Capsule())
+        .fixedSize(horizontal: true, vertical: true)
+    }
+}
+
+private struct DiscoveryTraitPill: View {
+    let title: String
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .foregroundStyle(.white.opacity(0.9))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.black.opacity(0.16), in: Capsule())
+            .overlay(
+                Capsule()
+                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
+            )
     }
 }
 

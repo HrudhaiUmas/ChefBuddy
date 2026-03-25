@@ -20,11 +20,6 @@ struct MainTabShellView: View {
     @State private var selectedLiveRecipe: Recipe? = nil
     @State private var savedRecipes: [Recipe] = []
     @State private var recipesListener: ListenerRegistration? = nil
-    @State private var tabContentVisible = true
-    @State private var tabContentOffset: CGFloat = 0
-    @State private var tabContentScale: CGFloat = 1
-    @State private var tabContentBlur: CGFloat = 0
-    @State private var previousTab: AppTab = .home
 
     private var userId: String? {
         authVM.userSession?.uid
@@ -99,14 +94,6 @@ struct MainTabShellView: View {
                 Label("Profile", systemImage: "person.crop.circle")
             }
         }
-        .opacity(tabContentVisible ? 1 : 0.96)
-        .offset(x: tabContentOffset)
-        .scaleEffect(tabContentScale)
-        .blur(radius: tabContentBlur)
-        .animation(.easeInOut(duration: 0.24), value: tabContentVisible)
-        .animation(.easeInOut(duration: 0.28), value: tabContentOffset)
-        .animation(.easeInOut(duration: 0.28), value: tabContentScale)
-        .animation(.easeInOut(duration: 0.24), value: tabContentBlur)
         .toolbar(.hidden, for: .tabBar)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             Color.clear.frame(height: 86)
@@ -129,30 +116,6 @@ struct MainTabShellView: View {
         }
         .onDisappear {
             stopRecipesListener()
-        }
-        .onChange(of: selectedTab) { newValue in
-            let order: [AppTab] = [.plan, .pantry, .home, .recipes, .profile]
-            let currentIndex = order.firstIndex(of: newValue) ?? 0
-            let previousIndex = order.firstIndex(of: previousTab) ?? currentIndex
-            let movingRight = currentIndex > previousIndex
-
-            withAnimation(.easeInOut(duration: 0.16)) {
-                tabContentVisible = false
-                tabContentOffset = movingRight ? 10 : -10
-                tabContentScale = 0.992
-                tabContentBlur = 1.2
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                withAnimation(.spring(response: 0.42, dampingFraction: 0.90)) {
-                    tabContentVisible = true
-                    tabContentOffset = 0
-                    tabContentScale = 1
-                    tabContentBlur = 0
-                }
-            }
-
-            previousTab = newValue
         }
         .sheet(isPresented: $showGroceryList) {
             NavigationStack {
@@ -394,6 +357,7 @@ struct HomeDashboardView: View {
                     }
                 }
             }
+            .padding(.top, 6)
             .padding(22)
             .background(
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
@@ -668,7 +632,19 @@ struct PantryTabRootView: View {
                     if availablePantries.isEmpty {
                         pantryEmptyState
                     } else {
-                        pantryPrimaryCard
+                        pantrySelectionSection
+                        Button(action: { showVirtualPantry = true }) {
+                            Label("Manage Pantry", systemImage: "slider.horizontal.3")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(.white)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 15)
+                                .background(
+                                    LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
                         grocerySection
                         PantrySecondaryActionButton(title: "Need recipe ideas?", icon: "sparkles", action: onOpenRecipes)
                     }
@@ -688,6 +664,15 @@ struct PantryTabRootView: View {
         }
         .onChange(of: selectedPantryId) { pantryId in
             authVM.updateActivePantrySelection(pantryId)
+        }
+        .onChange(of: authVM.currentUserProfile?.activePantryId) { pantryId in
+            guard pantryId != selectedPantryId else { return }
+            if let pantryId,
+               availablePantries.contains(where: { $0.id == pantryId }) {
+                selectedPantryId = pantryId
+            } else if pantryId == nil {
+                selectedPantryId = availablePantries.first?.id
+            }
         }
         .navigationDestination(isPresented: $showVirtualPantry) {
             VirtualPantryView(assistant: assistant)
@@ -742,70 +727,120 @@ struct PantryTabRootView: View {
         )
     }
 
-    private var pantryPrimaryCard: some View {
-        Button(action: { showVirtualPantry = true }) {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 14) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.green.opacity(0.14))
-                            .frame(width: 52, height: 52)
+    private var pantrySelectionSection: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Choose your active pantry")
+                    .font(.system(size: 18, weight: .bold, design: .rounded))
 
-                        Text(currentPantry?.emoji ?? "🥑")
-                            .font(.system(size: 26))
+                Spacer()
+
+                if availablePantries.count > 1 {
+                    Menu {
+                        ForEach(availablePantries) { pantry in
+                            Button {
+                                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                selectedPantryId = pantry.id
+                            } label: {
+                                HStack {
+                                    Text("\(pantry.emoji) \(pantry.name)")
+                                    if pantry.id == selectedPantryId {
+                                        Image(systemName: "checkmark")
+                                    }
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text(currentPantry.map { "\($0.emoji) \($0.name)" } ?? "Select Pantry")
+                                .lineLimit(1)
+                            Image(systemName: "chevron.down")
+                                .font(.system(size: 11, weight: .bold))
+                        }
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color.primary.opacity(0.07), in: Capsule())
                     }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 4)
 
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Pantry")
-                            .font(.system(size: 20, weight: .bold, design: .rounded))
+            if let pantry = currentPantry {
+                activePantryCard(for: pantry)
+            }
+        }
+    }
 
-                        Text(currentPantry?.name ?? "Open your pantry")
-                            .font(.system(size: 14, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
-                    }
+    private func activePantryCard(for pantry: SimplePantrySpace) -> some View {
+        let previewIngredients = Array(pantry.ingredients.prefix(6))
+        let remaining = max(0, pantry.ingredients.count - previewIngredients.count)
 
-                    Spacer(minLength: 10)
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 14) {
+                ZStack {
+                    Circle()
+                        .fill(Color.green.opacity(0.18))
+                        .frame(width: 52, height: 52)
 
-                    Image(systemName: "arrow.up.right")
-                        .font(.system(size: 15, weight: .bold))
+                    Text(pantry.emoji)
+                        .font(.system(size: 26))
+                }
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(pantry.name)
+                        .font(.system(size: 20, weight: .bold, design: .rounded))
+
+                    Text("\(pantry.ingredients.count) ingredient\(pantry.ingredients.count == 1 ? "" : "s") ready")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
 
-                if pantryPreviewIngredients.isEmpty {
-                    Text("Open your pantry to scan shelves, add ingredients manually, and keep ChefBuddy grounded in what’s actually at home.")
-                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .lineSpacing(3)
-                } else {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("Quick pantry preview")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                Spacer(minLength: 10)
 
-                        FlexibleTagWrap(items: pantryPreviewIngredients) { ingredient in
-                            Text(ingredient)
-                                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                                .foregroundStyle(.primary)
-                                .padding(.horizontal, 12)
-                                .padding(.vertical, 8)
-                                .background(Color.primary.opacity(0.08), in: Capsule())
-                        }
+                Label("Active Pantry", systemImage: "checkmark.circle.fill")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.green)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.green.opacity(0.14), in: Capsule())
+            }
 
-                        if remainingIngredientCount > 0 {
-                            Text("and \(remainingIngredientCount) more")
-                                .font(.system(size: 13, weight: .bold, design: .rounded))
-                                .foregroundStyle(.secondary)
-                        }
+            if previewIngredients.isEmpty {
+                Text("This pantry is still empty. Open Manage Pantry to scan shelves or add ingredients manually.")
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(3)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Quick pantry preview")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+
+                    FlexibleTagWrap(items: previewIngredients) { ingredient in
+                        Text(ingredient)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.primary.opacity(0.08), in: Capsule())
+                    }
+
+                    if remaining > 0 {
+                        Text("and \(remaining) more")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
                     }
                 }
             }
-            .padding(20)
-            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-            )
         }
-        .buttonStyle(.plain)
+        .padding(20)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .stroke(Color.green.opacity(0.35), lineWidth: 1.5)
+        )
+        .shadow(color: Color.green.opacity(0.10), radius: 12, y: 6)
     }
 
     private var grocerySection: some View {
@@ -1014,13 +1049,21 @@ private struct HomeGreetingCard: View {
 
     @State private var animateIcon = false
     @State private var animateContent = false
+    @State private var homeIconIndex = 0
+    @State private var iconTimer: Timer?
+
+    private let rotatingIcons = ["house.fill", "fork.knife.circle.fill", "sparkles", "sun.max.fill"]
+
+    private var activeIcon: String {
+        rotatingIcons[homeIconIndex % rotatingIcons.count]
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            HStack(alignment: .center, spacing: 14) {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
                 HomeAmbientIcons()
 
-                Spacer(minLength: 12)
+                Spacer(minLength: 10)
 
                 HStack(spacing: 8) {
                     Image("ChefBuddyLogo")
@@ -1037,7 +1080,7 @@ private struct HomeGreetingCard: View {
                 .background(Color.primary.opacity(0.06), in: Capsule())
             }
 
-            HStack(alignment: .center, spacing: 14) {
+            HStack(alignment: .center, spacing: 12) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 22, style: .continuous)
                         .fill(
@@ -1047,40 +1090,45 @@ private struct HomeGreetingCard: View {
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .frame(width: 72, height: 72)
+                        .frame(width: 62, height: 62)
 
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .fill(Color.orange.opacity(0.10))
-                        .frame(width: 58, height: 58)
+                        .frame(width: 52, height: 52)
 
-                    Image(systemName: "house.fill")
-                        .font(.system(size: 24, weight: .bold))
+                    Image(systemName: activeIcon)
+                        .font(.system(size: 21, weight: .bold))
                         .foregroundStyle(.orange)
                         .offset(y: animateIcon ? -1 : 1)
+                        .contentTransition(.symbolEffect(.replace))
+                        .animation(.spring(response: 0.42, dampingFraction: 0.82), value: activeIcon)
                 }
-                .frame(width: 84, height: 120, alignment: .center)
+                .frame(width: 72, height: 72, alignment: .center)
 
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: 5) {
                     Text("Home")
                         .font(.system(size: 14, weight: .bold, design: .rounded))
                         .foregroundStyle(.secondary)
 
                     Text(title)
-                        .font(.system(size: 30, weight: .heavy, design: .rounded))
+                        .font(.system(size: 24, weight: .heavy, design: .rounded))
+                        .lineSpacing(1)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.68)
+                        .allowsTightening(true)
                         .fixedSize(horizontal: false, vertical: true)
 
                     Text(subtitle)
-                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
-                        .lineSpacing(3)
+                        .lineSpacing(2)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .offset(y: animateContent ? 0 : 6)
                 .opacity(animateContent ? 1 : 0.72)
-
-                Spacer(minLength: 0)
             }
         }
-        .padding(20)
+        .padding(18)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 30, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 30, style: .continuous)
@@ -1093,6 +1141,17 @@ private struct HomeGreetingCard: View {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.84).delay(0.05)) {
                 animateContent = true
             }
+            if iconTimer == nil {
+                iconTimer = Timer.scheduledTimer(withTimeInterval: 2.2, repeats: true) { _ in
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                        homeIconIndex = (homeIconIndex + 1) % rotatingIcons.count
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            iconTimer?.invalidate()
+            iconTimer = nil
         }
     }
 }

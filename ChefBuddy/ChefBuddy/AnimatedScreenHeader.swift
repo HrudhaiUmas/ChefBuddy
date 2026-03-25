@@ -10,6 +10,29 @@ struct AnimatedScreenHeader: View {
 
     @State private var animateOrb = false
     @State private var animateContent = false
+    @State private var iconIndex = 0
+    @State private var iconTimer: Timer?
+
+    private var rotatingIcons: [String] {
+        switch systemImage {
+        case "calendar":
+            return ["calendar", "calendar.badge.clock", "list.bullet.rectangle", "sparkles"]
+        case "basket.fill":
+            return ["basket.fill", "carrot.fill", "refrigerator.fill", "leaf.fill"]
+        case "book.closed.fill":
+            return ["book.closed.fill", "fork.knife", "sparkles", "menucard.fill"]
+        case "house.fill":
+            return ["house.fill", "fork.knife.circle.fill", "sun.max.fill", "sparkles"]
+        default:
+            return [systemImage]
+        }
+    }
+
+    private var activeIcon: String {
+        let icons = rotatingIcons
+        guard icons.isEmpty == false else { return systemImage }
+        return icons[iconIndex % icons.count]
+    }
 
     var body: some View {
         HStack(alignment: .center, spacing: 14) {
@@ -30,10 +53,12 @@ struct AnimatedScreenHeader: View {
                     )
                     .frame(width: 60, height: 60)
 
-                Image(systemName: systemImage)
+                Image(systemName: activeIcon)
                     .font(.system(size: 22, weight: .bold))
                     .foregroundStyle(accent)
                     .offset(y: animateOrb ? -1 : 1)
+                    .contentTransition(.symbolEffect(.replace))
+                    .animation(.spring(response: 0.42, dampingFraction: 0.82), value: activeIcon)
             }
             .frame(width: 76, height: 76)
 
@@ -80,6 +105,17 @@ struct AnimatedScreenHeader: View {
             withAnimation(.spring(response: 0.5, dampingFraction: 0.84).delay(0.05)) {
                 animateContent = true
             }
+            if rotatingIcons.count > 1, iconTimer == nil {
+                iconTimer = Timer.scheduledTimer(withTimeInterval: 2.2, repeats: true) { _ in
+                    withAnimation(.spring(response: 0.42, dampingFraction: 0.82)) {
+                        iconIndex = (iconIndex + 1) % rotatingIcons.count
+                    }
+                }
+            }
+        }
+        .onDisappear {
+            iconTimer?.invalidate()
+            iconTimer = nil
         }
     }
 }

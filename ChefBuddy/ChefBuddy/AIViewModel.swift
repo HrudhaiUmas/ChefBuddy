@@ -689,23 +689,38 @@ class CookingAssistant: ObservableObject {
         return try decodeSuggestionObject(from: response.text)
     }
 
-    // Generates 3 personalised recipe suggestions and stores them in self.suggestions.
-    // If the user has left reviews, their feedback is injected into the prompt so
-    // future suggestions learn from what they liked or disliked.
-    func fetchRecipeSuggestions(reviewFeedback: String = "") async {
-        try? await waitUntilReady()
-        guard let model = model else { return }
+    func generateRecipeSuggestions(
+        personalizationSummary: String = "",
+        count: Int = 5,
+        excludingTitles: [String] = []
+    ) async throws -> [RecipeSuggestion] {
+        try await waitUntilReady()
+        guard let model = model else {
+            throw CookingAssistantError.modelNotReady
+        }
 
-        let feedbackSection = reviewFeedback.isEmpty ? "" : """
+        let cleanedTitles = excludingTitles
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let feedbackSection = personalizationSummary.isEmpty ? "" : """
 
 
-        Important — personalise based on this user feedback from past recipes:
-        \(reviewFeedback)
-        Use this to suggest recipes they will enjoy more and avoid patterns they disliked.
+        Important — personalise based on this user behavior summary:
+        \(personalizationSummary)
+        Use this to tune the deck toward what they save and cook, what they skip, and how adventurous they seem.
+        """
+
+        let exclusionSection = cleanedTitles.isEmpty ? "" : """
+
+
+        Existing titles already in the deck or saved library:
+        \(cleanedTitles.joined(separator: ", "))
+        Avoid generating titles that match or feel too similar to these.
         """
 
         let prompt = """
-        Generate exactly 3 fully detailed recipe suggestions based on my profile.\(feedbackSection)
+        Generate exactly \(count) fully detailed recipe suggestions based on my profile.\(feedbackSection)\(exclusionSection)
 
         Return ONLY valid JSON.
 
@@ -746,29 +761,70 @@ class CookingAssistant: ObservableObject {
         - each recipe must have 5 to 8 steps
         - steps must be detailed and precise, including prep steps (wash/chop/preheat where relevant)
         - steps must include heat level, timing, texture cues, and doneness cues where relevant
-        - descriptions should make the dish sound distinct from the other two recipes
+        - descriptions should make the dishes sound distinct from each other
         - emoji must be a single relevant food emoji
-        - make all 3 recipe titles different from each other
+        - make all \(count) recipe titles different from each other
+        - do not make the entire set all one cuisine even if the user often cooks one cuisine
+        - if one cuisine seems dominant in the behavior summary, include at most 2 suggestions from that cuisine
+        - at least 2 suggestions should feel like tasteful exploration outside their most repeated recent cuisine while still fitting their timing, calorie style, dietary rules, and budget
+        - include at least 1 suggestion from a cuisine they do not often cook, as long as it still feels approachable for their preferences
+        - some suggestions should feel comfortably familiar and some should feel save-worthy but slightly new
         """
 
+        let response = try await runWithBackgroundAllowance(name: "chefbuddy.fetch.suggestions") {
+            try await model.generateContent(prompt)
+        }
+        let decoded = try decodeSuggestionArray(from: response.text)
+        let normalizedExcluded = Set(cleanedTitles.map { $0.lowercased() })
+        var seenTitles: Set<String> = []
+
+        return decoded.filter { suggestion in
+            let normalizedTitle = suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalizedExcluded.contains(normalizedTitle) else { return false }
+            guard seenTitles.insert(normalizedTitle).inserted else { return false }
+            return true
+        }
+    }
+
+    // Generates a swipe-ready batch of personalised recipe suggestions and
+    // stores them in self.suggestions. The personalization summary can include
+    // saved/cooked/skip behavior so discovery feels more human and less random.
+    func fetchRecipeSuggestions(
+        personalizationSummary: String = "",
+        count: Int = 5,
+        excludingTitles: [String] = [],
+        append: Bool = false
+    ) async {
         do {
-            let response = try await runWithBackgroundAllowance(name: "chefbuddy.fetch.suggestions") {
-                try await model.generateContent(prompt)
-            }
-            let decoded = try decodeSuggestionArray(from: response.text)
+            let generated = try await generateRecipeSuggestions(
+                personalizationSummary: personalizationSummary,
+                count: count,
+                excludingTitles: excludingTitles
+            )
 
             await MainActor.run {
-                self.suggestions = decoded
+                let filtered = generated.filter { suggestion in
+                    let normalizedTitle = suggestion.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    return !self.suggestions.contains(where: {
+                        $0.title.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == normalizedTitle
+                    })
+                }
+
+                if append {
+                    self.suggestions.append(contentsOf: filtered)
+                } else {
+                    self.suggestions = filtered
+                }
             }
         } catch {
             print("Failed to generate suggestions: \(error)")
         }
     }
 
-    // Appends one new suggestion to the carousel without duplicating existing ones.
-    // Passing excludedTitles in the prompt prevents Gemini from regenerating a
-    // recipe the user already sees.
-    func fetchOneMoreRecipeSuggestion(excludingTitles: [String], reviewFeedback: String = "") async throws {
+    // Appends one new suggestion to the discovery deck without duplicating
+    // existing ones. Passing excluded titles and the personalization summary
+    // helps the replacement stay relevant while still keeping some variety.
+    func fetchOneMoreRecipeSuggestion(excludingTitles: [String], personalizationSummary: String = "") async throws {
         try await waitUntilReady()
         guard let model = model else {
             throw CookingAssistantError.modelNotReady
@@ -785,12 +841,12 @@ class CookingAssistant: ObservableObject {
             excludedTitlesText = cleanedTitles.joined(separator: ", ")
         }
 
-        let feedbackSection = reviewFeedback.isEmpty ? "" : """
+        let feedbackSection = personalizationSummary.isEmpty ? "" : """
 
 
-        Important — personalise based on this user feedback from past recipes:
-        \(reviewFeedback)
-        Use this to suggest a recipe they will enjoy more and avoid patterns they disliked.
+        Important — personalise based on this user behavior summary:
+        \(personalizationSummary)
+        Use this to suggest a recipe they will enjoy more while still mixing in some fresh ideas.
         """
 
         let prompt = """
@@ -837,6 +893,8 @@ class CookingAssistant: ObservableObject {
         - steps must include timing/doneness cues where relevant
         - emoji must be a single relevant food emoji
         - title must not match or be too similar to any excluded title
+        - if the user has one very dominant cuisine pattern, do not keep repeating it every time
+        - this replacement should either be a strong fit or a tasteful stretch from their usual pattern, not a duplicate vibe
         """
 
         let response = try await runWithBackgroundAllowance(name: "chefbuddy.fetch.one.suggestion") {

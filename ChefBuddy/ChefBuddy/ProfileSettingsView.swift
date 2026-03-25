@@ -177,6 +177,7 @@ struct ProfileSettingsView: View {
     var showsSignOutButton = false
     @StateObject private var formState = ProfileFormState()
     @State private var isSaving = false
+    @State private var isResettingDiscovery = false
 
     var body: some View {
         ZStack {
@@ -184,7 +185,9 @@ struct ProfileSettingsView: View {
             PreferencesFormContent(
                 formState: formState,
                 title: "Your Kitchen Profile",
-                subtitle: "Tweak your preferences for better AI suggestions."
+                subtitle: "Tweak your preferences for better AI suggestions.",
+                isResettingDiscovery: isResettingDiscovery,
+                onResetDiscovery: resetDiscoveryPreferences
             )
         }
         .safeAreaInset(edge: .top, spacing: 0) {
@@ -311,6 +314,45 @@ struct ProfileSettingsView: View {
             }
         }
     }
+
+    private func resetDiscoveryPreferences() {
+        guard let uid = authVM.userSession?.uid, !isResettingDiscovery else { return }
+
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        isResettingDiscovery = true
+
+        Task {
+            do {
+                let db = Firestore.firestore()
+
+                while true {
+                    let snapshot = try await db.collection("users")
+                        .document(uid)
+                        .collection("discoveryFeedback")
+                        .limit(to: 200)
+                        .getDocuments()
+
+                    if snapshot.documents.isEmpty {
+                        break
+                    }
+
+                    let batch = db.batch()
+                    snapshot.documents.forEach { batch.deleteDocument($0.reference) }
+                    try await batch.commit()
+                }
+
+                await MainActor.run {
+                    isResettingDiscovery = false
+                    NotificationCenter.default.post(name: Notification.Name("DiscoveryFeedbackDidReset"), object: nil)
+                }
+            } catch {
+                await MainActor.run {
+                    isResettingDiscovery = false
+                    authVM.errorMessage = "Failed to reset AI discovery: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
 }
 
 
@@ -319,6 +361,8 @@ private struct PreferencesFormContent: View {
     @ObservedObject var formState: ProfileFormState
     let title: String
     let subtitle: String
+    var isResettingDiscovery: Bool = false
+    var onResetDiscovery: (() -> Void)? = nil
 
     @State private var activeSheet: ActiveSheet? = nil
     @State private var showSections: [Bool] = Array(repeating: false, count: 13)
@@ -937,6 +981,71 @@ private struct PreferencesFormContent: View {
                                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
                         )
                         .padding(.horizontal, 24)
+                    }
+                }
+
+                if let onResetDiscovery {
+                    AnimatedSection(isVisible: showSections[5]) {
+                        VStack(alignment: .leading, spacing: 22) {
+                            ProfileSectionHeader(title: "AI Discovery", icon: "sparkles")
+
+                            VStack(alignment: .leading, spacing: 14) {
+                                HStack(alignment: .top, spacing: 12) {
+                                    Image(systemName: "wand.and.stars.inverse")
+                                        .font(.system(size: 20, weight: .bold))
+                                        .foregroundStyle(.orange)
+                                        .frame(width: 42, height: 42)
+                                        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        Text("Reset ChefBuddy’s discovery memory")
+                                            .font(.system(size: 18, weight: .bold, design: .rounded))
+
+                                        Text("Clear saved swipe, save, and skip feedback so discovery starts learning from a fresh slate while keeping your saved recipes intact.")
+                                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                            .lineSpacing(3)
+                                    }
+                                }
+
+                                Button(action: onResetDiscovery) {
+                                    HStack(spacing: 10) {
+                                        if isResettingDiscovery {
+                                            ProgressView()
+                                                .tint(.white)
+                                                .controlSize(.small)
+                                        } else {
+                                            Image(systemName: "arrow.counterclockwise.circle.fill")
+                                                .font(.system(size: 16, weight: .bold))
+                                        }
+
+                                        Text(isResettingDiscovery ? "Resetting Discovery..." : "Clear AI Suggestions")
+                                            .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    }
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 15)
+                                    .background(
+                                        LinearGradient(
+                                            colors: [.orange, .red.opacity(0.85)],
+                                            startPoint: .leading,
+                                            endPoint: .trailing
+                                        )
+                                    )
+                                    .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isResettingDiscovery)
+                            }
+                            .padding()
+                            .background(.ultraThinMaterial)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+                            )
+                            .padding(.horizontal, 24)
+                        }
                     }
                 }
 
