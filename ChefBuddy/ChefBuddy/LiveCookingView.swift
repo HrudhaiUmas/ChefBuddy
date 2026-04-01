@@ -1354,6 +1354,19 @@ struct LiveCookingView: View {
                         ]
                         db.collection("users").document(userId).collection("recipes").document(id)
                             .collection("reviews").addDocument(data: reviewData)
+
+                        Task {
+                            await GrowthEngine.shared.logActivity(
+                                userId: userId,
+                                type: .recipeCooked,
+                                eventKey: "recipe_cooked_live_\(id)_\(cooked.cookedCount)",
+                                metadata: [
+                                    "recipeId": id,
+                                    "title": cooked.title,
+                                    "source": "live_cooking"
+                                ]
+                            )
+                        }
                     }
                 }
             )

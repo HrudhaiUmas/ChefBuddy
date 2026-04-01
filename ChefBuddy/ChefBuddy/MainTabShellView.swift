@@ -51,8 +51,7 @@ struct MainTabShellView: View {
             NavigationStack {
                 PantryTabRootView(
                     assistant: assistant,
-                    onOpenGrocery: { showGroceryList = true },
-                    onOpenRecipes: { selectedTab = .recipes }
+                    onOpenGrocery: { showGroceryList = true }
                 )
             }
             .tag(AppTab.pantry)
@@ -568,6 +567,7 @@ struct HomeDashboardView: View {
                     weeklySlots = documents.compactMap { try? $0.data(as: MealPlanSlot.self) }
                 }
             }
+
     }
 
     private func stopListeners() {
@@ -583,6 +583,7 @@ struct HomeDashboardView: View {
         }
         return Double(raw[range]) ?? 0
     }
+
 }
 
 struct RecipesTabRootView: View {
@@ -603,7 +604,6 @@ struct PantryTabRootView: View {
     @EnvironmentObject private var authVM: AuthViewModel
     @ObservedObject var assistant: CookingAssistant
     let onOpenGrocery: () -> Void
-    let onOpenRecipes: () -> Void
 
     @State private var availablePantries: [SimplePantrySpace] = []
     @State private var selectedPantryId: String? = nil
@@ -612,14 +612,6 @@ struct PantryTabRootView: View {
 
     private var currentPantry: SimplePantrySpace? {
         availablePantries.first(where: { $0.id == selectedPantryId })
-    }
-
-    private var pantryPreviewIngredients: [String] {
-        Array((currentPantry?.ingredients ?? []).prefix(6))
-    }
-
-    private var remainingIngredientCount: Int {
-        max(0, (currentPantry?.ingredients.count ?? 0) - pantryPreviewIngredients.count)
     }
 
     var body: some View {
@@ -632,21 +624,9 @@ struct PantryTabRootView: View {
                     if availablePantries.isEmpty {
                         pantryEmptyState
                     } else {
-                        pantrySelectionSection
-                        Button(action: { showVirtualPantry = true }) {
-                            Label("Manage Pantry", systemImage: "slider.horizontal.3")
-                                .font(.system(size: 15, weight: .bold, design: .rounded))
-                                .foregroundStyle(.white)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 15)
-                                .background(
-                                    LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
-                                )
-                                .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                        }
-                        .buttonStyle(.plain)
+                        pantryControlHeader
+                        pantrySection
                         grocerySection
-                        PantrySecondaryActionButton(title: "Need recipe ideas?", icon: "sparkles", action: onOpenRecipes)
                     }
                 }
                 .padding(.horizontal, 20)
@@ -727,46 +707,74 @@ struct PantryTabRootView: View {
         )
     }
 
-    private var pantrySelectionSection: some View {
+    private var pantryControlHeader: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("Choose your active pantry")
-                    .font(.system(size: 18, weight: .bold, design: .rounded))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Shopping From")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                    Text("Set the pantry ChefBuddy should use for pantry checks and grocery planning.")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
 
                 Spacer()
 
-                if availablePantries.count > 1 {
-                    Menu {
-                        ForEach(availablePantries) { pantry in
-                            Button {
-                                UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                selectedPantryId = pantry.id
-                            } label: {
-                                HStack {
-                                    Text("\(pantry.emoji) \(pantry.name)")
-                                    if pantry.id == selectedPantryId {
-                                        Image(systemName: "checkmark")
-                                    }
-                                }
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(currentPantry.map { "\($0.emoji) \($0.name)" } ?? "Select Pantry")
-                                .lineLimit(1)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 11, weight: .bold))
-                        }
+                pantryPickerMenu
+            }
+
+            if let pantry = currentPantry {
+                HStack(spacing: 8) {
+                    Label("Using \(pantry.emoji) \(pantry.name)", systemImage: "checkmark.circle.fill")
                         .font(.system(size: 12, weight: .bold, design: .rounded))
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.primary.opacity(0.07), in: Capsule())
-                    }
-                    .buttonStyle(.plain)
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Text("\(pantry.ingredients.count) items")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
                 }
             }
-            .padding(.horizontal, 4)
+        }
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
 
+    private var pantryPickerMenu: some View {
+        Menu {
+            ForEach(availablePantries) { pantry in
+                Button {
+                    UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                    selectedPantryId = pantry.id
+                } label: {
+                    HStack {
+                        Text("\(pantry.emoji) \(pantry.name)")
+                        if pantry.id == selectedPantryId {
+                            Image(systemName: "checkmark")
+                        }
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Text(currentPantry.map { "\($0.emoji) \($0.name)" } ?? "Select Pantry")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .fixedSize(horizontal: false, vertical: true)
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 11, weight: .bold))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(Color.primary.opacity(0.07), in: Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var pantrySection: some View {
+        Group {
             if let pantry = currentPantry {
                 activePantryCard(for: pantry)
             }
@@ -778,33 +786,33 @@ struct PantryTabRootView: View {
         let remaining = max(0, pantry.ingredients.count - previewIngredients.count)
 
         return VStack(alignment: .leading, spacing: 16) {
-            HStack(alignment: .top, spacing: 14) {
-                ZStack {
-                    Circle()
-                        .fill(Color.green.opacity(0.18))
-                        .frame(width: 52, height: 52)
-
-                    Text(pantry.emoji)
-                        .font(.system(size: 26))
-                }
-
+            HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(pantry.name)
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
+                    Text("Pantry Overview")
+                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                    Text("\(pantry.emoji) \(pantry.name)")
+                        .font(.system(size: 22, weight: .heavy, design: .rounded))
 
-                    Text("\(pantry.ingredients.count) ingredient\(pantry.ingredients.count == 1 ? "" : "s") ready")
+                    Text("\(pantry.ingredients.count) ingredient\(pantry.ingredients.count == 1 ? "" : "s") ready to compare against your recipes.")
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Spacer(minLength: 10)
 
-                Label("Active Pantry", systemImage: "checkmark.circle.fill")
-                    .font(.system(size: 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(.green)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.green.opacity(0.14), in: Capsule())
+                Button(action: { showVirtualPantry = true }) {
+                    Label("Open Pantry", systemImage: "slider.horizontal.3")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(
+                            LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing),
+                            in: Capsule()
+                        )
+                }
+                .buttonStyle(.plain)
             }
 
             if previewIngredients.isEmpty {
@@ -845,31 +853,54 @@ struct PantryTabRootView: View {
 
     private var grocerySection: some View {
         Button(action: onOpenGrocery) {
-            HStack(spacing: 14) {
-                ZStack {
-                    Circle()
-                        .fill(Color.orange.opacity(0.14))
-                        .frame(width: 52, height: 52)
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top, spacing: 12) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Grocery List")
+                            .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        Text("Open the list ChefBuddy builds from recipe gaps and pantry checks, then shop with the active pantry already in mind.")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .lineSpacing(3)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
 
-                    Image(systemName: "cart.fill")
-                        .font(.system(size: 20, weight: .bold))
-                        .foregroundStyle(.orange)
+                    Spacer(minLength: 10)
+
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .fill(Color.orange.opacity(0.14))
+                            .frame(width: 54, height: 54)
+
+                        Image(systemName: "cart.fill")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(.orange)
+                    }
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Grocery List")
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                    Text("Jump straight into what you still need and shop with the pantry context in mind.")
-                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                HStack(spacing: 10) {
+                    pantryUtilityPill(
+                        title: currentPantry.map { "\($0.emoji) \($0.name)" } ?? "No pantry",
+                        systemImage: "basket.fill",
+                        tint: .green
+                    )
+                    pantryUtilityPill(
+                        title: "Missing-item aware",
+                        systemImage: "checklist",
+                        tint: .orange
+                    )
+                }
+
+                HStack {
+                    Text("Review what is missing, mark items off, and move faster when it is time to shop.")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
-                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.secondary)
                 }
-
-                Spacer(minLength: 10)
-
-                Image(systemName: "arrow.up.right")
-                    .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(.secondary)
             }
             .padding(20)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
@@ -879,6 +910,15 @@ struct PantryTabRootView: View {
             )
         }
         .buttonStyle(.plain)
+    }
+
+    private func pantryUtilityPill(title: String, systemImage: String, tint: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(tint.opacity(0.12), in: Capsule())
     }
 
     private func startListening() {
@@ -944,7 +984,7 @@ struct PlanTabRootView: View {
 
 struct ProfileTabRootView: View {
     var body: some View {
-        ProfileSettingsView(showsDismissButton: false, showsSignOutButton: true)
+        ProfileHubView()
     }
 }
 
@@ -960,7 +1000,7 @@ private struct FloatingShellTabBar: View {
     ]
 
     var body: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 2) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 let isSelected = selectedTab == item.0
                 Button {
@@ -968,7 +1008,7 @@ private struct FloatingShellTabBar: View {
                         selectedTab = item.0
                     }
                 } label: {
-                    VStack(spacing: 4) {
+                    VStack(spacing: 3) {
                         ZStack {
                             if item.0 == .home && isSelected {
                                 Circle()
@@ -983,7 +1023,7 @@ private struct FloatingShellTabBar: View {
                             }
 
                             Image(systemName: item.1)
-                                .font(.system(size: item.0 == .home ? 15 : 13, weight: .bold))
+                                .font(.system(size: item.0 == .home ? 15 : 12, weight: .bold))
                                 .foregroundStyle(
                                     item.0 == .home && isSelected
                                     ? Color.white
@@ -993,16 +1033,19 @@ private struct FloatingShellTabBar: View {
                         .frame(height: 36)
 
                         Text(item.2)
-                            .font(.system(size: 10, weight: isSelected ? .bold : .semibold, design: .rounded))
+                            .font(.system(size: 9, weight: isSelected ? .bold : .semibold, design: .rounded))
                             .foregroundStyle(isSelected ? .primary : .secondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
                     }
                     .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)

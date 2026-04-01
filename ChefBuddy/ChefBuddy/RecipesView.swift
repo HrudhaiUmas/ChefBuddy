@@ -18,6 +18,7 @@ import FirebaseAuth
 import FirebaseFirestore
 import Combine
 import UIKit
+import PhotosUI
 
 
 // Embeds as a sub-document inside each Recipe. Stored separately from the
@@ -568,6 +569,18 @@ class RecipesViewModel: ObservableObject {
         }
         db.collection("users").document(userId).collection("recipes").document(id)
             .updateData(["cookedCount": newCount, "lastCookedAt": now])
+
+        Task {
+            await GrowthEngine.shared.logActivity(
+                userId: userId,
+                type: .recipeCooked,
+                eventKey: "recipe_cooked_\(id)_\(newCount)",
+                metadata: [
+                    "recipeId": id,
+                    "title": recipe.title
+                ]
+            )
+        }
     }
 
     // Replaces the entire recipe document so revised recipes (from the review
@@ -845,6 +858,20 @@ private struct DiscoveryPersonalizationContext {
     let snapshot: DiscoveryBehaviorSnapshot
 }
 
+private final class RecipeDiscoveryStore: ObservableObject {
+    static let shared = RecipeDiscoveryStore()
+
+    @Published var chefBuddyPickSuggestions: [RecipeSuggestion] = []
+    @Published var swipeDiscoveryDeck: [RecipeSuggestion] = []
+    @Published var swipeDiscoverySeenTitles: Set<String> = []
+    @Published var isLoadingChefBuddyPicks = false
+    @Published var isLoadingSwipeDiscoveryDeck = false
+    @Published var isToppingUpSwipeDiscoveryDeck = false
+    @Published var discoverySnapshot: DiscoveryBehaviorSnapshot = .empty
+
+    private init() {}
+}
+
 
 struct RecipesView: View {
     @EnvironmentObject var authVM: AuthViewModel
@@ -852,19 +879,14 @@ struct RecipesView: View {
     var savedRecipes: [Recipe] = []
     var onOpenLiveCookingPicker: () -> Void = {}
     @StateObject private var vm = RecipesViewModel()
+    @StateObject private var discoveryStore = RecipeDiscoveryStore.shared
 
     @State private var selectedRecipe: Recipe? = nil
     @State private var selectedSuggestionRecipe: Recipe? = nil
     @State private var showGenerateSheet = false
+    @State private var showCustomRecipeSheet = false
     @State private var showAllRecipesScreen = false
-    @State private var appeared = false
     @State private var recipeToReview: Recipe? = nil
-    @State private var chefBuddyPickSuggestions: [RecipeSuggestion] = []
-    @State private var swipeDiscoveryDeck: [RecipeSuggestion] = []
-    @State private var swipeDiscoverySeenTitles: Set<String> = []
-    @State private var isLoadingChefBuddyPicks = false
-    @State private var isLoadingSwipeDiscoveryDeck = false
-    @State private var isToppingUpSwipeDiscoveryDeck = false
     @State private var liveHelpRecipe: Recipe? = nil
     @State private var pantryIngredients: [String] = []
     @State private var pantryListener: ListenerRegistration? = nil
@@ -876,12 +898,41 @@ struct RecipesView: View {
     @State private var pantryIngredientSignatures: [String: String] = [:]
     @State private var selectedPantrySuggestionRecipe: Recipe? = nil
     @State private var infoSheet: RecipesInfoSheet? = nil
-    @State private var discoverySnapshot: DiscoveryBehaviorSnapshot = .empty
     @State private var showSwipeDiscovery = false
 
     private var userId: String { authVM.userSession?.uid ?? "" }
     private var budgetPreference: String {
         authVM.currentUserProfile?.budget ?? "💵 $$ (Standard)"
+    }
+
+    private var chefBuddyPickSuggestions: [RecipeSuggestion] {
+        get { discoveryStore.chefBuddyPickSuggestions }
+        nonmutating set { discoveryStore.chefBuddyPickSuggestions = newValue }
+    }
+
+    private var swipeDiscoveryDeck: [RecipeSuggestion] {
+        get { discoveryStore.swipeDiscoveryDeck }
+        nonmutating set { discoveryStore.swipeDiscoveryDeck = newValue }
+    }
+
+    private var isLoadingChefBuddyPicks: Bool {
+        get { discoveryStore.isLoadingChefBuddyPicks }
+        nonmutating set { discoveryStore.isLoadingChefBuddyPicks = newValue }
+    }
+
+    private var isLoadingSwipeDiscoveryDeck: Bool {
+        get { discoveryStore.isLoadingSwipeDiscoveryDeck }
+        nonmutating set { discoveryStore.isLoadingSwipeDiscoveryDeck = newValue }
+    }
+
+    private var isToppingUpSwipeDiscoveryDeck: Bool {
+        get { discoveryStore.isToppingUpSwipeDiscoveryDeck }
+        nonmutating set { discoveryStore.isToppingUpSwipeDiscoveryDeck = newValue }
+    }
+
+    private var discoverySnapshot: DiscoveryBehaviorSnapshot {
+        get { discoveryStore.discoverySnapshot }
+        nonmutating set { discoveryStore.discoverySnapshot = newValue }
     }
 
     private func timeString(_ seconds: Int) -> String {
@@ -1210,7 +1261,7 @@ struct RecipesView: View {
 
         if includeSwipeDeck {
             titles.append(contentsOf: swipeDiscoveryDeck.map(\.title))
-            titles.append(contentsOf: swipeDiscoverySeenTitles)
+            titles.append(contentsOf: discoveryStore.swipeDiscoverySeenTitles)
         }
 
         var seen: Set<String> = []
@@ -1245,7 +1296,7 @@ struct RecipesView: View {
 
     private func markSwipeDiscoveryTitlesSeen(_ suggestions: [RecipeSuggestion]) {
         for suggestion in suggestions {
-            swipeDiscoverySeenTitles.insert(normalizedSuggestionTitle(suggestion.title))
+            discoveryStore.swipeDiscoverySeenTitles.insert(normalizedSuggestionTitle(suggestion.title))
         }
     }
 
@@ -1306,7 +1357,7 @@ struct RecipesView: View {
             isLoadingSwipeDiscoveryDeck = true
             if force {
                 swipeDiscoveryDeck = []
-                swipeDiscoverySeenTitles = []
+                discoveryStore.swipeDiscoverySeenTitles = []
             }
         }
 
@@ -1609,6 +1660,14 @@ struct RecipesView: View {
 
         Task {
             await trackDiscoveryFeedback(suggestion, action: .saved)
+            await GrowthEngine.shared.logActivity(
+                userId: userId,
+                type: .swipeSave,
+                metadata: [
+                    "title": suggestion.title,
+                    "source": "chefbuddy_pick"
+                ]
+            )
             await refreshDiscoverySnapshot()
             await topUpChefBuddyPicksIfNeeded()
         }
@@ -1620,6 +1679,14 @@ struct RecipesView: View {
 
         Task {
             await trackDiscoveryFeedback(suggestion, action: .skipped)
+            await GrowthEngine.shared.logActivity(
+                userId: userId,
+                type: .swipeSkip,
+                metadata: [
+                    "title": suggestion.title,
+                    "source": "chefbuddy_pick"
+                ]
+            )
             await refreshDiscoverySnapshot()
             await topUpChefBuddyPicksIfNeeded()
         }
@@ -1640,6 +1707,14 @@ struct RecipesView: View {
 
         Task {
             await trackDiscoveryFeedback(suggestion, action: .saved)
+            await GrowthEngine.shared.logActivity(
+                userId: userId,
+                type: .swipeSave,
+                metadata: [
+                    "title": suggestion.title,
+                    "source": "swipe_discovery"
+                ]
+            )
             await refreshDiscoverySnapshot()
             await topUpSwipeDiscoveryDeckIfNeeded()
         }
@@ -1650,6 +1725,14 @@ struct RecipesView: View {
 
         Task {
             await trackDiscoveryFeedback(suggestion, action: .skipped)
+            await GrowthEngine.shared.logActivity(
+                userId: userId,
+                type: .swipeSkip,
+                metadata: [
+                    "title": suggestion.title,
+                    "source": "swipe_discovery"
+                ]
+            )
             await refreshDiscoverySnapshot()
             await topUpSwipeDiscoveryDeckIfNeeded()
         }
@@ -1709,21 +1792,19 @@ struct RecipesView: View {
             .onAppear {
                 vm.startListening(userId: userId)
                 startPantryListener()
-
-                withAnimation(.spring(response: 0.55, dampingFraction: 0.8).delay(0.05)) {
-                    appeared = true
-                }
             }
             .onDisappear {
                 vm.stopListening()
                 stopPantryListener()
             }
             .task {
-                if chefBuddyPickSuggestions.isEmpty {
-                    await loadChefBuddyPicks(force: true)
-                }
-                if swipeDiscoveryDeck.isEmpty {
-                    await loadSwipeDiscoveryDeck(force: true)
+                await withTaskGroup(of: Void.self) { group in
+                    if chefBuddyPickSuggestions.isEmpty {
+                        group.addTask { await loadChefBuddyPicks(force: true) }
+                    }
+                    if swipeDiscoveryDeck.isEmpty {
+                        group.addTask { await loadSwipeDiscoveryDeck(force: true) }
+                    }
                 }
             }
         .onChange(of: vm.justGeneratedRecipe) { recipe in
@@ -1753,23 +1834,43 @@ struct RecipesView: View {
                 selectedPantryId = pantrySpaces.first?.id
             }
         }
-        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("DiscoveryFeedbackDidReset"))) { _ in
+        .onReceive(NotificationCenter.default.publisher(for: .discoveryFeedbackDidReset)) { _ in
             Task {
                 await MainActor.run {
-                    swipeDiscoverySeenTitles.removeAll()
+                    discoveryStore.swipeDiscoverySeenTitles.removeAll()
                     swipeDiscoveryDeck.removeAll()
                     chefBuddyPickSuggestions.removeAll()
                     discoverySnapshot = .empty
                 }
                 await refreshDiscoverySnapshot()
-                await loadChefBuddyPicks(force: true)
-                await loadSwipeDiscoveryDeck(force: true)
+                await withTaskGroup(of: Void.self) { group in
+                    group.addTask { await loadChefBuddyPicks(force: true) }
+                    group.addTask { await loadSwipeDiscoveryDeck(force: true) }
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .activePantrySelectionDidChange)) { note in
+            let pantryId = note.userInfo?["pantryId"] as? String
+            guard pantryId != selectedPantryId else { return }
+            if let pantryId,
+               pantrySpaces.contains(where: { $0.id == pantryId }) {
+                selectedPantryId = pantryId
+            } else if pantryId == nil {
+                selectedPantryId = pantrySpaces.first?.id
             }
         }
         .sheet(isPresented: $showGenerateSheet) {
             GenerateRecipeSheet(vm: vm, assistant: assistant, userId: userId)
                 .presentationDetents([.fraction(0.6)])
                 .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showCustomRecipeSheet) {
+            RecipesCustomRecipeSheet(
+                assistant: assistant,
+                onSave: { recipe in
+                    vm.saveSuggestedRecipe(recipe, userId: userId, openAfterSave: false)
+                }
+            )
         }
         .sheet(item: $selectedRecipe) { recipe in
             RecipeDetailView(
@@ -1946,6 +2047,18 @@ struct RecipesView: View {
                     vm.updateRecipeAfterReview(cooked, userId: userId)
                     if let recipeId = cooked.id {
                         vm.saveReview(recipeId: recipeId, liked: Array(liked), likedNote: likedNote, improvement: improvement, userId: userId)
+                        Task {
+                            await GrowthEngine.shared.logActivity(
+                                userId: userId,
+                                type: .recipeCooked,
+                                eventKey: "recipe_cooked_review_\(recipeId)_\(cooked.cookedCount)",
+                                metadata: [
+                                    "recipeId": recipeId,
+                                    "title": cooked.title,
+                                    "source": "review"
+                                ]
+                            )
+                        }
                     }
                     recipeToReview = nil
                 }
@@ -1993,11 +2106,9 @@ struct RecipesView: View {
             ScrollView(showsIndicators: false) {
                 VStack(alignment: .leading, spacing: 18) {
                     headerView
-                    if vm.selectedFilter == "All" {
-                        pantryDiscoverySection
-                        suggestionsSection
-                        spotlightSection
-                    }
+                    pantryDiscoverySection
+                    suggestionsSection
+                    spotlightSection
                     filterBar
                     recipesGridSection
                 }
@@ -2050,7 +2161,6 @@ struct RecipesView: View {
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
         )
         .padding(.horizontal, 16)
-        .opacity(appeared ? 1 : 0)
     }
 
     private var headerView: some View {
@@ -2063,8 +2173,6 @@ struct RecipesView: View {
         )
         .padding(.horizontal, 20)
         .padding(.top, 24)
-        .opacity(appeared ? 1 : 0)
-        .offset(y: appeared ? 0 : -10)
     }
 
     private var pantryDiscoverySection: some View {
@@ -2219,24 +2327,59 @@ struct RecipesView: View {
                 )
                 .padding(.horizontal, 16)
             }
-
-            SwipeDiscoveryEntryCard(
-                pills: discoverySnapshot.highlightPills,
-                readyCount: swipeDiscoveryDeck.count,
-                isLoading: isLoadingSwipeDiscoveryDeck && swipeDiscoveryDeck.isEmpty,
-                onTap: openSwipeDiscovery
-            )
-            .padding(.horizontal, 16)
         }
         .padding(.top, 10)
     }
 
     private var spotlightSection: some View {
-        GenerateRecipeSpotlightCard(
-            onTap: { showGenerateSheet = true },
-            isGenerating: vm.isGenerating,
-            step: vm.elapsedSeconds
-        )
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Create & Discover")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .padding(.horizontal, 4)
+
+            VStack(spacing: 12) {
+                FeaturedRecipeActionCard(
+                    title: "Generate Any Recipe",
+                    subtitle: "Describe a craving, dish, or cuisine and ChefBuddy will build a full recipe from scratch.",
+                    icon: "wand.and.stars",
+                    tint: [.orange, .green.opacity(0.85)],
+                    statusText: vm.isGenerating ? "ChefBuddy is cooking" : "Main creation flow",
+                    footnote: vm.isGenerating ? "Your recipe is building right now." : "Best for specific cravings, dishes, and weeknight what-ifs.",
+                    actionLabel: vm.isGenerating ? "Generating..." : "Create Recipe",
+                    isLoading: vm.isGenerating,
+                    loadingStep: vm.elapsedSeconds
+                ) {
+                    showGenerateSheet = true
+                }
+
+                HStack(spacing: 12) {
+                    SupportingRecipeActionCard(
+                        title: "Swipe Discovery",
+                        subtitle: "Teach ChefBuddy your taste fast.",
+                        icon: "rectangle.stack.badge.person.crop",
+                        tint: [.orange, .green.opacity(0.84)],
+                        badgeText: isLoadingSwipeDiscoveryDeck && swipeDiscoveryDeck.isEmpty ? "Building deck" : "\(max(swipeDiscoveryDeck.count, 10)) ready",
+                        helperText: discoverySnapshot.highlightPills.prefix(2).joined(separator: " • "),
+                        isLoading: isLoadingSwipeDiscoveryDeck && swipeDiscoveryDeck.isEmpty,
+                        loadingStep: vm.elapsedSeconds
+                    ) {
+                        openSwipeDiscovery()
+                    }
+
+                    SupportingRecipeActionCard(
+                        title: "Create Custom Recipe",
+                        subtitle: "Turn your own idea into a saved card.",
+                        icon: "square.and.pencil",
+                        tint: [Color(red: 0.39, green: 0.43, blue: 0.96), Color(red: 0.23, green: 0.68, blue: 0.90)],
+                        badgeText: "Recipe Studio",
+                        helperText: "Great for family recipes and meal-prep staples."
+                    ) {
+                        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                        showCustomRecipeSheet = true
+                    }
+                }
+            }
+        }
         .padding(.horizontal, 16)
     }
 
@@ -2511,6 +2654,219 @@ struct RecipeCardButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.97 : 1.0)
             .animation(.spring(response: 0.22, dampingFraction: 0.75), value: configuration.isPressed)
+    }
+}
+
+private struct FeaturedRecipeActionCard: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let tint: [Color]
+    let statusText: String
+    let footnote: String
+    let actionLabel: String
+    var isLoading: Bool = false
+    var loadingStep: Int = 0
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            action()
+        }) {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [tint.first?.opacity(0.22) ?? .orange.opacity(0.22), tint.last?.opacity(0.18) ?? .green.opacity(0.18)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 58, height: 58)
+
+                        Image(systemName: icon)
+                            .font(.system(size: 22, weight: .bold))
+                            .foregroundStyle(tint.first ?? .orange)
+                    }
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Main Action")
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(tint.first ?? .orange)
+                        Text(title)
+                            .font(.system(size: 22, weight: .heavy, design: .rounded))
+                            .foregroundStyle(.primary)
+                        Text(subtitle)
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 0)
+                }
+
+                HStack(spacing: 8) {
+                    if isLoading {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(tint.first ?? .orange)
+                    }
+
+                    Text(statusText)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(tint.first ?? .orange)
+
+                    if isLoading {
+                        RecipeBouncingDotsView(step: loadingStep, color: tint.first ?? .orange)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color.primary.opacity(0.06), in: Capsule())
+
+                Text(footnote)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                HStack {
+                    Text(actionLabel)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.white.opacity(0.92))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(
+                    LinearGradient(
+                        colors: tint,
+                        startPoint: .leading,
+                        endPoint: .trailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                )
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.05), tint.last?.opacity(0.10) ?? Color.green.opacity(0.10)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 26, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 26, style: .continuous)
+                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .disabled(isLoading && title == "Generate Any Recipe")
+    }
+}
+
+private struct SupportingRecipeActionCard: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let tint: [Color]
+    let badgeText: String
+    let helperText: String
+    var isLoading: Bool = false
+    var loadingStep: Int = 0
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            action()
+        }) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .top) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [tint.first?.opacity(0.22) ?? .orange.opacity(0.22), tint.last?.opacity(0.18) ?? .green.opacity(0.18)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 46, height: 46)
+
+                        Image(systemName: icon)
+                            .font(.system(size: 18, weight: .bold))
+                            .foregroundStyle(tint.first ?? .orange)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    HStack(spacing: 6) {
+                        if isLoading {
+                            ProgressView()
+                                .controlSize(.small)
+                                .tint(tint.first ?? .orange)
+                        }
+
+                        Text(badgeText)
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(tint.first ?? .orange)
+
+                        if isLoading {
+                            RecipeBouncingDotsView(step: loadingStep, color: tint.first ?? .orange)
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 8)
+                    .background(Color.primary.opacity(0.06), in: Capsule())
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(title)
+                        .font(.system(size: 17, weight: .heavy, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 0)
+
+                HStack(spacing: 8) {
+                    Text(helperText.isEmpty ? "Open" : helperText)
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.system(size: 12, weight: .bold))
+                        .foregroundStyle(tint.first ?? .orange)
+                }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, minHeight: 192, alignment: .topLeading)
+            .background(
+                LinearGradient(
+                    colors: [Color.white.opacity(0.04), tint.last?.opacity(0.10) ?? Color.green.opacity(0.10)],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -2914,58 +3270,54 @@ private struct SwipeDiscoveryLoadingSection: View {
     @State private var timer: Timer?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 14) {
                 ZStack {
                     Circle()
                         .fill(
                             LinearGradient(
-                                colors: [Color.orange.opacity(0.22), Color.green.opacity(0.18)],
+                                colors: [Color.orange.opacity(0.24), Color.green.opacity(0.22)],
                                 startPoint: .topLeading,
                                 endPoint: .bottomTrailing
                             )
                         )
-                        .frame(width: 54, height: 54)
+                        .frame(width: 62, height: 62)
 
-                    Text("🍜")
-                        .font(.system(size: 28))
-                        .scaleEffect(animationStep.isMultiple(of: 2) ? 1.0 : 1.08)
-                        .animation(.spring(response: 0.35, dampingFraction: 0.7), value: animationStep)
+                    Circle()
+                        .stroke(Color.white.opacity(0.16), lineWidth: 1.2)
+                        .frame(width: 74, height: 74)
+                        .scaleEffect(animationStep.isMultiple(of: 2) ? 0.98 : 1.04)
+
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 22, weight: .bold))
+                        .foregroundStyle(.white)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("Shuffling your discovery deck...")
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                    Text("Building your discovery deck")
+                        .font(.system(size: 18, weight: .heavy, design: .rounded))
 
-                    Text("ChefBuddy is lining up some familiar wins and a couple fresh cuisines too.")
+                    Text("ChefBuddy is mixing comfort picks with a few fresh cuisines so the stack feels personal without getting repetitive.")
                         .font(.system(size: 13, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
-                        .lineSpacing(3)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    HStack(spacing: 6) {
-                        Text("Building picks")
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                            .foregroundStyle(.secondary)
-                        RecipeBouncingDotsView(step: animationStep, color: .orange)
+                    HStack(spacing: 8) {
+                        loadingStatusPill(text: "Fresh mix", color: .orange)
+                        loadingStatusPill(text: "Taste-aware", color: .green)
+                        loadingStatusPill(text: "Fast refill", color: .blue)
                     }
                 }
             }
 
-            ZStack {
-                RoundedRectangle(cornerRadius: 30, style: .continuous)
-                    .fill(Color.white.opacity(0.03))
-                    .frame(height: 186)
-
-                VStack(spacing: 0) {
-                    loadingGhostCard(widthInset: 106, height: 96, yOffset: 10, tilt: -6)
-                    loadingGhostCard(widthInset: 72, height: 108, yOffset: 3, tilt: 4)
-                    loadingCenterCard(step: animationStep)
-                }
-                .padding(.top, 2)
+            VStack(spacing: 12) {
+                loadingPreviewCard(height: 74, widthInset: 88, tilt: -7, opacity: 0.08)
+                loadingPreviewCard(height: 90, widthInset: 46, tilt: 5, opacity: 0.10)
+                loadingPrimaryPreview(step: animationStep)
             }
+            .padding(.top, 8)
         }
-        .padding(.horizontal, 8)
+        .padding(.horizontal, 6)
         .onAppear {
             timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { _ in
                 animationStep += 1
@@ -2976,21 +3328,34 @@ private struct SwipeDiscoveryLoadingSection: View {
         }
     }
 
-    private func loadingGhostCard(widthInset: CGFloat, height: CGFloat, yOffset: CGFloat, tilt: Double) -> some View {
+    private func loadingStatusPill(text: String, color: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(color.opacity(0.95))
+                .frame(width: 7, height: 7)
+            Text(text)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.primary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.white.opacity(0.05), in: Capsule())
+    }
+
+    private func loadingPreviewCard(height: CGFloat, widthInset: CGFloat, tilt: Double, opacity: Double) -> some View {
         RoundedRectangle(cornerRadius: 28, style: .continuous)
-            .fill(Color.white.opacity(0.05))
+            .fill(Color.white.opacity(opacity))
             .overlay(
                 RoundedRectangle(cornerRadius: 28, style: .continuous)
-                    .stroke(Color.white.opacity(0.05), lineWidth: 1)
+                    .stroke(Color.white.opacity(0.06), lineWidth: 1)
             )
             .frame(maxWidth: .infinity)
             .frame(height: height)
             .padding(.horizontal, widthInset)
             .rotationEffect(.degrees(tilt))
-            .offset(y: yOffset)
     }
 
-    private func loadingCenterCard(step: Int) -> some View {
+    private func loadingPrimaryPreview(step: Int) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 14) {
                 ZStack {
@@ -3009,18 +3374,17 @@ private struct SwipeDiscoveryLoadingSection: View {
                         .animation(.spring(response: 0.35, dampingFraction: 0.72), value: step)
                 }
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Dealing your next plate")
+                    VStack(alignment: .leading, spacing: 6) {
+                    Text("Your next plate is almost ready")
                         .font(.system(size: 16, weight: .heavy, design: .rounded))
                         .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.85)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                    Text("Fresh favorites and a few new cuisines are already sliding into place.")
+                    Text("The deck stays loaded while you browse, so once this stack lands you can keep swiping without waiting.")
                         .font(.system(size: 11, weight: .semibold, design: .rounded))
                         .foregroundStyle(.white.opacity(0.88))
                         .lineSpacing(2)
-                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -3033,7 +3397,7 @@ private struct SwipeDiscoveryLoadingSection: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
         .frame(maxWidth: .infinity)
-        .frame(height: 124)
+        .frame(height: 138)
         .background(
             ZStack {
                 RoundedRectangle(cornerRadius: 30, style: .continuous)
@@ -3053,20 +3417,7 @@ private struct SwipeDiscoveryLoadingSection: View {
             RoundedRectangle(cornerRadius: 30, style: .continuous)
                 .stroke(Color.white.opacity(0.12), lineWidth: 1)
         )
-        .padding(.horizontal, 40)
-    }
-
-    private func loadingPill(icon: String, title: String) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 11, weight: .bold))
-            Text(title)
-                .font(.system(size: 11, weight: .bold, design: .rounded))
-        }
-        .foregroundStyle(.white)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(Color.white.opacity(0.12), in: Capsule())
+        .padding(.horizontal, 34)
     }
 
     private func loadingMetric(title: String, accent: Color) -> some View {
@@ -4439,6 +4790,18 @@ struct AllRecipesView: View {
                         vm.updateRecipeAfterReview(cooked, userId: userId)
                         if let recipeId = cooked.id {
                             vm.saveReview(recipeId: recipeId, liked: Array(liked), likedNote: likedNote, improvement: improvement, userId: userId)
+                            Task {
+                                await GrowthEngine.shared.logActivity(
+                                    userId: userId,
+                                    type: .recipeCooked,
+                                    eventKey: "recipe_cooked_library_review_\(recipeId)_\(cooked.cookedCount)",
+                                    metadata: [
+                                        "recipeId": recipeId,
+                                        "title": cooked.title,
+                                        "source": "library_review"
+                                    ]
+                                )
+                            }
                         }
                         recipeToReview = nil
                     }
@@ -4453,6 +4816,906 @@ struct AllRecipesView: View {
     }
 }
 
+
+private struct LibraryCustomRecipeDraft {
+    var title: String = ""
+    var emoji: String = "🍽️"
+    var description: String = ""
+    var difficulty: String = "Easy"
+    var tagsText: String = "Custom"
+    var prepMinutes: Int = 25
+    var servings: Int = 2
+    var calories: Int = 420
+    var carbs: Int = 40
+    var protein: Int = 25
+    var fat: Int = 15
+    var sodium: Int = 520
+    var ingredients: [String] = [""]
+    var steps: [String] = [""]
+    var autoPolishWithAI: Bool = true
+}
+
+struct RecipesCustomRecipeSheet: View {
+    @ObservedObject var assistant: CookingAssistant
+    let onSave: (Recipe) -> Void
+
+    @State private var draft = LibraryCustomRecipeDraft()
+    @State private var selectedPhotoItem: PhotosPickerItem? = nil
+    @State private var selectedPhotoImage: UIImage? = nil
+    @State private var isGeneratingWithAI = false
+    @State private var isSaving = false
+    @Environment(\.dismiss) private var dismiss
+
+    private var nutritionColumns: [GridItem] {
+        [
+            GridItem(.flexible(), spacing: 12),
+            GridItem(.flexible(), spacing: 12)
+        ]
+    }
+
+    private var canSave: Bool {
+        let titleOk = !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let ingredientsOk = draft.ingredients.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let stepsOk = draft.steps.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return titleOk && ingredientsOk && stepsOk
+    }
+
+    private var canAIFill: Bool {
+        let titleOk = !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        return !isGeneratingWithAI && (titleOk || selectedPhotoImage != nil)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ChefBuddyBackground()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        customRecipeHeader
+
+                        customRecipeSectionCard(
+                            title: "Reference Photo",
+                            subtitle: "Optional, but useful when you want ChefBuddy to infer the dish from plating, ingredients, and portion size."
+                        ) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                if let selectedPhotoImage {
+                                    ZStack(alignment: .bottomLeading) {
+                                        Image(uiImage: selectedPhotoImage)
+                                            .resizable()
+                                            .scaledToFill()
+                                            .frame(height: 188)
+                                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                                        LinearGradient(
+                                            colors: [.black.opacity(0.62), .clear],
+                                            startPoint: .bottom,
+                                            endPoint: .center
+                                        )
+                                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text("Image attached")
+                                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                                .foregroundStyle(.white.opacity(0.88))
+                                            Text("AI can inspect the dish and fill likely ingredients, nutrition, and prep flow.")
+                                                .font(.system(size: 13, weight: .medium, design: .rounded))
+                                                .foregroundStyle(.white)
+                                        }
+                                        .padding(14)
+                                    }
+                                } else {
+                                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                        .fill(Color.primary.opacity(0.06))
+                                        .frame(height: 160)
+                                        .overlay {
+                                            VStack(spacing: 10) {
+                                                Image(systemName: "photo.on.rectangle.angled")
+                                                    .font(.system(size: 26, weight: .semibold))
+                                                    .foregroundStyle(.secondary)
+                                                Text("Add a photo to help ChefBuddy infer the dish")
+                                                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                                                Text("Upload plated food, ingredients, or handwritten notes and ChefBuddy will build the draft around it.")
+                                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                                    .foregroundStyle(.secondary)
+                                                    .multilineTextAlignment(.center)
+                                                    .padding(.horizontal, 18)
+                                            }
+                                        }
+                                }
+
+                                HStack(spacing: 10) {
+                                    PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                                        Label(selectedPhotoImage == nil ? "Upload Reference" : "Change Photo", systemImage: "photo.badge.plus")
+                                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                                            .foregroundStyle(.primary)
+                                            .padding(.horizontal, 14)
+                                            .padding(.vertical, 11)
+                                            .background(Color.primary.opacity(0.08), in: Capsule())
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    if selectedPhotoImage != nil {
+                                        Button {
+                                            selectedPhotoItem = nil
+                                            selectedPhotoImage = nil
+                                        } label: {
+                                            Label("Remove", systemImage: "trash")
+                                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                                                .foregroundStyle(.secondary)
+                                                .padding(.horizontal, 14)
+                                                .padding(.vertical, 11)
+                                                .background(Color.primary.opacity(0.05), in: Capsule())
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+
+                                    Spacer(minLength: 0)
+
+                                    Button(action: aiFillFromTitleOrPhoto) {
+                                        HStack(spacing: 8) {
+                                            if isGeneratingWithAI {
+                                                ProgressView()
+                                                    .controlSize(.small)
+                                                    .tint(.white)
+                                            } else {
+                                                Image(systemName: "sparkles.rectangle.stack.fill")
+                                            }
+                                            Text(isGeneratingWithAI ? "Filling..." : "AI Fill")
+                                        }
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.white)
+                                        .padding(.horizontal, 15)
+                                        .padding(.vertical, 11)
+                                        .background(
+                                            LinearGradient(colors: [.orange, .green.opacity(0.86)], startPoint: .leading, endPoint: .trailing),
+                                            in: Capsule()
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(!canAIFill)
+                                    .opacity(canAIFill ? 1 : 0.62)
+                                }
+
+                                Text(canAIFill
+                                     ? "ChefBuddy can infer the title, fill ingredients, tighten the cooking steps, and estimate nutrition from your current draft plus the image."
+                                     : "Type a recipe title or upload a reference photo to unlock AI Fill.")
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        customRecipeSectionCard(
+                            title: "Recipe Basics",
+                            subtitle: "Give the dish a clean title and a short card description. ChefBuddy will refine the rest."
+                        ) {
+                            VStack(alignment: .leading, spacing: 14) {
+                                labeledInput(title: "Title", prompt: "Example: Lemon Garlic Salmon Bowl") {
+                                    TextField("", text: $draft.title, prompt: Text("Example: Lemon Garlic Salmon Bowl").foregroundStyle(.secondary))
+                                        .textInputAutocapitalization(.words)
+                                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 14)
+                                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                }
+
+                                labeledInput(title: "Description", prompt: "A one-line summary for the recipe card") {
+                                    TextField(
+                                        "",
+                                        text: $draft.description,
+                                        prompt: Text("A one-line summary for the recipe card").foregroundStyle(.secondary),
+                                        axis: .vertical
+                                    )
+                                    .lineLimit(2...4)
+                                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 14)
+                                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                }
+
+                                labeledInput(title: "Cuisine & Tags", prompt: "Indian, High Protein, Weeknight") {
+                                    TextField("", text: $draft.tagsText, prompt: Text("Indian, High Protein, Weeknight").foregroundStyle(.secondary))
+                                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                                        .padding(.horizontal, 14)
+                                        .padding(.vertical, 14)
+                                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                }
+                            }
+                        }
+
+                        customRecipeSectionCard(
+                            title: "Cooking Setup",
+                            subtitle: "Control the runtime details that show up on the recipe card."
+                        ) {
+                            VStack(spacing: 12) {
+                                HStack(spacing: 12) {
+                                    metricStepperCard(
+                                        title: "Prep Time",
+                                        systemImage: "clock.fill",
+                                        valueText: "\(draft.prepMinutes) mins",
+                                        onDecrement: { draft.prepMinutes = max(5, draft.prepMinutes - 5) },
+                                        onIncrement: { draft.prepMinutes = min(240, draft.prepMinutes + 5) }
+                                    )
+
+                                    metricStepperCard(
+                                        title: "Servings",
+                                        systemImage: "person.2.fill",
+                                        valueText: "\(draft.servings) people",
+                                        onDecrement: { draft.servings = max(1, draft.servings - 1) },
+                                        onIncrement: { draft.servings = min(12, draft.servings + 1) }
+                                    )
+                                }
+
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text("Difficulty")
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.secondary)
+
+                                    HStack(spacing: 10) {
+                                        difficultyButton(title: "Easy", color: .green)
+                                        difficultyButton(title: "Medium", color: .orange)
+                                        difficultyButton(title: "Hard", color: .red)
+                                    }
+                                }
+                            }
+                        }
+
+                        customRecipeSectionCard(
+                            title: "Nutrition Per Serving",
+                            subtitle: "Enter the numbers you want saved on the recipe card. ChefBuddy can overwrite these when AI Fill is used."
+                        ) {
+                            VStack(spacing: 14) {
+                                HStack(alignment: .top, spacing: 14) {
+                                    recipeMacroBalanceCard
+
+                                    VStack(alignment: .leading, spacing: 8) {
+                                        Text("Macro balance")
+                                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                        macroProgressRow(title: "Protein", value: draft.protein, color: .green)
+                                        macroProgressRow(title: "Carbs", value: draft.carbs, color: .blue)
+                                        macroProgressRow(title: "Fat", value: draft.fat, color: .pink)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }
+
+                                LazyVGrid(columns: nutritionColumns, spacing: 12) {
+                                    nutritionFieldCard(title: "Calories", unit: "kcal", value: $draft.calories, step: 10, maxValue: 3000, color: .orange)
+                                    nutritionFieldCard(title: "Carbs", unit: "g", value: $draft.carbs, step: 1, maxValue: 600, color: .blue)
+                                    nutritionFieldCard(title: "Protein", unit: "g", value: $draft.protein, step: 1, maxValue: 600, color: .green)
+                                    nutritionFieldCard(title: "Fat", unit: "g", value: $draft.fat, step: 1, maxValue: 400, color: .pink)
+                                    nutritionFieldCard(title: "Sodium", unit: "mg", value: $draft.sodium, step: 10, maxValue: 6000, color: .purple)
+                                }
+                            }
+                        }
+
+                        customRecipeSectionCard(
+                            title: "Ingredients",
+                            subtitle: "Add measured ingredients one by one so ChefBuddy can keep quantities clean."
+                        ) {
+                            editorRowsSection(
+                                rows: $draft.ingredients,
+                                placeholder: "1 cup diced onions",
+                                multiline: false,
+                                addLabel: "Add Ingredient"
+                            )
+                        }
+
+                        customRecipeSectionCard(
+                            title: "Method",
+                            subtitle: "Write each step in order so live cooking can guide it clearly later."
+                        ) {
+                            editorRowsSection(
+                                rows: $draft.steps,
+                                placeholder: "Heat 1 tbsp oil over medium heat and sauté the onions until soft.",
+                                multiline: true,
+                                addLabel: "Add Step"
+                            )
+                        }
+
+                        customRecipeSectionCard(
+                            title: "Save Settings",
+                            subtitle: "Before saving, ChefBuddy can normalize the language, add missing transitions, and clean up ingredient quantities."
+                        ) {
+                            HStack(spacing: 12) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        .fill(Color.orange.opacity(0.12))
+                                        .frame(width: 48, height: 48)
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 18, weight: .bold))
+                                        .foregroundStyle(.orange)
+                                }
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("AI polish before save")
+                                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    Text(draft.autoPolishWithAI
+                                         ? "Enabled — ChefBuddy will tighten the writing before it becomes a saved recipe card."
+                                         : "Disabled — your exact draft will be saved as-is.")
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                Spacer(minLength: 12)
+
+                                Toggle("", isOn: $draft.autoPolishWithAI)
+                                    .labelsHidden()
+                            }
+                            .padding(14)
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+
+                        Button(action: saveRecipe) {
+                            HStack(spacing: 10) {
+                                if isSaving {
+                                    ProgressView()
+                                        .tint(.white)
+                                } else {
+                                    Image(systemName: "tray.and.arrow.down.fill")
+                                }
+                                Text(isSaving ? "Saving..." : "Save Custom Recipe")
+                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                            }
+                            .foregroundStyle(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .background(
+                                LinearGradient(colors: [.orange, .green.opacity(0.86)], startPoint: .leading, endPoint: .trailing),
+                                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            )
+                            .shadow(color: .orange.opacity(0.18), radius: 18, y: 10)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(!canSave || isSaving)
+                        .opacity((canSave && !isSaving) ? 1 : 0.72)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 10)
+                    .padding(.bottom, 36)
+                }
+            }
+            .navigationTitle("Custom Recipe")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") { dismiss() }
+                }
+            }
+        }
+        .onChange(of: selectedPhotoItem) { _ in
+            Task { await loadSelectedPhoto() }
+        }
+    }
+
+    private var customRecipeHeader: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Recipe Studio")
+                .font(.system(size: 30, weight: .heavy, design: .rounded))
+            Text("Create a polished recipe card for your library. Use a title, a reference image, or both, and let ChefBuddy help shape the final version.")
+                .font(.system(size: 14, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                headerPill(text: "Library-ready", systemImage: "square.stack.3d.up.fill")
+                headerPill(text: "Image-aware AI", systemImage: "photo.badge.sparkles")
+                headerPill(text: "Step-by-step", systemImage: "list.number")
+            }
+        }
+        .padding(20)
+        .background(.ultraThinMaterial.opacity(0.95), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private func headerPill(text: String, systemImage: String) -> some View {
+        Label(text, systemImage: systemImage)
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(Color.primary.opacity(0.06), in: Capsule())
+    }
+
+    private func customRecipeSectionCard<Content: View>(
+        title: String,
+        subtitle: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                Text(subtitle)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+
+            content()
+        }
+        .padding(18)
+        .background(.ultraThinMaterial.opacity(0.95), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private func labeledInput<Content: View>(
+        title: String,
+        prompt: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+            content()
+        }
+    }
+
+    private func metricStepperCard(
+        title: String,
+        systemImage: String,
+        valueText: String,
+        onDecrement: @escaping () -> Void,
+        onIncrement: @escaping () -> Void
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            Text(valueText)
+                .font(.system(size: 22, weight: .heavy, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+
+            HStack(spacing: 10) {
+                stepperControl(systemImage: "minus", action: onDecrement)
+                stepperControl(systemImage: "plus", action: onIncrement)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func stepperControl(systemImage: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .black))
+                .foregroundStyle(.primary)
+                .frame(maxWidth: .infinity)
+                .frame(height: 38)
+                .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func difficultyButton(title: String, color: Color) -> some View {
+        let isSelected = draft.difficulty == title
+        return Button {
+            draft.difficulty = title
+        } label: {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(color)
+                    .frame(width: 8, height: 8)
+                Text(title)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+            }
+            .foregroundStyle(isSelected ? .white : .primary)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+            .background(
+                isSelected
+                ? AnyShapeStyle(LinearGradient(colors: [.orange, .green.opacity(0.82)], startPoint: .leading, endPoint: .trailing))
+                : AnyShapeStyle(Color.primary.opacity(0.06))
+            , in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var recipeMacroBalanceCard: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Macro focus")
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            ZStack {
+                Circle()
+                    .stroke(Color.primary.opacity(0.08), lineWidth: 16)
+
+                Circle()
+                    .trim(from: 0, to: CGFloat(Double(draft.protein) / max(1, Double(draft.protein + draft.carbs + draft.fat))))
+                    .stroke(Color.green, style: StrokeStyle(lineWidth: 16, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+
+                Circle()
+                    .trim(
+                        from: CGFloat(Double(draft.protein) / max(1, Double(draft.protein + draft.carbs + draft.fat))),
+                        to: CGFloat(Double(draft.protein + draft.carbs) / max(1, Double(draft.protein + draft.carbs + draft.fat)))
+                    )
+                    .stroke(Color.blue, style: StrokeStyle(lineWidth: 16, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+
+                Circle()
+                    .trim(
+                        from: CGFloat(Double(draft.protein + draft.carbs) / max(1, Double(draft.protein + draft.carbs + draft.fat))),
+                        to: 1
+                    )
+                    .stroke(Color.pink, style: StrokeStyle(lineWidth: 16, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+
+                VStack(spacing: 3) {
+                    Text("\(draft.calories)")
+                        .font(.system(size: 22, weight: .heavy, design: .rounded))
+                    Text("kcal")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: 126, height: 126)
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func macroProgressRow(title: String, value: Int, color: Color) -> some View {
+        let maxValue = max(1.0, Double(draft.protein + draft.carbs + draft.fat))
+        let progress = min(1.0, Double(value) / maxValue)
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(value)g")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+            }
+
+            GeometryReader { proxy in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Color.primary.opacity(0.08))
+                    Capsule()
+                        .fill(color)
+                        .frame(width: proxy.size.width * progress)
+                }
+            }
+            .frame(height: 8)
+        }
+    }
+
+    private func nutritionFieldCard(
+        title: String,
+        unit: String,
+        value: Binding<Int>,
+        step: Int,
+        maxValue: Int,
+        color: Color
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                Spacer()
+                Text(unit)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+
+            TextField(
+                "",
+                value: Binding(
+                    get: { value.wrappedValue },
+                    set: { value.wrappedValue = max(0, min($0, maxValue)) }
+                ),
+                format: .number
+            )
+            .keyboardType(.numberPad)
+            .font(.system(size: 24, weight: .heavy, design: .rounded))
+            .foregroundStyle(color)
+
+            HStack(spacing: 10) {
+                stepperControl(systemImage: "minus", action: {
+                    value.wrappedValue = max(0, value.wrappedValue - step)
+                })
+                stepperControl(systemImage: "plus", action: {
+                    value.wrappedValue = min(maxValue, value.wrappedValue + step)
+                })
+            }
+        }
+        .padding(14)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func editorRowsSection(
+        rows: Binding<[String]>,
+        placeholder: String,
+        multiline: Bool,
+        addLabel: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                rows.wrappedValue.append("")
+            } label: {
+                Label(addLabel, systemImage: "plus")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.primary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
+                    .background(Color.primary.opacity(0.08), in: Capsule())
+            }
+            .buttonStyle(.plain)
+
+            ForEach(Array(rows.wrappedValue.enumerated()), id: \.offset) { index, _ in
+                HStack(alignment: .top, spacing: 10) {
+                    Text("\(index + 1)")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .background(Color.primary.opacity(0.08), in: Circle())
+
+                    Group {
+                        if multiline {
+                            TextField(
+                                "",
+                                text: Binding(
+                                    get: { rows.wrappedValue[index] },
+                                    set: { rows.wrappedValue[index] = $0 }
+                                ),
+                                prompt: Text(placeholder).foregroundStyle(.secondary),
+                                axis: .vertical
+                            )
+                            .lineLimit(2...5)
+                        } else {
+                            TextField(
+                                "",
+                                text: Binding(
+                                    get: { rows.wrappedValue[index] },
+                                    set: { rows.wrappedValue[index] = $0 }
+                                ),
+                                prompt: Text(placeholder).foregroundStyle(.secondary)
+                            )
+                        }
+                    }
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 13)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+
+                    Button {
+                        guard rows.wrappedValue.count > 1 else { return }
+                        rows.wrappedValue.remove(at: index)
+                    } label: {
+                        Image(systemName: "minus")
+                            .font(.system(size: 12, weight: .black))
+                            .foregroundStyle(rows.wrappedValue.count > 1 ? Color.primary : Color.secondary.opacity(0.4))
+                            .frame(width: 28, height: 28)
+                            .background(Color.primary.opacity(0.06), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(rows.wrappedValue.count <= 1)
+                }
+            }
+        }
+    }
+
+    private func aiFillFromTitleOrPhoto() {
+        let title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasPhoto = selectedPhotoImage != nil
+        guard (!title.isEmpty || hasPhoto), !isGeneratingWithAI else { return }
+
+        isGeneratingWithAI = true
+        Task {
+            do {
+                let prompt = """
+                Build a polished recipe draft from the user's title, existing notes, and optional image.
+                If an image is provided, inspect it carefully and infer visible ingredients, likely cuisine, cooking method, plating style, and portion size.
+                If no title is provided, infer a concise menu-style title from the image.
+                Use realistic quantities, keep the description to one short sentence, and return 4 to 7 coherent cooking steps.
+                Return ONLY valid JSON:
+                {
+                  "title": "recipe title",
+                  "description": "short description",
+                  "prepMinutes": 25,
+                  "servings": 2,
+                  "difficulty": "Easy|Medium|Hard",
+                  "tags": ["Indian", "High Protein"],
+                  "calories": 420,
+                  "carbs": 40,
+                  "protein": 26,
+                  "fat": 14,
+                  "sodium": 520,
+                  "ingredients": ["1 cup ...", "..."],
+                  "steps": ["Step 1...", "Step 2..."]
+                }
+                Existing title: \(title.isEmpty ? "none provided" : title)
+                Existing description: \(draft.description)
+                Existing tags: \(draft.tagsText)
+                Existing ingredients: \(draft.ingredients.joined(separator: " | "))
+                Existing steps: \(draft.steps.joined(separator: " | "))
+                """
+
+                let raw: String
+                if let selectedPhotoImage {
+                    raw = try await assistant.getLiveHelp(image: selectedPhotoImage, question: prompt)
+                } else {
+                    raw = try await assistant.getHelp(question: prompt)
+                }
+
+                guard let json = extractJSONObject(from: raw),
+                      let data = json.data(using: .utf8),
+                      let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                    await MainActor.run { isGeneratingWithAI = false }
+                    return
+                }
+
+                await MainActor.run {
+                    if let generatedTitle = object["title"] as? String,
+                       !generatedTitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        draft.title = generatedTitle
+                    }
+                    draft.description = (object["description"] as? String) ?? draft.description
+                    draft.prepMinutes = max(5, object["prepMinutes"] as? Int ?? draft.prepMinutes)
+                    draft.servings = max(1, object["servings"] as? Int ?? draft.servings)
+                    draft.difficulty = (object["difficulty"] as? String) ?? draft.difficulty
+                    let filledTags = (object["tags"] as? [String]) ?? []
+                    if !filledTags.isEmpty {
+                        draft.tagsText = filledTags.joined(separator: ", ")
+                    }
+                    draft.calories = max(0, object["calories"] as? Int ?? draft.calories)
+                    draft.carbs = max(0, object["carbs"] as? Int ?? draft.carbs)
+                    draft.protein = max(0, object["protein"] as? Int ?? draft.protein)
+                    draft.fat = max(0, object["fat"] as? Int ?? draft.fat)
+                    draft.sodium = max(0, object["sodium"] as? Int ?? draft.sodium)
+                    draft.emoji = defaultEmoji(from: filledTags, title: draft.title)
+                    draft.ingredients = ((object["ingredients"] as? [String]) ?? draft.ingredients).isEmpty ? draft.ingredients : ((object["ingredients"] as? [String]) ?? draft.ingredients)
+                    draft.steps = ((object["steps"] as? [String]) ?? draft.steps).isEmpty ? draft.steps : ((object["steps"] as? [String]) ?? draft.steps)
+                    if draft.ingredients.isEmpty { draft.ingredients = [""] }
+                    if draft.steps.isEmpty { draft.steps = [""] }
+                    isGeneratingWithAI = false
+                }
+            } catch {
+                await MainActor.run {
+                    isGeneratingWithAI = false
+                }
+            }
+        }
+    }
+
+    private func saveRecipe() {
+        guard canSave, !isSaving else { return }
+        isSaving = true
+        Task {
+            var polishedDraft = draft
+            if draft.autoPolishWithAI {
+                polishedDraft = await polishDraftWithAI(draft)
+            }
+
+            let tags = polishedDraft.tagsText
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+
+            let recipe = Recipe(
+                title: polishedDraft.title.trimmingCharacters(in: .whitespacesAndNewlines),
+                emoji: polishedDraft.emoji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || polishedDraft.emoji == "🍽️"
+                    ? defaultEmoji(from: tags, title: polishedDraft.title)
+                    : polishedDraft.emoji,
+                description: polishedDraft.description.trimmingCharacters(in: .whitespacesAndNewlines),
+                ingredients: polishedDraft.ingredients.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+                steps: polishedDraft.steps.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+                cookTime: "\(polishedDraft.prepMinutes) mins",
+                servings: "\(polishedDraft.servings) people",
+                difficulty: polishedDraft.difficulty,
+                tags: tags.isEmpty ? ["Custom"] : tags,
+                calories: "\(polishedDraft.calories) kcal",
+                nutrition: NutritionInfo(
+                    calories: "\(polishedDraft.calories) kcal",
+                    carbs: "\(polishedDraft.carbs)g",
+                    protein: "\(polishedDraft.protein)g",
+                    fat: "\(polishedDraft.fat)g",
+                    saturatedFat: "",
+                    sugar: "",
+                    fiber: "",
+                    sodium: "\(polishedDraft.sodium)mg"
+                ),
+                createdAt: Date()
+            )
+
+            await MainActor.run {
+                onSave(recipe)
+                isSaving = false
+                dismiss()
+            }
+        }
+    }
+
+    private func polishDraftWithAI(_ source: LibraryCustomRecipeDraft) async -> LibraryCustomRecipeDraft {
+        do {
+            let prompt = """
+            Polish this recipe so it follows recipe standards.
+            Ensure every ingredient has quantity + unit where possible.
+            Ensure steps are complete and no major missing transitions.
+            Return ONLY JSON:
+            {
+              "description": "...",
+              "ingredients": ["..."],
+              "steps": ["..."]
+            }
+            Title: \(source.title)
+            Ingredients: \(source.ingredients.joined(separator: " | "))
+            Steps: \(source.steps.joined(separator: " | "))
+            """
+            let raw = try await assistant.getHelp(question: prompt)
+            guard let json = extractJSONObject(from: raw),
+                  let data = json.data(using: .utf8),
+                  let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return source
+            }
+
+            var updated = source
+            if let description = object["description"] as? String, !description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                updated.description = description
+            }
+            if let ingredients = object["ingredients"] as? [String], !ingredients.isEmpty {
+                updated.ingredients = ingredients
+            }
+            if let steps = object["steps"] as? [String], !steps.isEmpty {
+                updated.steps = steps
+            }
+            return updated
+        } catch {
+            return source
+        }
+    }
+
+    private func defaultEmoji(from tags: [String]?, title: String) -> String {
+        let source = (tags ?? []).joined(separator: " ").lowercased() + " " + title.lowercased()
+        if source.contains("pasta") { return "🍝" }
+        if source.contains("salad") { return "🥗" }
+        if source.contains("soup") { return "🍲" }
+        if source.contains("bowl") { return "🥣" }
+        if source.contains("rice") { return "🍚" }
+        if source.contains("chicken") { return "🍗" }
+        if source.contains("indian") { return "🍛" }
+        if source.contains("mexican") { return "🌮" }
+        if source.contains("dessert") || source.contains("sweet") { return "🍰" }
+        return "🍽️"
+    }
+
+    private func loadSelectedPhoto() async {
+        guard let selectedPhotoItem else { return }
+        do {
+            guard let data = try await selectedPhotoItem.loadTransferable(type: Data.self),
+                  let image = UIImage(data: data) else { return }
+            await MainActor.run {
+                selectedPhotoImage = image
+            }
+        } catch {
+            print("Failed to load custom recipe photo: \(error.localizedDescription)")
+        }
+    }
+
+    private func extractJSONObject(from text: String) -> String? {
+        let source = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if source.hasPrefix("{"), source.hasSuffix("}") {
+            return source
+        }
+        guard let start = source.firstIndex(of: "{"),
+              let end = source.lastIndex(of: "}") else {
+            return nil
+        }
+        return String(source[start...end])
+    }
+}
 
 struct GenerateRecipeSheet: View {
     @ObservedObject var vm: RecipesViewModel
@@ -5821,7 +7084,6 @@ struct GroceryListView: View {
     @State private var matchTimer: Timer?
     @State private var listener: ListenerRegistration?
     @State private var expandedRecipeId: String? = nil
-    @State private var hasAppeared = false
     @State private var heroPulse = false
     @State private var pantrySpaces: [SimplePantrySpace] = []
     @State private var selectedPantryId: String? = nil
@@ -5877,6 +7139,15 @@ struct GroceryListView: View {
         groupedItems.count
     }
 
+    private var completionRatio: Double {
+        guard totalCount > 0 else { return 0 }
+        return Double(purchasedCount) / Double(totalCount)
+    }
+
+    private var selectedPantry: SimplePantrySpace? {
+        pantrySpaces.first(where: { $0.id == selectedPantryId })
+    }
+
     private var itemStateSignature: String {
         items.map { ($0.id ?? "") + ($0.isPurchased ? "1" : "0") }.joined(separator: "|")
     }
@@ -5896,9 +7167,6 @@ struct GroceryListView: View {
             startListening()
             startPantryListening()
             heroPulse = true
-            withAnimation(.spring(response: 0.45, dampingFraction: 0.84).delay(0.05)) {
-                hasAppeared = true
-            }
             Task { await matchStoreProducts(force: false) }
         }
         .onDisappear {
@@ -5939,7 +7207,7 @@ struct GroceryListView: View {
 
     private var scrollContent: some View {
         ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 18) {
                 headerMetricsCard
                 searchBarCard
                 storeControlsCard
@@ -5957,68 +7225,119 @@ struct GroceryListView: View {
     }
 
     private var headerMetricsCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(alignment: .firstTextBaseline) {
-                Text("Grocery List")
-                    .font(.system(size: 30, weight: .heavy, design: .rounded))
-                Spacer()
-                Text("\(purchasedCount)/\(totalCount)")
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .foregroundStyle(.green)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
-                    .background(Color.green.opacity(0.14))
-                    .clipShape(Capsule())
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Grocery List")
+                        .font(.system(size: 30, weight: .heavy, design: .rounded))
+
+                    Text("Everything still missing from your recipes, organized into a cleaner shopping flow.")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 8) {
+                        groceryHeroPill(
+                            title: selectedPantry.map { "\($0.emoji) \($0.name)" } ?? "Pantry syncing",
+                            systemImage: "basket.fill",
+                            tint: .green
+                        )
+                        groceryHeroPill(
+                            title: selectedStore.rawValue,
+                            systemImage: "cart.fill",
+                            tint: .orange
+                        )
+                    }
+                }
+
+                Spacer(minLength: 0)
+
+                ZStack {
+                    Circle()
+                        .stroke(Color.white.opacity(0.08), lineWidth: 8)
+                        .frame(width: 78, height: 78)
+
+                    Circle()
+                        .trim(from: 0, to: completionRatio)
+                        .stroke(
+                            LinearGradient(
+                                colors: [.orange, .green.opacity(0.9)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            style: StrokeStyle(lineWidth: 8, lineCap: .round)
+                        )
+                        .rotationEffect(.degrees(-90))
+                        .frame(width: 78, height: 78)
+
+                    VStack(spacing: 2) {
+                        Text("\(purchasedCount)")
+                            .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        Text("picked up")
+                            .font(.system(size: 10, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             HStack(spacing: 12) {
                 GroceryStatTile(icon: "fork.knife", value: "\(recipeGroupCount)", label: "Recipes", color: .blue)
-                GroceryStatTile(icon: "cart.fill", value: "\(totalCount)", label: "Items", color: .orange)
-                GroceryStatTile(icon: "checkmark.circle.fill", value: "\(purchasedCount)", label: "Purchased", color: .green)
+                GroceryStatTile(icon: "cart.fill", value: "\(totalCount)", label: "Need", color: .orange)
+                GroceryStatTile(icon: "checkmark.circle.fill", value: "\(purchasedCount)", label: "Picked Up", color: .green)
             }
+        }
+        .padding(18)
+        .background(
+            LinearGradient(
+                colors: [Color.white.opacity(0.05), Color.green.opacity(0.08)],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 24, style: .continuous)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
 
+    private var searchBarCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Search your list")
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(.secondary)
+
+                TextField("Search recipe or ingredient", text: $searchText)
+                    .font(.system(size: 14, design: .rounded))
+
+                if !searchText.isEmpty {
+                    Button(action: { searchText = "" }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+            .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
         .padding(14)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-        )
-        .opacity(hasAppeared ? 1 : 0)
-        .offset(y: hasAppeared ? 0 : -12)
-    }
-
-    private var searchBarCard: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "magnifyingglass")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.secondary)
-
-            TextField("Search recipe or ingredient", text: $searchText)
-                .font(.system(size: 14, design: .rounded))
-
-            if !searchText.isEmpty {
-                Button(action: { searchText = "" }) {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
         )
-        .opacity(hasAppeared ? 1 : 0)
-        .offset(y: hasAppeared ? 0 : -8)
     }
 
     private var storeControlsCard: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Store")
+            Text("Store matching")
                 .font(.system(size: 13, weight: .bold, design: .rounded))
                 .foregroundStyle(.secondary)
 
@@ -6060,6 +7379,11 @@ struct GroceryListView: View {
                 }
             }
 
+            Text("Pick where you are shopping and let ChefBuddy line up the closest product matches.")
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             HStack(spacing: 10) {
                 Button(action: {
                     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -6071,8 +7395,8 @@ struct GroceryListView: View {
                             .font(.system(size: 13, weight: .bold, design: .rounded))
                     }
                     .foregroundStyle(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
                     .background(
                         LinearGradient(
                             colors: [.orange, .green.opacity(0.85)],
@@ -6080,7 +7404,7 @@ struct GroceryListView: View {
                             endPoint: .trailing
                         )
                     )
-                    .clipShape(Capsule())
+                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(isMatchingStoreProducts || filteredItems.isEmpty)
@@ -6089,42 +7413,44 @@ struct GroceryListView: View {
                     Label("Remove Purchased", systemImage: "trash")
                         .font(.system(size: 13, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(Capsule())
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .disabled(purchasedCount == 0)
             }
         }
-        .padding(12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .padding(14)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 14, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
         )
-        .opacity(hasAppeared ? 1 : 0)
-        .offset(y: hasAppeared ? 0 : -6)
     }
 
     private var matchingBanner: some View {
         HStack(spacing: 10) {
             ProgressView()
                 .tint(.orange)
-            Text("Finding \(selectedStore.rawValue) matches")
-                .font(.system(size: 13, weight: .bold, design: .rounded))
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Matching products at \(selectedStore.rawValue)")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                Text("ChefBuddy is checking the best fit for your remaining ingredients.")
+                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
             RecipeBouncingDotsView(step: matchAnimationStep, color: .orange)
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
         .background(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 16)
                 .fill(.ultraThinMaterial)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: 12)
+            RoundedRectangle(cornerRadius: 16)
                 .stroke(Color.orange.opacity(0.2), lineWidth: 1)
         )
         .transition(.move(edge: .top).combined(with: .opacity))
@@ -6211,30 +7537,53 @@ struct GroceryListView: View {
 
     private func groupCard(_ group: GroceryRecipeGroup) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Button(action: { toggleGroupExpansion(group) }) {
-                HStack {
-                    Text("\(group.recipeEmoji) \(group.recipeTitle)")
-                        .font(.system(size: 16, weight: .bold, design: .rounded))
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [.orange.opacity(0.18), .green.opacity(0.14)],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 52, height: 52)
 
-                    Spacer()
+                    Text(group.recipeEmoji)
+                        .font(.system(size: 24))
+                }
 
-                    Text("\(group.remainingCount) left")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(group.remainingCount == 0 ? .green : .orange)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 5)
-                        .background((group.remainingCount == 0 ? Color.green : Color.orange).opacity(0.14))
-                        .clipShape(Capsule())
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(group.recipeTitle)
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 14, weight: .bold))
-                        .rotationEffect(.degrees(expandedRecipeId == group.id ? 90 : 0))
+                    Text("\(group.items.count) item\(group.items.count == 1 ? "" : "s") • \(group.remainingCount) still to grab")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                 }
+
+                Spacer(minLength: 0)
+
+                VStack(alignment: .trailing, spacing: 8) {
+                    Text(group.remainingCount == 0 ? "Ready" : "\(group.remainingCount) left")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(group.remainingCount == 0 ? .green : .orange)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background((group.remainingCount == 0 ? Color.green : Color.orange).opacity(0.14), in: Capsule())
+
+                    Button(action: { toggleGroupExpansion(group) }) {
+                        Image(systemName: expandedRecipeId == group.id ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(.secondary)
+                            .frame(width: 28, height: 28)
+                            .background(Color.primary.opacity(0.06), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                }
             }
-            .buttonStyle(.plain)
 
             HStack {
                 Button(role: .destructive) {
@@ -6244,9 +7593,8 @@ struct GroceryListView: View {
                         .font(.system(size: 11, weight: .bold, design: .rounded))
                         .foregroundStyle(.red)
                         .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
-                        .background(Color.red.opacity(0.12))
-                        .clipShape(Capsule())
+                        .padding(.vertical, 7)
+                        .background(Color.red.opacity(0.12), in: Capsule())
                 }
                 .buttonStyle(.plain)
                 Spacer()
@@ -6272,14 +7620,11 @@ struct GroceryListView: View {
             }
         }
         .padding(14)
-        .background(.ultraThinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 16))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 16)
+            RoundedRectangle(cornerRadius: 20)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
         )
-        .opacity(hasAppeared ? 1 : 0)
-        .offset(y: hasAppeared ? 0 : 8)
     }
 
     private func startListening() {
@@ -6413,6 +7758,15 @@ struct GroceryListView: View {
             }
         }
     }
+
+    private func groceryHeroPill(title: String, systemImage: String, tint: Color) -> some View {
+        Label(title, systemImage: systemImage)
+            .font(.system(size: 11, weight: .bold, design: .rounded))
+            .foregroundStyle(tint)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(tint.opacity(0.12), in: Capsule())
+    }
 }
 
 private struct GroceryStatTile: View {
@@ -6422,21 +7776,20 @@ private struct GroceryStatTile: View {
     let color: Color
 
     var body: some View {
-        VStack(spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
+                .font(.system(size: 13, weight: .bold))
                 .foregroundStyle(color)
             Text(value)
-                .font(.system(size: 14, weight: .heavy, design: .rounded))
+                .font(.system(size: 17, weight: .heavy, design: .rounded))
                 .foregroundStyle(.primary)
             Text(label)
                 .font(.system(size: 11, weight: .semibold, design: .rounded))
                 .foregroundStyle(.secondary)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 10)
-        .background(color.opacity(0.10))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
@@ -6467,9 +7820,12 @@ private struct GroceryListItemRow: View {
                         .foregroundStyle(item.isPurchased ? .secondary : .primary)
                         .strikethrough(item.isPurchased, color: .secondary)
                     if !item.quantityHint.isEmpty {
-                        Text("Qty: \(item.quantityHint)")
-                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                        Text(item.quantityHint)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
                             .foregroundStyle(.secondary)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 5)
+                            .background(Color.primary.opacity(0.06), in: Capsule())
                     }
                 }
 
@@ -6534,7 +7890,7 @@ private struct GroceryListItemRow: View {
                 .padding(10)
                 .background(
                     RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.blue.opacity(0.08))
+                        .fill(Color.blue.opacity(0.09))
                 )
                 .overlay(
                     RoundedRectangle(cornerRadius: 10)
@@ -6542,10 +7898,10 @@ private struct GroceryListItemRow: View {
                 )
             }
         }
-        .padding(10)
+        .padding(12)
         .background(
-            RoundedRectangle(cornerRadius: 12)
-                .fill(Color.primary.opacity(0.04))
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color.primary.opacity(0.045))
         )
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: item.isPurchased)
     }

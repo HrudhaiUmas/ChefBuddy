@@ -11,6 +11,11 @@ import FirebaseFirestore
 import GoogleSignIn
 import Combine
 
+extension Notification.Name {
+    static let activePantrySelectionDidChange = Notification.Name("ActivePantrySelectionDidChange")
+    static let discoveryFeedbackDidReset = Notification.Name("DiscoveryFeedbackDidReset")
+}
+
 // UIKit helper needed because GIDSignIn requires a UIViewController to present
 // the OAuth web view. SwiftUI doesn't expose one directly, so we reach into
 // the connected scene hierarchy to get the root view controller.
@@ -31,6 +36,12 @@ class AuthViewModel: ObservableObject {
     @Published var errorMessage: String = ""
 
     private let db = Firestore.firestore()
+
+    private func sanitizedHandle(_ raw: String) -> String {
+        let lowered = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let collapsed = lowered.replacingOccurrences(of: " ", with: "")
+        return collapsed.isEmpty ? "chefbuddy" : collapsed
+    }
 
     private func notificationPreferencePayload(_ preferences: [NotificationSlotPreference]) -> [[String: Any]] {
         preferences.map { preference in
@@ -111,7 +122,19 @@ class AuthViewModel: ObservableObject {
                 self?.isFetchingProfile = false
                 if let document = snapshot, document.exists {
                     do {
-                        self?.currentUserProfile = try document.data(as: DBUser.self)
+                        var profile = try document.data(as: DBUser.self)
+                        if profile.profileHandle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true {
+                            profile.profileHandle = profile.email?.split(separator: "@").first.map(String.init) ?? "chefbuddy"
+                        }
+                        if profile.profileBio == nil {
+                            profile.profileBio = ""
+                        }
+                        if profile.xpTotal == nil { profile.xpTotal = 0 }
+                        if profile.rankTier == nil { profile.rankTier = RankTier.lineCook.rawValue }
+                        if profile.currentStreak == nil { profile.currentStreak = 0 }
+                        if profile.longestStreak == nil { profile.longestStreak = 0 }
+                        if profile.activityStats == nil { profile.activityStats = [:] }
+                        self?.currentUserProfile = profile
                     } catch {
                         print("Error decoding user profile: \(error)")
                         self?.currentUserProfile = nil
@@ -171,6 +194,34 @@ class AuthViewModel: ObservableObject {
                 self?.fetchUserProfile()
                 print("Successfully updated extensive preferences.")
             }
+        }
+    }
+
+    func updateProfileIdentity(handle: String, bio: String) {
+        guard let uid = userSession?.uid else { return }
+
+        let normalizedHandle = sanitizedHandle(handle)
+        let normalizedBio = bio.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let payload: [String: Any] = [
+            "profileHandle": normalizedHandle,
+            "profileBio": normalizedBio
+        ]
+
+        db.collection("users").document(uid).setData(payload, merge: true) { [weak self] error in
+            if let error {
+                self?.errorMessage = "Failed to update profile identity: \(error.localizedDescription)"
+                return
+            }
+
+            guard var profile = self?.currentUserProfile else {
+                self?.fetchUserProfile()
+                return
+            }
+
+            profile.profileHandle = normalizedHandle
+            profile.profileBio = normalizedBio
+            self?.currentUserProfile = profile
         }
     }
 
@@ -253,6 +304,38 @@ class AuthViewModel: ObservableObject {
             guard var profile = self?.currentUserProfile else { return }
             profile.activePantryId = pantryId
             self?.currentUserProfile = profile
+            NotificationCenter.default.post(
+                name: .activePantrySelectionDidChange,
+                object: nil,
+                userInfo: ["pantryId": pantryId as Any]
+            )
+        }
+    }
+
+    func resetDiscoverySuggestions(completion: ((Bool) -> Void)? = nil) {
+        guard let uid = userSession?.uid else {
+            completion?(false)
+            return
+        }
+
+        Task {
+            do {
+                let feedbackRef = db.collection("users").document(uid).collection("discoveryFeedback")
+                let snapshot = try await feedbackRef.getDocuments()
+                let batch = db.batch()
+                snapshot.documents.forEach { batch.deleteDocument($0.reference) }
+                try await batch.commit()
+
+                await MainActor.run {
+                    NotificationCenter.default.post(name: .discoveryFeedbackDidReset, object: nil)
+                    completion?(true)
+                }
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Failed to reset AI suggestions: \(error.localizedDescription)"
+                    completion?(false)
+                }
+            }
         }
     }
 

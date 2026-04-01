@@ -85,6 +85,14 @@ struct DBUser: Codable {
     var notificationsEnabled: Bool?
     var notificationAuthorizationStatus: String?
     var notificationPreferences: [NotificationSlotPreference]?
+    var profileHandle: String?
+    var profileBio: String?
+    var xpTotal: Int?
+    var rankTier: String?
+    var currentStreak: Int?
+    var longestStreak: Int?
+    var lastActivityDate: Date?
+    var activityStats: [String: Int]?
 
     // Converts Firebase Auth user + onboarding form values into a storable
     // struct. Sets are converted to arrays because Firestore doesn't support Swift Sets.
@@ -145,5 +153,13 @@ struct DBUser: Codable {
         self.notificationsEnabled = false
         self.notificationAuthorizationStatus = "not_determined"
         self.notificationPreferences = notificationPreferences
+        self.profileHandle = auth.displayName ?? auth.email?.split(separator: "@").first.map(String.init) ?? "chefbuddy"
+        self.profileBio = ""
+        self.xpTotal = 0
+        self.rankTier = "Line Cook"
+        self.currentStreak = 0
+        self.longestStreak = 0
+        self.lastActivityDate = nil
+        self.activityStats = [:]
     }
 }
