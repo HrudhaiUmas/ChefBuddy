@@ -30,9 +30,11 @@ struct ChefBuddyApp: App {
             ContentView()
 
                 .onOpenURL { url in
-                // Routes OAuth redirect URLs back to GIDSignIn after the user
-                // authenticates in Safari. Without this, Google Sign-In breaks.
-                    GIDSignIn.sharedInstance.handle(url)
+                    if ChefBuddyDeepLinkRouter.shared.handle(url) == false {
+                        // Routes OAuth redirect URLs back to GIDSignIn after the user
+                        // authenticates in Safari. Without this, Google Sign-In breaks.
+                        GIDSignIn.sharedInstance.handle(url)
+                    }
                 }
         }
     }

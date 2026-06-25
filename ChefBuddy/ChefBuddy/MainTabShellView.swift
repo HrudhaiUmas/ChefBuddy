@@ -13,6 +13,7 @@ enum AppTab: Hashable {
 
 struct MainTabShellView: View {
     @EnvironmentObject private var authVM: AuthViewModel
+    @EnvironmentObject private var deepLinkRouter: ChefBuddyDeepLinkRouter
     @StateObject private var assistant = CookingAssistant()
     @State private var selectedTab: AppTab = .home
     @State private var showGroceryList = false
@@ -20,6 +21,10 @@ struct MainTabShellView: View {
     @State private var selectedLiveRecipe: Recipe? = nil
     @State private var savedRecipes: [Recipe] = []
     @State private var recipesListener: ListenerRegistration? = nil
+    @StateObject private var quickGenerateVM = RecipesViewModel()
+    @State private var showQuickGenerate = false
+    @State private var sharedRecipePreview: SharedRecipeSnapshot?
+    @State private var sharedRecipeError: String?
 
     private var userId: String? {
         authVM.userSession?.uid
@@ -65,6 +70,7 @@ struct MainTabShellView: View {
                     savedRecipes: savedRecipes,
                     selectedTab: $selectedTab,
                     onOpenGrocery: { showGroceryList = true },
+                    onOpenQuickGenerate: { showQuickGenerate = true },
                     onOpenLiveCookingPicker: { showRecipePicker = true }
                 )
             }
@@ -112,9 +118,21 @@ struct MainTabShellView: View {
 
             await assistant.setupAssistant(userId: userId)
             startRecipesListener(userId: userId)
+            quickGenerateVM.startListening(userId: userId)
+        }
+        .task(id: deepLinkRouter.pendingShareID) {
+            guard userId != nil, authVM.currentUserProfile != nil,
+                  let shareID = deepLinkRouter.pendingShareID else { return }
+            do {
+                sharedRecipePreview = try await RecipeShareService.shared.fetchSnapshot(id: shareID)
+            } catch {
+                sharedRecipeError = error.localizedDescription
+                deepLinkRouter.clear()
+            }
         }
         .onDisappear {
             stopRecipesListener()
+            quickGenerateVM.stopListening()
         }
         .sheet(isPresented: $showGroceryList) {
             NavigationStack {
@@ -136,6 +154,80 @@ struct MainTabShellView: View {
             }
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showQuickGenerate) {
+            if let userId {
+                GenerateRecipeSheet(
+                    vm: quickGenerateVM,
+                    assistant: assistant,
+                    userId: userId,
+                    title: "What’s on Your Mind?",
+                    subtitle: "Describe what sounds good right now and ChefBuddy will turn it into a complete recipe."
+                )
+                .presentationDetents([.large])
+                .presentationDragIndicator(.visible)
+            }
+        }
+        .sheet(item: $sharedRecipePreview, onDismiss: {
+            deepLinkRouter.clear()
+        }) { snapshot in
+            SharedRecipeImportView(
+                snapshot: snapshot,
+                alreadySaved: savedRecipes.contains {
+                    RecipeShareService.isEquivalent($0, snapshot.recipe)
+                },
+                onSave: {
+                    guard let userId else { return }
+                    do {
+                        _ = try await RecipeShareService.shared.importSnapshot(snapshot, userId: userId)
+                        UINotificationFeedbackGenerator().notificationOccurred(.success)
+                        await MainActor.run {
+                            sharedRecipePreview = nil
+                            deepLinkRouter.clear()
+                        }
+                    } catch {
+                        await MainActor.run {
+                            sharedRecipeError = error.localizedDescription
+                        }
+                    }
+                },
+                onDismiss: {
+                    sharedRecipePreview = nil
+                    deepLinkRouter.clear()
+                }
+            )
+        }
+        .alert("Shared Recipe", isPresented: Binding(
+            get: { sharedRecipeError != nil },
+            set: { if !$0 { sharedRecipeError = nil } }
+        )) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(sharedRecipeError ?? "")
+        }
+        .sheet(item: $quickGenerateVM.justGeneratedRecipe) { recipe in
+            RecipeDetailView(
+                recipe: recipe,
+                assistant: assistant,
+                onFavorite: {
+                    quickGenerateVM.toggleFavorite(recipe, userId: userId ?? "")
+                },
+                onDelete: {
+                    quickGenerateVM.deleteRecipe(recipe, userId: userId ?? "")
+                    quickGenerateVM.justGeneratedRecipe = nil
+                },
+                userId: userId ?? "",
+                onRecipeUpdated: { updated in
+                    quickGenerateVM.updateRecipeAfterReview(updated, userId: userId ?? "")
+                    quickGenerateVM.justGeneratedRecipe = updated
+                },
+                onLiveHelp: {
+                    quickGenerateVM.justGeneratedRecipe = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                        selectedLiveRecipe = recipe
+                    }
+                }
+            )
         }
         .fullScreenCover(item: $selectedLiveRecipe) { recipe in
             if let userId {
@@ -173,6 +265,7 @@ struct HomeDashboardView: View {
     let savedRecipes: [Recipe]
     @Binding var selectedTab: AppTab
     let onOpenGrocery: () -> Void
+    let onOpenQuickGenerate: () -> Void
     let onOpenLiveCookingPicker: () -> Void
 
     @State private var pantrySpaces: [SimplePantrySpace] = []
@@ -374,72 +467,33 @@ struct HomeDashboardView: View {
             Text("Ready to cook?")
                 .font(.system(size: 22, weight: .bold, design: .rounded))
 
-            VStack(alignment: .leading, spacing: 14) {
-                HStack {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(savedRecipes.isEmpty ? "Build a recipe first" : "Jump into Live Cooking")
-                            .font(.system(size: 22, weight: .heavy, design: .rounded))
-                            .foregroundStyle(.white)
+            VStack(spacing: 12) {
+                HomePrimaryActionCard(
+                    title: "What’s on Your Mind?",
+                    subtitle: "Tell ChefBuddy what you feel like eating and get a complete recipe in one step.",
+                    icon: "sparkles",
+                    tint: .orange,
+                    actionTitle: "Create a Recipe",
+                    action: onOpenQuickGenerate
+                )
 
-                        Text(
-                            savedRecipes.isEmpty
-                            ? "Open Recipes, save something you actually want to make, then ChefBuddy can guide you step by step."
-                            : "Pick one of your saved recipes and get real-time help without leaving the kitchen flow."
-                        )
-                        .font(.system(size: 14, weight: .medium, design: .rounded))
-                        .foregroundStyle(.white.opacity(0.88))
-                        .lineSpacing(3)
-                    }
-
-                    Spacer(minLength: 12)
-
-                    Image(systemName: savedRecipes.isEmpty ? "book.closed.fill" : "video.fill")
-                        .font(.system(size: 24, weight: .bold))
-                        .foregroundStyle(.white.opacity(0.92))
-                }
-
-                HStack(spacing: 10) {
-                    Button(action: {
+                HomePrimaryActionCard(
+                    title: "Live Cooking",
+                    subtitle: savedRecipes.isEmpty
+                        ? "Save a recipe first, then get step-by-step camera and voice guidance."
+                        : "Choose a saved recipe and cook with real-time camera and voice guidance.",
+                    icon: "video.fill",
+                    tint: .green,
+                    actionTitle: savedRecipes.isEmpty ? "Browse Recipes" : "Choose Recipe",
+                    action: {
                         if savedRecipes.isEmpty {
                             selectedTab = .recipes
                         } else {
                             onOpenLiveCookingPicker()
                         }
-                    }) {
-                        Text(savedRecipes.isEmpty ? "Open Recipes" : "Start Live Cooking")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(.orange)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .background(Color.white.opacity(0.95), in: Capsule())
                     }
-                    .buttonStyle(.plain)
-
-                    Button(action: { selectedTab = .recipes }) {
-                        Text("Browse Recipes")
-                            .font(.system(size: 14, weight: .bold, design: .rounded))
-                            .foregroundStyle(.white)
-                            .padding(.horizontal, 14)
-                            .padding(.vertical, 10)
-                            .overlay(
-                                Capsule()
-                                    .stroke(Color.white.opacity(0.35), lineWidth: 1)
-                            )
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(22)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                LinearGradient(
-                    colors: [.orange.opacity(0.96), .green.opacity(0.85)],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
                 )
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 30, style: .continuous))
-            .shadow(color: .orange.opacity(0.20), radius: 16, y: 8)
+            }
         }
     }
 
@@ -586,6 +640,58 @@ struct HomeDashboardView: View {
 
 }
 
+private struct HomePrimaryActionCard: View {
+    let title: String
+    let subtitle: String
+    let icon: String
+    let tint: Color
+    let actionTitle: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Image(systemName: icon)
+                    .font(.system(size: 21, weight: .bold))
+                    .foregroundStyle(tint)
+                    .frame(width: 50, height: 50)
+                    .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 5) {
+                    Text(title)
+                        .font(.system(size: 18, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text(subtitle)
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(3)
+                }
+
+                Spacer(minLength: 8)
+
+                VStack(spacing: 5) {
+                    Image(systemName: "arrow.right")
+                        .font(.system(size: 14, weight: .bold))
+                    Text(actionTitle)
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
+                }
+                .foregroundStyle(tint)
+                .frame(width: 62)
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 24, style: .continuous)
+                    .stroke(tint.opacity(0.18), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 struct RecipesTabRootView: View {
     @ObservedObject var assistant: CookingAssistant
     let savedRecipes: [Recipe]
@@ -624,9 +730,7 @@ struct PantryTabRootView: View {
                     if availablePantries.isEmpty {
                         pantryEmptyState
                     } else {
-                        pantryControlHeader
-                        pantrySection
-                        grocerySection
+                        simplifiedPantryOverview
                     }
                 }
                 .padding(.horizontal, 20)
@@ -664,15 +768,11 @@ struct PantryTabRootView: View {
         VStack(alignment: .leading, spacing: 14) {
             AnimatedScreenHeader(
                 eyebrow: "Pantry",
-                title: "Keep your kitchen in sync",
-                subtitle: "Manage ingredients and groceries here, then head to Recipes when you're ready to cook.",
+                title: "What’s in your kitchen?",
+                subtitle: "Choose a pantry, check what is stocked, and manage it from one clear place.",
                 systemImage: "basket.fill",
                 accent: .green
             )
-
-            Text("Pantry & Grocery")
-                .font(.system(size: 18, weight: .bold, design: .rounded))
-                .padding(.horizontal, 4)
         }
     }
 
@@ -703,6 +803,77 @@ struct PantryTabRootView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private var simplifiedPantryOverview: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Active pantry")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    Text(currentPantry.map { "\($0.emoji) \($0.name)" } ?? "Choose a pantry")
+                        .font(.system(size: 24, weight: .heavy, design: .rounded))
+                }
+
+                Spacer()
+                pantryPickerMenu
+            }
+
+            if let pantry = currentPantry {
+                Text("\(pantry.ingredients.count) ingredient\(pantry.ingredients.count == 1 ? "" : "s") stocked")
+                    .font(.system(size: 14, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.green)
+
+                if pantry.ingredients.isEmpty {
+                    Text("This pantry is empty. Scan a shelf or add a few ingredients to start getting pantry-aware recipes.")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .lineSpacing(3)
+                } else {
+                    FlexibleTagWrap(items: Array(pantry.ingredients.prefix(8))) { ingredient in
+                        Text(ingredient)
+                            .font(.system(size: 12, weight: .semibold, design: .rounded))
+                            .foregroundStyle(.primary)
+                            .padding(.horizontal, 11)
+                            .padding(.vertical, 8)
+                            .background(Color.primary.opacity(0.06), in: Capsule())
+                    }
+
+                    if pantry.ingredients.count > 8 {
+                        Text("+ \(pantry.ingredients.count - 8) more")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+
+            Button(action: { showVirtualPantry = true }) {
+                Label("Manage Pantry", systemImage: "slider.horizontal.3")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.green, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onOpenGrocery) {
+                Label("Open Grocery List", systemImage: "cart.fill")
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(20)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
     }

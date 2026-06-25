@@ -42,6 +42,41 @@ struct NotificationSlotPreference: Codable, Equatable, Identifiable {
     }
 }
 
+enum NutritionTargetSource: String, Codable {
+    case recommended
+    case manual
+}
+
+struct NutritionTargets: Codable, Equatable {
+    var calories: Int
+    var carbs: Int
+    var protein: Int
+    var fat: Int
+    var sodium: Int
+    var source: NutritionTargetSource
+    var updatedAt: Date
+
+    static func validated(
+        calories: Int,
+        carbs: Int,
+        protein: Int,
+        fat: Int,
+        sodium: Int,
+        source: NutritionTargetSource,
+        updatedAt: Date = Date()
+    ) -> NutritionTargets {
+        NutritionTargets(
+            calories: min(max(calories, 800), 6000),
+            carbs: min(max(carbs, 25), 800),
+            protein: min(max(protein, 20), 400),
+            fat: min(max(fat, 15), 300),
+            sodium: min(max(sodium, 500), 6000),
+            source: source,
+            updatedAt: updatedAt
+        )
+    }
+}
+
 // Firestore document model for a user's full profile.
 // Every field maps 1-to-1 to a Firestore key — Codable handles encoding
 // automatically so we never write manual dictionary packing.
@@ -80,6 +115,7 @@ struct DBUser: Codable {
     var servingSize: String
     var budget: String
     var dailyCalorieTarget: Int?
+    var nutritionTargets: NutritionTargets?
     var activePantryId: String?
     var didCompleteNotificationOnboarding: Bool?
     var notificationsEnabled: Bool?
@@ -92,6 +128,7 @@ struct DBUser: Codable {
     var currentStreak: Int?
     var longestStreak: Int?
     var lastActivityDate: Date?
+    var lastStreakActivityDate: Date?
     var activityStats: [String: Int]?
 
     // Converts Firebase Auth user + onboarding form values into a storable
@@ -148,6 +185,16 @@ struct DBUser: Codable {
         self.servingSize = servingSize
         self.budget = budget
         self.dailyCalorieTarget = dailyCalorieTarget
+        self.nutritionTargets = dailyCalorieTarget.map {
+            NutritionTargets.validated(
+                calories: $0,
+                carbs: 250,
+                protein: 100,
+                fat: 70,
+                sodium: 2300,
+                source: .recommended
+            )
+        }
         self.activePantryId = activePantryId
         self.didCompleteNotificationOnboarding = false
         self.notificationsEnabled = false
@@ -160,6 +207,7 @@ struct DBUser: Codable {
         self.currentStreak = 0
         self.longestStreak = 0
         self.lastActivityDate = nil
+        self.lastStreakActivityDate = nil
         self.activityStats = [:]
     }
 }

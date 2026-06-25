@@ -17,6 +17,35 @@ private extension Calendar {
     }
 }
 
+enum MealPlanDisplayMode: String, CaseIterable, Identifiable {
+    case day = "Day"
+    case week = "Week"
+
+    var id: String { rawValue }
+}
+
+func mealPlanWeekDates(
+    containing date: Date,
+    calendar sourceCalendar: Calendar = .current
+) -> [(day: String, date: Date)] {
+    var calendar = sourceCalendar
+    calendar.firstWeekday = 2
+    let start = calendar.startOfDay(for: date)
+    let weekday = calendar.component(.weekday, from: start)
+    let daysSinceMonday = (weekday + 5) % 7
+    guard let monday = calendar.date(byAdding: .day, value: -daysSinceMonday, to: start) else { return [] }
+
+    let formatter = DateFormatter()
+    formatter.calendar = calendar
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "EEEE"
+
+    return (0..<7).compactMap { offset in
+        guard let dayDate = calendar.date(byAdding: .day, value: offset, to: monday) else { return nil }
+        return (formatter.string(from: dayDate), dayDate)
+    }
+}
+
 struct PlannedMealRecipe: Codable, Equatable {
     var title: String
     var emoji: String
@@ -183,6 +212,7 @@ class MealPlanViewModel: ObservableObject {
     @Published var mealLogEvents: [MealLogEvent] = []
     @Published var isGenerating = false
     @Published var activeGeneration: MealPlanGenerationSession? = nil
+    @Published var generationError: String? = nil
 
     private let db = Firestore.firestore()
     private var listener: ListenerRegistration?
@@ -305,6 +335,7 @@ class MealPlanViewModel: ObservableObject {
         Task { @MainActor in
             activeGeneration = session
             isGenerating = true
+            generationError = nil
         }
 
         generationTask = Task { [weak self] in
@@ -334,6 +365,7 @@ class MealPlanViewModel: ObservableObject {
         Task { @MainActor in
             activeGeneration = session
             isGenerating = true
+            generationError = nil
         }
 
         generationTask = Task { [weak self] in
@@ -571,6 +603,12 @@ class MealPlanViewModel: ObservableObject {
             let servings = data["servingSize"] as? String ?? "2"
             let dislikes = data["dislikes"] as? String ?? ""
             let dailyCalorieTarget = data["dailyCalorieTarget"] as? Int
+            let targetData = data["nutritionTargets"] as? [String: Any] ?? [:]
+            let targetCalories = (targetData["calories"] as? NSNumber)?.intValue ?? dailyCalorieTarget
+            let targetCarbs = (targetData["carbs"] as? NSNumber)?.intValue
+            let targetProtein = (targetData["protein"] as? NSNumber)?.intValue
+            let targetFat = (targetData["fat"] as? NSNumber)?.intValue
+            let targetSodium = (targetData["sodium"] as? NSNumber)?.intValue
 
             var context = ""
 
@@ -584,8 +622,13 @@ class MealPlanViewModel: ObservableObject {
             context += "Cook time preference: \(cookTime). "
             context += "Budget: \(budget). "
             context += "Serving size: \(servings)."
-            if let dailyCalorieTarget {
-                context += " Target about \(dailyCalorieTarget) calories across the full day."
+            if let targetCalories {
+                context += " Daily nutrition targets: \(targetCalories) calories"
+                if let targetCarbs { context += ", \(targetCarbs)g carbs" }
+                if let targetProtein { context += ", \(targetProtein)g protein" }
+                if let targetFat { context += ", \(targetFat)g fat" }
+                if let targetSodium { context += ", no more than about \(targetSodium)mg sodium" }
+                context += ". Balance these totals realistically across breakfast, lunch, and dinner."
             }
             let consumedHistory = await consumedHistorySummary(userId: userId)
             if !consumedHistory.isEmpty {
@@ -653,6 +696,7 @@ class MealPlanViewModel: ObservableObject {
             - Include nutrition strings for calories, carbs, protein, fat, saturatedFat, sugar, fiber, and sodium.
             - Keep recipes realistic for the stated cook time, budget, preferences, and skill level.
             - Include at least one cuisine tag in each recipe tags array.
+            - Balance each full day toward the saved calorie, carbohydrate, protein, fat, and sodium targets in the user preferences.
             """
 
 
@@ -737,6 +781,12 @@ class MealPlanViewModel: ObservableObject {
             let servings = data["servingSize"] as? String ?? "2"
             let dislikes = data["dislikes"] as? String ?? ""
             let dailyCalorieTarget = data["dailyCalorieTarget"] as? Int
+            let targetData = data["nutritionTargets"] as? [String: Any] ?? [:]
+            let targetCalories = (targetData["calories"] as? NSNumber)?.intValue ?? dailyCalorieTarget
+            let targetCarbs = (targetData["carbs"] as? NSNumber)?.intValue
+            let targetProtein = (targetData["protein"] as? NSNumber)?.intValue
+            let targetFat = (targetData["fat"] as? NSNumber)?.intValue
+            let targetSodium = (targetData["sodium"] as? NSNumber)?.intValue
 
             var context = ""
             if !diets.isEmpty { context += "Diet: \(diets). " }
@@ -748,8 +798,13 @@ class MealPlanViewModel: ObservableObject {
             context += "Cook time preference: \(cookTime). "
             context += "Budget: \(budget). "
             context += "Serving size: \(servings). "
-            if let dailyCalorieTarget {
-                context += "Keep the full day close to \(dailyCalorieTarget) calories total. "
+            if let targetCalories {
+                context += "Daily targets: \(targetCalories) calories"
+                if let targetCarbs { context += ", \(targetCarbs)g carbs" }
+                if let targetProtein { context += ", \(targetProtein)g protein" }
+                if let targetFat { context += ", \(targetFat)g fat" }
+                if let targetSodium { context += ", about \(targetSodium)mg sodium maximum" }
+                context += ". Balance the selected meals against the rest of the day. "
             }
             let consumedHistory = await consumedHistorySummary(userId: userId)
             if !consumedHistory.isEmpty {
@@ -799,7 +854,7 @@ class MealPlanViewModel: ObservableObject {
             - Output JSON only with no markdown or code fences.
             - Generate entries for exactly these meal types and no others: \(targetedMeals).
             - Keep the selected day coherent with the customization request.
-            - Balance the selected meals so the full day tracks close to the calorie target when provided.
+            - Balance the selected meals so the full day tracks close to all saved nutrition targets when provided.
             - Each recipe must be fully cookable with 4 to 7 detailed steps.
             - ingredients must include exact quantities and units.
             - steps must include prep work, timing ranges, heat guidance, and doneness or texture cues.
@@ -844,11 +899,13 @@ class MealPlanViewModel: ObservableObject {
             await MainActor.run {
                 UINotificationFeedbackGenerator().notificationOccurred(.success)
                 isGenerating = false
+                generationError = nil
             }
         } catch {
             await MainActor.run {
                 UINotificationFeedbackGenerator().notificationOccurred(.error)
                 isGenerating = false
+                generationError = "ChefBuddy couldn’t refresh this day. Your selections are still here, so you can try again."
             }
         }
     }
@@ -882,6 +939,9 @@ struct WeeklyMealPlanView: View {
     @State private var aiCoachLoading = false
     @State private var aiCoachCache: [String: DailyCoachInsight] = [:]
     @State private var aiCoachTask: Task<Void, Never>? = nil
+    @State private var showNutritionTargetSetup = false
+    @State private var showDayOverwriteConfirmation = false
+    @State private var displayMode: MealPlanDisplayMode = .day
 
     private let days = [
         "Monday", "Tuesday", "Wednesday",
@@ -892,6 +952,24 @@ struct WeeklyMealPlanView: View {
 
     private var currentWeekday: String {
         Calendar.current.weekdayName(for: Date())
+    }
+
+    private var currentWeekDates: [(day: String, date: Date)] {
+        mealPlanWeekDates(containing: Date())
+    }
+
+    private func date(for day: String) -> Date? {
+        currentWeekDates.first(where: { $0.day == day })?.date
+    }
+
+    private func compactDateLabel(for day: String) -> String {
+        guard let date = date(for: day) else { return "" }
+        return date.formatted(.dateTime.month(.abbreviated).day())
+    }
+
+    private func fullDateLabel(for day: String) -> String {
+        guard let date = date(for: day) else { return day }
+        return date.formatted(.dateTime.weekday(.wide).month(.wide).day())
     }
 
     private var filledSlotsCount: Int {
@@ -911,28 +989,28 @@ struct WeeklyMealPlanView: View {
     }
 
     private func slotFor(type: String) -> MealPlanSlot? {
+        slotFor(day: selectedDay, type: type)
+    }
+
+    private func slotFor(day: String, type: String) -> MealPlanSlot? {
         vm.weeklySlots.first {
-            $0.day == selectedDay && $0.mealType == type
+            $0.day == day && $0.mealType == type
         }
     }
 
-    private var selectedDayNutritionSummary: DayNutritionSummary {
-        let plannedRecipes = mealTypes
-            .compactMap { slotFor(type: $0)?.plannedRecipe }
-
-        let calories = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.calories) }
-        let carbs = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.carbs) }
-        let protein = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.protein) }
-        let fat = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.fat) }
-        let sodium = plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.sodium) }
-
+    private func nutritionSummary(for day: String) -> DayNutritionSummary {
+        let plannedRecipes = mealTypes.compactMap { slotFor(day: day, type: $0)?.plannedRecipe }
         return DayNutritionSummary(
-            calories: formatNutritionValue(calories, suffix: " kcal"),
-            carbs: formatNutritionValue(carbs, suffix: "g carbs"),
-            protein: formatNutritionValue(protein, suffix: "g protein"),
-            fat: formatNutritionValue(fat, suffix: "g fat"),
-            sodium: formatNutritionValue(sodium, suffix: "mg sodium")
+            calories: formatNutritionValue(plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.calories) }, suffix: " kcal"),
+            carbs: formatNutritionValue(plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.carbs) }, suffix: "g carbs"),
+            protein: formatNutritionValue(plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.protein) }, suffix: "g protein"),
+            fat: formatNutritionValue(plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.fat) }, suffix: "g fat"),
+            sodium: formatNutritionValue(plannedRecipes.reduce(0) { $0 + nutritionNumericValue(from: $1.nutrition.sodium) }, suffix: "mg sodium")
         )
+    }
+
+    private var selectedDayNutritionSummary: DayNutritionSummary {
+        nutritionSummary(for: selectedDay)
     }
 
     private var selectedDayMealLogs: [MealLogEvent] {
@@ -1077,6 +1155,10 @@ struct WeeklyMealPlanView: View {
         aiCoachInsight ?? fallbackDailyCoachInsight
     }
 
+    private var nutritionTargets: NutritionTargets? {
+        authVM.currentUserProfile?.nutritionTargets
+    }
+
     private func handleSlotTap(type: String) {
         if let slot = slotFor(type: type) {
             if let recipeId = slot.recipeId,
@@ -1119,6 +1201,10 @@ struct WeeklyMealPlanView: View {
 
     private func customizeSelectedDay() {
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        performDayCustomization()
+    }
+
+    private func performDayCustomization() {
         if let uid = authVM.userSession?.uid {
             vm.startDayCustomization(
                 day: selectedDay,
@@ -1127,7 +1213,6 @@ struct WeeklyMealPlanView: View {
                 assistant: assistant,
                 userId: uid
             )
-            showDayAssistant = false
         }
     }
 
@@ -1175,6 +1260,398 @@ struct WeeklyMealPlanView: View {
     }
 
     var body: some View {
+        simplifiedBody
+    }
+
+    private var simplifiedBody: some View {
+        ZStack {
+            ChefBuddyBackground()
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Meal Plan")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                        Text("Plan your current week")
+                            .font(.system(size: 30, weight: .heavy, design: .rounded))
+                        Text("\(filledSlotsCount)/21 meals planned • \(currentWeekDates.first?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")–\(currentWeekDates.last?.date.formatted(.dateTime.month(.abbreviated).day()) ?? "")")
+                            .font(.system(size: 14, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Picker("Meal plan view", selection: $displayMode) {
+                        ForEach(MealPlanDisplayMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if displayMode == .day {
+                        dayPlannerContent
+                    } else {
+                        weekPlannerContent
+                    }
+
+                    Button {
+                        if nutritionTargets == nil {
+                            showNutritionTargetSetup = true
+                        } else {
+                            generateWeeklyPlan()
+                        }
+                    } label: {
+                        HStack(spacing: 9) {
+                            if vm.isGenerating {
+                                ProgressView().tint(.white)
+                            } else {
+                                Image(systemName: "sparkles")
+                            }
+                            Text(vm.isGenerating ? "Filling empty meals..." : "Fill Empty Week")
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 15)
+                        .background(Color.orange, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(vm.isGenerating)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+                .padding(.bottom, 140)
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .onAppear {
+            selectedDay = currentWeekday
+            if let uid = authVM.userSession?.uid {
+                vm.startListening(userId: uid)
+                recipesVM.startListening(userId: uid)
+                startPantryListener(userId: uid)
+            }
+        }
+        .onDisappear {
+            pantryListener?.remove()
+            pantryListener = nil
+        }
+        .sheet(isPresented: $showNutritionTargetSetup) {
+            if let profile = authVM.currentUserProfile {
+                NutritionTargetSetupSheet(
+                    profile: profile,
+                    assistant: assistant,
+                    currentTargets: nutritionTargets,
+                    onSave: { targets in
+                        authVM.updateNutritionTargets(targets)
+                        showNutritionTargetSetup = false
+                    }
+                )
+            }
+        }
+        .sheet(isPresented: $showRecipePicker) {
+            NavigationStack {
+                List(recipesVM.recipes) { recipe in
+                    Button {
+                        guard let selectedMealType, let uid = authVM.userSession?.uid else { return }
+                        vm.addToPlan(recipe: recipe, day: selectedDay, mealType: selectedMealType, userId: uid)
+                        showRecipePicker = false
+                    } label: {
+                        HStack(spacing: 12) {
+                            Text(recipe.emoji).font(.title2)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(recipe.title)
+                                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                                Text("\(recipe.cookTime) • \(recipe.calories)")
+                                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+                .overlay {
+                    if recipesVM.recipes.isEmpty {
+                        ContentUnavailableView(
+                            "No Saved Recipes",
+                            systemImage: "book.closed",
+                            description: Text("Save a recipe first, then add it to your plan.")
+                        )
+                    }
+                }
+                .navigationTitle("Choose \(selectedMealType ?? "Meal")")
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button("Close") { showRecipePicker = false }
+                    }
+                }
+            }
+        }
+        .sheet(item: $selectedRecipeForDetail) { recipe in
+            RecipeDetailView(
+                recipe: recipe,
+                assistant: assistant,
+                pantryIngredients: pantryIngredients,
+                onFavorite: {
+                    if let uid = authVM.userSession?.uid {
+                        recipesVM.toggleFavorite(recipe, userId: uid)
+                    }
+                },
+                onDelete: {},
+                userId: authVM.userSession?.uid ?? ""
+            )
+        }
+        .sheet(item: $selectedPlannedRecipeForDetail) { recipe in
+            SuggestedRecipeDetailView(
+                recipe: recipe,
+                assistant: assistant,
+                onSave: {
+                    guard let uid = authVM.userSession?.uid else { return }
+                    recipesVM.saveSuggestedRecipe(recipe, userId: uid)
+                },
+                onDislike: nil,
+                onRecipeUpdated: { updated in
+                    guard let uid = authVM.userSession?.uid, let slot = selectedPlanSlotForDetail else { return }
+                    vm.updatePlannedRecipe(updated, for: slot, userId: uid)
+                    selectedPlannedRecipeForDetail = updated
+                },
+                onLiveHelp: nil
+            )
+        }
+        .sheet(isPresented: $showDayAssistant) {
+            DayCustomizationSheet(
+                day: selectedDay,
+                mealTypes: mealTypes,
+                selectedMealTypes: $dayAssistantMealTypes,
+                prompt: $dayAssistantPrompt,
+                occupiedMealTypes: Set(mealTypes.filter { slotFor(type: $0)?.displayTitle.isEmpty == false }),
+                isGenerating: vm.isGenerating,
+                errorMessage: vm.generationError,
+                onGenerate: customizeSelectedDay
+            )
+        }
+        .confirmationDialog(
+            "Replace selected meals?",
+            isPresented: $showDayOverwriteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Replace Meals", role: .destructive) {
+                performDayCustomization()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Some selected meal slots already contain recipes. ChefBuddy will replace only those selected slots.")
+        }
+    }
+
+    private var dayPlannerContent: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 9) {
+                    ForEach(days, id: \.self) { day in
+                        let plannedCount = mealTypes.compactMap {
+                            slotFor(day: day, type: $0)
+                        }.filter { !$0.displayTitle.isEmpty }.count
+
+                        Button {
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
+                                selectedDay = day
+                            }
+                        } label: {
+                            VStack(spacing: 4) {
+                                Text(shortDay(day).uppercased())
+                                    .font(.system(size: 10, weight: .black, design: .rounded))
+                                    .opacity(0.78)
+                                Text(date(for: day)?.formatted(.dateTime.day()) ?? "—")
+                                    .font(.system(size: 18, weight: .heavy, design: .rounded))
+                                HStack(spacing: 3) {
+                                    Circle()
+                                        .fill(plannedCount == 3 ? Color.green : Color.orange)
+                                        .frame(width: 5, height: 5)
+                                    Text("\(plannedCount) planned")
+                                        .font(.system(size: 8, weight: .bold, design: .rounded))
+                                }
+                            }
+                            .foregroundStyle(selectedDay == day ? .white : .primary)
+                            .frame(width: 66, height: 70)
+                            .background(
+                                selectedDay == day ? Color.orange : Color.primary.opacity(0.06),
+                                in: RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if let nutritionTargets {
+                NutritionTargetProgressCard(
+                    day: fullDateLabel(for: selectedDay),
+                    summary: selectedDayNutritionSummary,
+                    targets: nutritionTargets,
+                    onEdit: { showNutritionTargetSetup = true }
+                )
+            } else {
+                nutritionTargetSetupButton
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .center) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(selectedDay)
+                            .font(.system(size: 22, weight: .heavy, design: .rounded))
+                        Text(compactDateLabel(for: selectedDay))
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button {
+                        dayAssistantMealTypes = Set(mealTypes)
+                        dayAssistantPrompt = ""
+                        showDayAssistant = true
+                    } label: {
+                        Label("Adjust Day", systemImage: "wand.and.stars")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 13)
+                            .padding(.vertical, 10)
+                            .background(Color.orange, in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                ForEach(mealTypes, id: \.self) { type in
+                    SimplifiedMealPlanRow(
+                        mealType: type,
+                        slot: slotFor(type: type),
+                        onOpen: { handleSlotTap(type: type) },
+                        onRemove: { removeSlot(type: type) },
+                        onStatusChange: { updateSlotStatus(type: type, status: $0) }
+                    )
+                }
+            }
+        }
+    }
+
+    private var nutritionTargetSetupButton: some View {
+        Button {
+            showNutritionTargetSetup = true
+        } label: {
+            HStack(spacing: 14) {
+                Image(systemName: "scope")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(.orange)
+                    .frame(width: 48, height: 48)
+                    .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Set your daily nutrition targets")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                    Text("Use recommended targets or enter your own before ChefBuddy builds the week.")
+                        .font(.system(size: 13, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .foregroundStyle(.secondary)
+            }
+            .padding(16)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var weekPlannerContent: some View {
+        VStack(spacing: 12) {
+            if let nutritionTargets {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Weekly overview")
+                            .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        Text("Tap a day to open its full planner.")
+                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button("Edit Targets") { showNutritionTargetSetup = true }
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.orange)
+                }
+
+                ForEach(days, id: \.self) { day in
+                    weekDayCard(day: day, targets: nutritionTargets)
+                }
+            } else {
+                nutritionTargetSetupButton
+                ForEach(days, id: \.self) { day in
+                    weekDayCard(day: day, targets: nil)
+                }
+            }
+        }
+    }
+
+    private func weekDayCard(day: String, targets: NutritionTargets?) -> some View {
+        let summary = nutritionSummary(for: day)
+        let calories = nutritionNumericValue(from: summary.calories)
+        let targetCalories = Double(targets?.calories ?? 0)
+        let progress = targetCalories > 0 ? min(calories / targetCalories, 1) : 0
+
+        return Button {
+            selectedDay = day
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.84)) {
+                displayMode = .day
+            }
+        } label: {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(day)
+                            .font(.system(size: 17, weight: .heavy, design: .rounded))
+                        Text(compactDateLabel(for: day))
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text("\(Int(calories.rounded())) kcal")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.orange)
+                }
+
+                VStack(spacing: 7) {
+                    ForEach(mealTypes, id: \.self) { mealType in
+                        let slot = slotFor(day: day, type: mealType)
+                        HStack(spacing: 9) {
+                            Image(systemName: slot?.displayTitle.isEmpty == false ? "checkmark.circle.fill" : "circle.dashed")
+                                .foregroundStyle(slot?.displayTitle.isEmpty == false ? .green : .secondary)
+                            Text(mealType)
+                                .font(.system(size: 11, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .frame(width: 62, alignment: .leading)
+                            Text(slot?.displayTitle.isEmpty == false ? slot!.displayTitle : "Not planned")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundStyle(slot?.displayTitle.isEmpty == false ? .primary : .secondary)
+                                .lineLimit(1)
+                            Spacer()
+                        }
+                    }
+                }
+
+                if targets != nil {
+                    ProgressView(value: progress)
+                        .tint(progress > 0.9 ? .green : .orange)
+                }
+            }
+            .padding(16)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .stroke(day == currentWeekday ? Color.orange.opacity(0.45) : Color.primary.opacity(0.06), lineWidth: day == currentWeekday ? 2 : 1)
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var legacyBody: some View {
         ZStack {
             ChefBuddyBackground()
             Circle()
@@ -1502,7 +1979,9 @@ struct WeeklyMealPlanView: View {
                 mealTypes: mealTypes,
                 selectedMealTypes: $dayAssistantMealTypes,
                 prompt: $dayAssistantPrompt,
+                occupiedMealTypes: Set(mealTypes.filter { slotFor(type: $0)?.displayTitle.isEmpty == false }),
                 isGenerating: vm.isGenerating,
+                errorMessage: vm.generationError,
                 onGenerate: customizeSelectedDay
             )
         }
@@ -1692,6 +2171,457 @@ private struct DailyCoachInsight: Equatable {
 }
 
 
+private struct SimplifiedMealPlanRow: View {
+    let mealType: String
+    let slot: MealPlanSlot?
+    let onOpen: () -> Void
+    let onRemove: () -> Void
+    let onStatusChange: (MealPlanSlotStatus) -> Void
+
+    private var icon: String {
+        switch mealType {
+        case "Breakfast": return "sunrise.fill"
+        case "Lunch": return "sun.max.fill"
+        default: return "moon.stars.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 13) {
+            Image(systemName: icon)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundStyle(.orange)
+                .frame(width: 42, height: 42)
+                .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+
+            Button(action: onOpen) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(mealType)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                    Text(slot?.displayTitle.isEmpty == false ? slot!.displayTitle : "Add a meal")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                    if let recipe = slot?.plannedRecipe {
+                        Text("\(recipe.calories) • \(recipe.cookTime)")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+
+            if let slot {
+                Menu {
+                    ForEach(MealPlanSlotStatus.allCases, id: \.self) { status in
+                        Button(status.title) { onStatusChange(status) }
+                    }
+                    Divider()
+                    Button("Remove", role: .destructive, action: onRemove)
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: slot.isCompleted ? "checkmark.circle.fill" : "ellipsis.circle")
+                            .font(.system(size: 20, weight: .semibold))
+                        Text(slot.resolvedStatus.title)
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(slot.isCompleted ? .green : .secondary)
+                }
+            } else {
+                Image(systemName: "plus.circle.fill")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(15)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.primary.opacity(0.05), lineWidth: 1)
+        )
+    }
+}
+
+private struct NutritionTargetProgressCard: View {
+    let day: String
+    let summary: DayNutritionSummary
+    let targets: NutritionTargets
+    let onEdit: () -> Void
+
+    private var calorieCurrent: Double {
+        nutritionNumericValue(from: summary.calories)
+    }
+
+    private var calorieProgress: Double {
+        min(calorieCurrent / Double(max(targets.calories, 1)), 1)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(day) targets")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                    Text("Planned nutrition compared with your daily goal")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Edit", action: onEdit)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 11)
+                    .padding(.vertical, 8)
+                    .background(Color.orange.opacity(0.10), in: Capsule())
+            }
+
+            HStack(spacing: 16) {
+                ZStack {
+                    Circle()
+                        .stroke(Color.orange.opacity(0.12), lineWidth: 10)
+                    Circle()
+                        .trim(from: 0, to: calorieProgress)
+                        .stroke(Color.orange.gradient, style: StrokeStyle(lineWidth: 10, lineCap: .round))
+                        .rotationEffect(.degrees(-90))
+                    VStack(spacing: 1) {
+                        Text("\(Int(calorieCurrent.rounded()))")
+                            .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        Text("of \(targets.calories)")
+                            .font(.system(size: 9, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .frame(width: 92, height: 92)
+
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(calorieProgress >= 0.85 ? "Close to target" : "Room in the plan")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                    Text(calorieProgress >= 0.85
+                         ? "This day is tracking near your saved calorie goal."
+                         : "Add or adjust meals to bring the day closer to your target.")
+                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(targets.source == .recommended ? "ChefBuddy recommended" : "Manually set")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundStyle(.green)
+                        .padding(.horizontal, 9)
+                        .padding(.vertical, 6)
+                        .background(Color.green.opacity(0.10), in: Capsule())
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                macroTile("Protein", current: nutritionNumericValue(from: summary.protein), target: targets.protein, color: .green, unit: "g")
+                macroTile("Carbs", current: nutritionNumericValue(from: summary.carbs), target: targets.carbs, color: .blue, unit: "g")
+                macroTile("Fat", current: nutritionNumericValue(from: summary.fat), target: targets.fat, color: .pink, unit: "g")
+                macroTile("Sodium", current: nutritionNumericValue(from: summary.sodium), target: targets.sodium, color: .purple, unit: "mg")
+            }
+
+        }
+        .padding(18)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private func macroTile(_ title: String, current: Double, target: Int, color: Color, unit: String) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                Spacer()
+                Circle().fill(color).frame(width: 7, height: 7)
+            }
+            Text("\(Int(current.rounded())) / \(target)\(unit)")
+                .font(.system(size: 13, weight: .heavy, design: .rounded))
+            ProgressView(value: min(current / Double(max(target, 1)), 1))
+                .tint(color)
+        }
+        .padding(11)
+        .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func targetRow(_ title: String, current: Double, target: Double, color: Color, unit: String) -> some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                Spacer()
+                Text("\(Int(current.rounded())) / \(Int(target.rounded())) \(unit)")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+            ProgressView(value: min(current / max(target, 1), 1))
+                .tint(color)
+        }
+    }
+}
+
+private struct NutritionTargetSetupSheet: View {
+    let profile: DBUser
+    @ObservedObject var assistant: CookingAssistant
+    let currentTargets: NutritionTargets?
+    let onSave: (NutritionTargets) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var calories = 2000
+    @State private var carbs = 250
+    @State private var protein = 100
+    @State private var fat = 70
+    @State private var sodium = 2300
+    @State private var source: NutritionTargetSource = .manual
+    @State private var isRecommending = false
+    @State private var errorMessage: String?
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ChefBuddyBackground()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 18) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Nutrition Targets")
+                                .font(.system(size: 30, weight: .heavy, design: .rounded))
+                            Text("Set the daily guide ChefBuddy should use when building and evaluating your meal plan.")
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(3)
+                        }
+
+                        Picker("Target source", selection: $source) {
+                            Text("Recommended").tag(NutritionTargetSource.recommended)
+                            Text("Manual").tag(NutritionTargetSource.manual)
+                        }
+                        .pickerStyle(.segmented)
+
+                        if source == .recommended {
+                            VStack(alignment: .leading, spacing: 12) {
+                                HStack(spacing: 13) {
+                                    Image(systemName: "sparkles")
+                                        .font(.system(size: 20, weight: .bold))
+                                        .foregroundStyle(.orange)
+                                        .frame(width: 46, height: 46)
+                                        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text("Personalized starting point")
+                                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                                        Text("Uses your body profile, activity, goal, and macro preferences.")
+                                            .font(.system(size: 12, weight: .medium, design: .rounded))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+
+                                Button {
+                                    recommendTargets()
+                                } label: {
+                                    HStack {
+                                        if isRecommending { ProgressView().tint(.white) }
+                                        Text(isRecommending ? "Calculating..." : "Refresh Recommended Targets")
+                                            .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    }
+                                    .foregroundStyle(.white)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 13)
+                                    .background(Color.orange, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(isRecommending)
+                            }
+                            .padding(16)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                        }
+
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Daily targets")
+                                .font(.system(size: 18, weight: .heavy, design: .rounded))
+
+                            targetEditorCard("Calories", icon: "flame.fill", value: $calories, unit: "kcal", step: 50, range: 800...6000, color: .orange)
+                            targetEditorCard("Carbohydrates", icon: "chart.bar.fill", value: $carbs, unit: "g", step: 5, range: 25...800, color: .blue)
+                            targetEditorCard("Protein", icon: "bolt.heart.fill", value: $protein, unit: "g", step: 5, range: 20...400, color: .green)
+                            targetEditorCard("Fat", icon: "drop.fill", value: $fat, unit: "g", step: 5, range: 15...300, color: .pink)
+                            targetEditorCard("Sodium", icon: "waveform.path", value: $sodium, unit: "mg", step: 50, range: 500...6000, color: .purple)
+                        }
+
+                        if let errorMessage {
+                            Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.red)
+                                .padding(14)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+
+                        Text("ChefBuddy recommendations are general estimates. Check with a registered dietitian or healthcare professional for personalized nutrition advice.")
+                            .font(.system(size: 11, weight: .medium, design: .rounded))
+                            .foregroundStyle(.secondary)
+                            .lineSpacing(3)
+
+                        Spacer(minLength: 90)
+                    }
+                    .padding(20)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    onSave(
+                        NutritionTargets.validated(
+                            calories: calories,
+                            carbs: carbs,
+                            protein: protein,
+                            fat: fat,
+                            sodium: sodium,
+                            source: source
+                        )
+                    )
+                } label: {
+                    Label("Save Nutrition Targets", systemImage: "checkmark.circle.fill")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 15)
+                        .background(
+                            LinearGradient(colors: [.orange, .green.opacity(0.86)], startPoint: .leading, endPoint: .trailing),
+                            in: RoundedRectangle(cornerRadius: 17, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.regularMaterial)
+            }
+            .onAppear {
+                if let currentTargets {
+                    calories = currentTargets.calories
+                    carbs = currentTargets.carbs
+                    protein = currentTargets.protein
+                    fat = currentTargets.fat
+                    sodium = currentTargets.sodium
+                    source = currentTargets.source
+                } else {
+                    calories = profile.dailyCalorieTarget ?? 2000
+                }
+            }
+        }
+    }
+
+    private func targetEditorCard(
+        _ title: String,
+        icon: String,
+        value: Binding<Int>,
+        unit: String,
+        step: Int,
+        range: ClosedRange<Int>,
+        color: Color
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundStyle(color)
+                .frame(width: 42, height: 42)
+                .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                HStack(spacing: 4) {
+                    TextField("0", value: value, format: .number)
+                        .keyboardType(.numberPad)
+                        .font(.system(size: 20, weight: .heavy, design: .rounded))
+                        .frame(width: 80)
+                    Text(unit)
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer()
+
+            Stepper("", value: value, in: range, step: step)
+                .labelsHidden()
+                .onChange(of: value.wrappedValue) { _, _ in
+                    if !isRecommending { source = .manual }
+                }
+        }
+        .padding(13)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(color.opacity(0.14), lineWidth: 1)
+        )
+    }
+
+    private func recommendTargets() {
+        isRecommending = true
+        errorMessage = nil
+
+        Task {
+            do {
+                let prompt = """
+                Recommend reasonable daily nutrition targets for meal planning.
+                Return ONLY JSON with integer values:
+                {"calories":2000,"carbs":250,"protein":120,"fat":65,"sodium":2300}
+
+                Age: \(profile.age)
+                Height inches: \(profile.height)
+                Weight pounds: \(profile.weight)
+                Sex: \(profile.sex)
+                Activity: \(profile.activityLevel)
+                Goal: \(profile.targetGoal)
+                Macro preferences: \(profile.macroTags.joined(separator: ", "))
+                Current calorie estimate: \(profile.dailyCalorieTarget ?? 0)
+                """
+                let response = try await assistant.getHelp(question: prompt)
+                guard let json = CookingAssistant.extractJSONObject(from: response),
+                      let data = json.data(using: .utf8),
+                      let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let recommendedCalories = (object["calories"] as? NSNumber)?.intValue,
+                      let recommendedCarbs = (object["carbs"] as? NSNumber)?.intValue,
+                      let recommendedProtein = (object["protein"] as? NSNumber)?.intValue,
+                      let recommendedFat = (object["fat"] as? NSNumber)?.intValue,
+                      let recommendedSodium = (object["sodium"] as? NSNumber)?.intValue else {
+                    throw CookingAssistantError.invalidRecipeResponse
+                }
+
+                let validated = NutritionTargets.validated(
+                    calories: recommendedCalories,
+                    carbs: recommendedCarbs,
+                    protein: recommendedProtein,
+                    fat: recommendedFat,
+                    sodium: recommendedSodium,
+                    source: .recommended
+                )
+
+                await MainActor.run {
+                    calories = validated.calories
+                    carbs = validated.carbs
+                    protein = validated.protein
+                    fat = validated.fat
+                    sodium = validated.sodium
+                    source = .recommended
+                    isRecommending = false
+                }
+            } catch {
+                await MainActor.run {
+                    isRecommending = false
+                    errorMessage = "ChefBuddy couldn’t calculate targets right now. You can still enter them manually."
+                }
+            }
+        }
+    }
+}
+
 struct DayButton: View {
     let day: String
     let shortDay: String
@@ -1733,9 +2663,25 @@ private struct DayCustomizationSheet: View {
     let mealTypes: [String]
     @Binding var selectedMealTypes: Set<String>
     @Binding var prompt: String
+    let occupiedMealTypes: Set<String>
     let isGenerating: Bool
+    let errorMessage: String?
     let onGenerate: () -> Void
     @Environment(\.dismiss) private var dismiss
+    @State private var selectedIntent: String?
+    @State private var didStartGeneration = false
+
+    private let intents = [
+        ("Lighter", "leaf.fill", "Make the selected meals lighter and vegetable-forward."),
+        ("High Protein", "bolt.heart.fill", "Prioritize high-protein meals with balanced sides."),
+        ("Quick", "timer", "Keep every selected meal quick and practical."),
+        ("Comfort Food", "heart.fill", "Make the selected meals cozy and comforting."),
+        ("Budget", "dollarsign.circle.fill", "Use affordable, reusable ingredients.")
+    ]
+
+    private var selectedOccupiedMeals: [String] {
+        mealTypes.filter { selectedMealTypes.contains($0) && occupiedMealTypes.contains($0) }
+    }
 
     var body: some View {
         NavigationStack {
@@ -1744,20 +2690,22 @@ private struct DayCustomizationSheet: View {
 
                 ScrollView(showsIndicators: false) {
                     VStack(alignment: .leading, spacing: 18) {
-                        Text("Customize \(day)")
-                            .font(.system(size: 28, weight: .heavy, design: .rounded))
-                            .padding(.top, 8)
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Adjust \(day)")
+                                .font(.system(size: 30, weight: .heavy, design: .rounded))
+                                .padding(.top, 8)
 
-                        Text("Tell ChefBuddy what you want for this day and choose which meals should be refreshed.")
-                            .font(.system(size: 15, weight: .medium, design: .rounded))
-                            .foregroundStyle(.secondary)
+                            Text("Choose the meals, set the direction, then review exactly what ChefBuddy will replace.")
+                                .font(.system(size: 14, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(3)
+                        }
 
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("Meals to refresh")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .foregroundStyle(.secondary)
+                            Label("1. Choose meals", systemImage: "checklist")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
 
-                            HStack(spacing: 10) {
+                            VStack(spacing: 9) {
                                 ForEach(mealTypes, id: \.self) { mealType in
                                     let selected = selectedMealTypes.contains(mealType)
                                     Button {
@@ -1767,62 +2715,121 @@ private struct DayCustomizationSheet: View {
                                             selectedMealTypes.insert(mealType)
                                         }
                                     } label: {
-                                        Text(mealType)
-                                            .font(.system(size: 13, weight: .bold, design: .rounded))
-                                            .foregroundStyle(selected ? .white : .primary)
-                                            .padding(.horizontal, 14)
-                                            .padding(.vertical, 10)
-                                            .background(
-                                                selected
-                                                ? AnyView(LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing))
-                                                : AnyView(Color.primary.opacity(0.08))
-                                            )
-                                            .clipShape(Capsule())
+                                        HStack(spacing: 12) {
+                                            Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                                                .font(.system(size: 20, weight: .bold))
+                                                .foregroundStyle(selected ? .orange : .secondary)
+                                            VStack(alignment: .leading, spacing: 2) {
+                                                Text(mealType)
+                                                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                                                Text(occupiedMealTypes.contains(mealType) ? "Currently planned • will be replaced" : "Empty slot • will be filled")
+                                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                            Image(systemName: mealType == "Breakfast" ? "sunrise.fill" : mealType == "Lunch" ? "sun.max.fill" : "moon.stars.fill")
+                                                .foregroundStyle(selected ? .orange : .secondary)
+                                        }
+                                        .padding(13)
+                                        .background(
+                                            selected ? Color.orange.opacity(0.10) : Color.primary.opacity(0.045),
+                                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        )
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                                .stroke(selected ? Color.orange.opacity(0.40) : Color.primary.opacity(0.05), lineWidth: 1)
+                                        )
                                     }
                                     .buttonStyle(.plain)
+                                    .disabled(isGenerating)
                                 }
                             }
                         }
                         .padding(16)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
 
                         VStack(alignment: .leading, spacing: 12) {
-                            Text("What kind of day are you craving?")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                                .foregroundStyle(.secondary)
+                            Label("2. Pick a direction", systemImage: "wand.and.stars")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
 
-                            TextField("Indian lunch, pasta dinner, lighter breakfast...", text: $prompt, axis: .vertical)
-                                .font(.system(size: 15, design: .rounded))
-                                .lineLimit(4)
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 130), spacing: 9)], spacing: 9) {
+                                ForEach(intents, id: \.0) { intent in
+                                    Button {
+                                        selectedIntent = intent.0
+                                        prompt = intent.2
+                                    } label: {
+                                        Label(intent.0, systemImage: intent.1)
+                                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                                            .foregroundStyle(selectedIntent == intent.0 ? .white : .primary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                            .padding(.horizontal, 12)
+                                            .padding(.vertical, 11)
+                                            .background(
+                                                selectedIntent == intent.0 ? Color.orange : Color.primary.opacity(0.06),
+                                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                            )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(isGenerating)
+                                }
+                            }
+
+                            TextField("Add details: cuisine, ingredients, time, or anything to avoid…", text: $prompt, axis: .vertical)
+                                .font(.system(size: 14, design: .rounded))
+                                .lineLimit(3...6)
                                 .padding(14)
                                 .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                                .disabled(isGenerating)
                         }
                         .padding(16)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
 
-                        Button(action: onGenerate) {
-                            HStack(spacing: 10) {
-                                if isGenerating {
-                                    ProgressView()
-                                        .tint(.white)
-                                } else {
-                                    Image(systemName: "sparkles")
+                        VStack(alignment: .leading, spacing: 11) {
+                            Label("3. Review changes", systemImage: "eye.fill")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: selectedOccupiedMeals.isEmpty ? "checkmark.shield.fill" : "arrow.triangle.2.circlepath.circle.fill")
+                                    .font(.system(size: 20, weight: .bold))
+                                    .foregroundStyle(selectedOccupiedMeals.isEmpty ? .green : .orange)
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(selectedOccupiedMeals.isEmpty
+                                         ? "No existing meals will be overwritten"
+                                         : "\(selectedOccupiedMeals.joined(separator: ", ")) will be replaced")
+                                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                                    Text("\(selectedMealTypes.count) meal slot\(selectedMealTypes.count == 1 ? "" : "s") selected. Other meals on \(day) stay unchanged.")
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.secondary)
                                 }
-
-                                Text(isGenerating ? "Refreshing \(day)..." : "Regenerate This Day")
-                                    .font(.system(size: 16, weight: .bold, design: .rounded))
                             }
-                            .foregroundStyle(.white)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 56)
-                            .background(
-                                LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
-                            )
-                            .clipShape(Capsule())
                         }
-                        .buttonStyle(.plain)
-                        .disabled(selectedMealTypes.isEmpty || isGenerating)
-                        .opacity(selectedMealTypes.isEmpty ? 0.65 : 1)
+                        .padding(16)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+                        if isGenerating {
+                            HStack(spacing: 13) {
+                                ProgressView().tint(.orange)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("Refreshing \(day)")
+                                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                                    Text("ChefBuddy is balancing your choices against the rest of the day.")
+                                        .font(.system(size: 12, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        } else if let errorMessage {
+                            Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundStyle(.red)
+                                .padding(14)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+
+                        Spacer(minLength: 90)
                     }
                     .padding(.horizontal, 20)
                     .padding(.bottom, 24)
@@ -1834,6 +2841,40 @@ private struct DayCustomizationSheet: View {
                     Button("Close") {
                         dismiss()
                     }
+                    .disabled(isGenerating)
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                Button {
+                    didStartGeneration = true
+                    onGenerate()
+                } label: {
+                    HStack(spacing: 10) {
+                        if isGenerating { ProgressView().tint(.white) }
+                        Image(systemName: "sparkles")
+                        Text(isGenerating
+                             ? "Building \(day)…"
+                             : selectedOccupiedMeals.isEmpty ? "Fill Selected Meals" : "Replace Selected Meals")
+                            .font(.system(size: 16, weight: .bold, design: .rounded))
+                    }
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(
+                        selectedMealTypes.isEmpty ? Color.secondary.opacity(0.35) : Color.orange,
+                        in: RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(selectedMealTypes.isEmpty || isGenerating)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.regularMaterial)
+            }
+            .interactiveDismissDisabled(isGenerating)
+            .onChange(of: isGenerating) { wasGenerating, nowGenerating in
+                if wasGenerating && !nowGenerating && didStartGeneration && errorMessage == nil {
+                    dismiss()
                 }
             }
         }
@@ -2783,7 +3824,7 @@ private struct CustomMealRecipeSheet: View {
                                         } else {
                                             Image(systemName: "sparkles")
                                         }
-                                        Text(isAIFilling ? "Filling..." : "AI Fill")
+                                        Text(isAIFilling ? "ChefBuddy is filling..." : "ChefBuddy Fill")
                                             .font(.system(size: 12, weight: .bold, design: .rounded))
                                     }
                                     .foregroundStyle(.white)

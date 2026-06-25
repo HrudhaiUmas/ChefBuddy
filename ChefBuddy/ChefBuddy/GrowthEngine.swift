@@ -298,16 +298,34 @@ final class GrowthEngine {
             let stats = Self.mergeStats(stored: storedStats, recovered: recoveredStats)
             let recalculatedXP = Self.calculatedXP(from: stats)
             let xp = max(storedXP, recalculatedXP)
-            let currentStreak = data["currentStreak"] as? Int ?? 0
+            let storedStreak = data["currentStreak"] as? Int ?? 0
+            let storedStreakDate = Self.decodeDate(data["lastStreakActivityDate"])
+            let recoveredStreakDate = storedStreakDate == nil
+                ? await recoverLatestEligibleActivityDate(userId: userId)
+                : nil
+            let lastStreakActivityDate = storedStreakDate ?? recoveredStreakDate
+            let currentStreak = Self.refreshedStreakValue(
+                lastActivityDate: lastStreakActivityDate,
+                now: Date(),
+                currentValue: storedStreak
+            )
 
             let rank = RankTier.tier(forXP: xp).rawValue
-            if xp != storedXP || (data["rankTier"] as? String) != rank || stats != storedStats {
+            if xp != storedXP ||
+                (data["rankTier"] as? String) != rank ||
+                stats != storedStats ||
+                currentStreak != storedStreak ||
+                (storedStreakDate == nil && lastStreakActivityDate != nil) {
                 var payload: [String: Any] = [
                     "xpTotal": xp,
-                    "rankTier": rank
+                    "rankTier": rank,
+                    "currentStreak": currentStreak
                 ]
                 if stats != storedStats {
                     payload["activityStats"] = stats
+                }
+                if let lastStreakActivityDate {
+                    payload["lastStreakActivityDate"] = lastStreakActivityDate
                 }
                 try await db.collection("users").document(userId).setData(payload, merge: true)
             }
@@ -328,6 +346,9 @@ final class GrowthEngine {
 
         let eventsCollection = db.collection("users").document(userId).collection("activityEvents")
         let eventRef: DocumentReference = eventKey.map { eventsCollection.document($0) } ?? eventsCollection.document()
+        let recoveredStreakDate = Self.streakEvents.contains(type)
+            ? await recoverLatestEligibleActivityDate(userId: userId)
+            : nil
 
         do {
             if eventKey != nil {
@@ -364,24 +385,34 @@ final class GrowthEngine {
 
                 var currentStreak = data["currentStreak"] as? Int ?? 0
                 var longestStreak = data["longestStreak"] as? Int ?? 0
-                let lastActivityDate = Self.decodeDate(data["lastActivityDate"])
+                let lastStreakActivityDate =
+                    Self.decodeDate(data["lastStreakActivityDate"]) ??
+                    recoveredStreakDate
                 let now = Date()
 
                 if Self.streakEvents.contains(type) {
-                    currentStreak = Self.nextStreakValue(lastActivityDate: lastActivityDate, now: now, currentValue: currentStreak)
+                    currentStreak = Self.nextStreakValue(
+                        lastActivityDate: lastStreakActivityDate,
+                        now: now,
+                        currentValue: currentStreak
+                    )
                     longestStreak = max(longestStreak, currentStreak)
                 }
 
                 let rank = RankTier.tier(forXP: xp).rawValue
 
-                transaction.setData([
+                var userPayload: [String: Any] = [
                     "xpTotal": xp,
                     "rankTier": rank,
                     "currentStreak": currentStreak,
                     "longestStreak": longestStreak,
                     "lastActivityDate": now,
                     "activityStats": stats
-                ], forDocument: userRef, merge: true)
+                ]
+                if Self.streakEvents.contains(type) {
+                    userPayload["lastStreakActivityDate"] = now
+                }
+                transaction.setData(userPayload, forDocument: userRef, merge: true)
 
                 var eventPayload: [String: Any] = [
                     "type": type.rawValue,
@@ -510,6 +541,49 @@ final class GrowthEngine {
         return recovered
     }
 
+    private func recoverLatestEligibleActivityDate(userId: String) async -> Date? {
+        let userRef = db.collection("users").document(userId)
+        var candidates: [Date] = []
+
+        do {
+            let events = try await userRef.collection("activityEvents").getDocuments()
+            for document in events.documents {
+                let data = document.data()
+                guard let rawType = data["type"] as? String,
+                      let type = ActivityEventType(rawValue: rawType),
+                      Self.streakEvents.contains(type),
+                      let date = Self.decodeDate(data["createdAt"]) else { continue }
+                candidates.append(date)
+            }
+        } catch {
+            print("Failed to recover streak activity events: \(error.localizedDescription)")
+        }
+
+        do {
+            let recipes = try await userRef.collection("recipes").getDocuments()
+            candidates.append(contentsOf: recipes.documents.compactMap {
+                Self.decodeDate($0.data()["lastCookedAt"])
+            })
+        } catch {
+            print("Failed to recover streak recipe dates: \(error.localizedDescription)")
+        }
+
+        do {
+            let plan = try await userRef.collection("mealPlan").getDocuments()
+            candidates.append(contentsOf: plan.documents.compactMap { document in
+                let data = document.data()
+                let status = (data["status"] as? String ?? "").lowercased()
+                guard status == MealPlanSlotStatus.cooked.rawValue ||
+                        status == MealPlanSlotStatus.logged.rawValue else { return nil }
+                return Self.decodeDate(data["completedAt"])
+            })
+        } catch {
+            print("Failed to recover streak meal-plan dates: \(error.localizedDescription)")
+        }
+
+        return candidates.max()
+    }
+
     private static func mergeStats(stored: [String: Int], recovered: [String: Int]) -> [String: Int] {
         var merged = stored
         for (key, value) in recovered {
@@ -549,7 +623,7 @@ final class GrowthEngine {
             ("recipe_archivist", "Recipe Archivist", "Build a deep recipe bench for every mood and night.", "folder.fill.badge.plus", recipeCount, [10, 25, 75, 150]),
             ("favorite_curator", "Favorite Curator", "Mark the recipes that actually belong in your core rotation.", "heart.circle.fill", favoriteCount, [3, 10, 25, 60]),
             ("cuisine_hopper", "Cuisine Hopper", "Explore enough cuisines to become a more adventurous cook.", "globe.americas.fill", distinctCuisineCount, [2, 5, 10, 18]),
-            ("profile_polished", "Profile Polished", "Complete the profile details that sharpen personalization.", "person.crop.circle.badge.checkmark", profileCompletionScore, [20, 40, 80, 100]),
+            ("profile_polished", "Kitchen Setup", "Complete the cooking preferences and nutrition targets that power personalization.", "slider.horizontal.3", profileCompletionScore, [20, 40, 80, 100]),
             ("streak_chef", "Streak Chef", "Show up regularly and keep your streak alive.", "flame.fill", currentStreak, [3, 7, 14, 30]),
             ("streak_master", "Streak Master", "Turn consistency into a longer-term rhythm.", "bolt.heart.fill", currentStreak, [7, 21, 45, 90]),
             ("rank_up", "Rising Rank", "Earn XP through real kitchen activity and climb tiers.", "star.circle.fill", xp, [120, 350, 800, 1500]),
@@ -623,17 +697,17 @@ final class GrowthEngine {
 
         let profileCompletionScore: Int = {
             var score = 0
-            let handle = (profileData["profileHandle"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let bio = (profileData["profileBio"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
             let cuisines = profileData["cuisines"] as? [String] ?? []
             let macroTags = profileData["macroTags"] as? [String] ?? []
             let appliances = profileData["appliances"] as? [String] ?? []
+            let diets = profileData["dietTags"] as? [String] ?? []
+            let nutritionTargets = profileData["nutritionTargets"] as? [String: Any]
 
-            if !handle.isEmpty { score += 1 }
-            if !bio.isEmpty { score += 1 }
             if !cuisines.isEmpty { score += 1 }
             if !macroTags.isEmpty { score += 1 }
             if !appliances.isEmpty { score += 1 }
+            if !diets.isEmpty { score += 1 }
+            if nutritionTargets != nil { score += 1 }
 
             return Int((Double(score) / 5.0 * 100.0).rounded())
         }()
@@ -773,7 +847,7 @@ final class GrowthEngine {
         return raw as? Date
     }
 
-    private static func nextStreakValue(lastActivityDate: Date?, now: Date, currentValue: Int) -> Int {
+    static func nextStreakValue(lastActivityDate: Date?, now: Date, currentValue: Int) -> Int {
         let calendar = Calendar.current
         guard let lastActivityDate else { return 1 }
 
@@ -788,5 +862,18 @@ final class GrowthEngine {
             return max(1, currentValue + 1)
         }
         return 1
+    }
+
+    static func refreshedStreakValue(lastActivityDate: Date?, now: Date, currentValue: Int) -> Int {
+        guard let lastActivityDate else { return 0 }
+        let calendar = Calendar.current
+        let startLast = calendar.startOfDay(for: lastActivityDate)
+        let startNow = calendar.startOfDay(for: now)
+        let delta = calendar.dateComponents([.day], from: startLast, to: startNow).day ?? 0
+
+        if delta <= 1 {
+            return max(currentValue, 1)
+        }
+        return 0
     }
 }

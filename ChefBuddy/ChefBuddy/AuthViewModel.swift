@@ -179,6 +179,13 @@ class AuthViewModel: ObservableObject {
 
         if let dailyCalorieTarget {
             updatedData["dailyCalorieTarget"] = dailyCalorieTarget
+            if var targets = currentUserProfile?.nutritionTargets {
+                targets.calories = dailyCalorieTarget
+                targets.updatedAt = Date()
+                if let encodedTargets = try? Firestore.Encoder().encode(targets) {
+                    updatedData["nutritionTargets"] = encodedTargets
+                }
+            }
         } else {
             updatedData["dailyCalorieTarget"] = FieldValue.delete()
         }
@@ -309,6 +316,35 @@ class AuthViewModel: ObservableObject {
                 object: nil,
                 userInfo: ["pantryId": pantryId as Any]
             )
+        }
+    }
+
+    func updateNutritionTargets(_ targets: NutritionTargets) {
+        guard let uid = userSession?.uid else { return }
+
+        do {
+            let encoded = try Firestore.Encoder().encode(targets)
+            let payload: [String: Any] = [
+                "nutritionTargets": encoded,
+                "dailyCalorieTarget": targets.calories
+            ]
+
+            db.collection("users").document(uid).setData(payload, merge: true) { [weak self] error in
+                if let error {
+                    self?.errorMessage = "Failed to save nutrition targets: \(error.localizedDescription)"
+                    return
+                }
+
+                guard var profile = self?.currentUserProfile else {
+                    self?.fetchUserProfile()
+                    return
+                }
+                profile.nutritionTargets = targets
+                profile.dailyCalorieTarget = targets.calories
+                self?.currentUserProfile = profile
+            }
+        } catch {
+            errorMessage = "Failed to encode nutrition targets: \(error.localizedDescription)"
         }
     }
 

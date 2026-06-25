@@ -30,6 +30,12 @@ private enum ProfileHubTab: String, CaseIterable, Identifiable {
     }
 }
 
+private enum SimplifiedProfileTab: String, CaseIterable, Identifiable {
+    case cookbook = "Cookbook"
+    case journey = "Journey"
+    var id: String { rawValue }
+}
+
 private enum ProfileAchievementCategory: String, CaseIterable, Identifiable {
     case consistency = "Consistency"
     case cooking = "Cooking"
@@ -81,10 +87,18 @@ struct ProfileHubView: View {
     @State private var feedbackBanner: ProfileFeedbackBanner? = nil
     @State private var profileCardGlow = false
     @State private var xpChipPulse = false
+    @State private var simplifiedTab: SimplifiedProfileTab = .cookbook
 
     private let db = Firestore.firestore()
 
     private var userId: String { authVM.userSession?.uid ?? "" }
+    private var accountName: String {
+        if let displayName = authVM.userSession?.displayName,
+           !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return displayName
+        }
+        return authVM.userSession?.email?.split(separator: "@").first.map(String.init) ?? "Chef"
+    }
 
     private var displayHandle: String {
         let trimmed = handleText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -295,11 +309,11 @@ struct ProfileHubView: View {
 
     private var profileCompletionScore: Int {
         var score = 0
-        if !(authVM.currentUserProfile?.profileHandle?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) { score += 1 }
-        if !(authVM.currentUserProfile?.profileBio?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true) { score += 1 }
         if !(authVM.currentUserProfile?.cuisines.isEmpty ?? true) { score += 1 }
         if !(authVM.currentUserProfile?.macroTags.isEmpty ?? true) { score += 1 }
         if !(authVM.currentUserProfile?.appliances.isEmpty ?? true) { score += 1 }
+        if !(authVM.currentUserProfile?.dietTags.isEmpty ?? true) { score += 1 }
+        if authVM.currentUserProfile?.nutritionTargets != nil { score += 1 }
         return Int((Double(score) / 5.0 * 100).rounded())
     }
 
@@ -348,6 +362,226 @@ struct ProfileHubView: View {
     }
 
     var body: some View {
+        simplifiedBody
+    }
+
+    private var simplifiedBody: some View {
+        ZStack {
+            ProfileHubBackground()
+
+            ScrollView(showsIndicators: false) {
+                VStack(alignment: .leading, spacing: 18) {
+                    simpleAccountHeader
+
+                    Picker("Profile section", selection: $simplifiedTab) {
+                        ForEach(SimplifiedProfileTab.allCases) { tab in
+                            Text(tab.rawValue).tag(tab)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+
+                    if simplifiedTab == .cookbook {
+                        VStack(spacing: 14) {
+                            recipeLibrarySummaryCard
+                            if let topRecipe {
+                                featuredRecipeCard(topRecipe)
+                            }
+                            topCookedRecipesCard
+                        }
+                    } else {
+                        simplifiedJourney
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 20)
+                .padding(.bottom, 120)
+            }
+        }
+        .toolbar(.hidden, for: .navigationBar)
+        .onAppear {
+            startListeners()
+            guard !userId.isEmpty else { return }
+            Task {
+                await assistant.setupAssistant(userId: userId)
+                await GrowthEngine.shared.refreshDerivedProgress(userId: userId)
+            }
+        }
+        .onChange(of: simplifiedTab) { _, tab in
+            guard tab == .journey, !userId.isEmpty else { return }
+            Task { await GrowthEngine.shared.refreshDerivedProgress(userId: userId) }
+        }
+        .onDisappear {
+            userProfileListener?.remove()
+            userProfileListener = nil
+            recipesListener?.remove()
+            recipesListener = nil
+            achievementListener?.remove()
+            achievementListener = nil
+        }
+        .sheet(isPresented: $showEditPreferences) {
+            NavigationStack {
+                ProfileSettingsView(showsDismissButton: true, showsSignOutButton: true)
+                    .environmentObject(authVM)
+            }
+        }
+        .sheet(isPresented: $showBadgeVault) {
+            NavigationStack {
+                BadgeVaultView(
+                    badges: displayedAchievements,
+                    displayHandle: authVM.userSession?.email ?? "ChefBuddy account",
+                    currentRank: rankProgress.current,
+                    xpTotal: xpTotal
+                )
+            }
+        }
+        .sheet(item: $selectedRecipe) { recipe in
+            RecipeDetailView(
+                recipe: recipe,
+                assistant: assistant,
+                onFavorite: { toggleFavorite(recipe) },
+                onDelete: { deleteRecipe(recipe) },
+                userId: userId,
+                onRecipeUpdated: { updateRecipe($0) },
+                onMarkCooked: { markRecipeCooked(recipe) }
+            )
+        }
+        .sheet(item: $selectedAchievement) { badge in
+            AchievementCertificateSheet(
+                badge: badge,
+                currentRank: rankProgress.current,
+                xpTotal: xpTotal,
+                displayHandle: accountName
+            )
+        }
+    }
+
+    private var simpleAccountHeader: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "person.crop.circle.fill")
+                .font(.system(size: 48))
+                .foregroundStyle(.orange)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(accountName)
+                    .font(.system(size: 22, weight: .heavy, design: .rounded))
+                Text(authVM.userSession?.email ?? "ChefBuddy account")
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                HStack(spacing: 10) {
+                    Label(rankProgress.current.rawValue, systemImage: "star.fill")
+                    Label("\(streakCount) day streak", systemImage: "flame.fill")
+                }
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.orange)
+            }
+
+            Spacer(minLength: 8)
+
+            Button {
+                showEditPreferences = true
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 42, height: 42)
+                    .background(Color.primary.opacity(0.06), in: Circle())
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(18)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
+    }
+
+    private var simplifiedJourney: some View {
+        VStack(spacing: 14) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(rankProgress.current.rawValue)
+                            .font(.system(size: 22, weight: .heavy, design: .rounded))
+                        Text("\(xpTotal) XP")
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Text(rankProgress.next.map { "\(nextRankXPRemaining ?? 0) XP to \($0.rawValue)" } ?? "Top rank")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .foregroundStyle(.orange)
+                        .multilineTextAlignment(.trailing)
+                }
+                ProgressView(value: rankProgress.progress)
+                    .tint(.orange)
+            }
+            .padding(18)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+            HStack(spacing: 12) {
+                journeyMetric(title: "Current streak", value: "\(streakCount) days", icon: "flame.fill", tint: .orange)
+                journeyMetric(title: "Longest streak", value: "\(longestStreak) days", icon: "trophy.fill", tint: .green)
+            }
+
+            nextUnlocksCard
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Badges")
+                        .font(.system(size: 17, weight: .bold, design: .rounded))
+                    Spacer()
+                    Button("View all") { showBadgeVault = true }
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(.orange)
+                }
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    ForEach(Array(displayedAchievements.prefix(6))) { badge in
+                        Button {
+                            selectedAchievement = badge
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Image(systemName: badge.icon)
+                                    .font(.system(size: 18, weight: .bold))
+                                    .foregroundStyle(badge.isUnlocked ? .orange : .secondary)
+                                Text(badge.title)
+                                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(2)
+                                ProgressView(value: badge.tierProgressRatio)
+                                    .tint(badge.isUnlocked ? .orange : .secondary)
+                            }
+                            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+                            .padding(13)
+                            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(18)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+    }
+
+    private func journeyMetric(title: String, value: String, icon: String, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(tint)
+            Text(value)
+                .font(.system(size: 19, weight: .heavy, design: .rounded))
+            Text(title)
+                .font(.system(size: 11, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(16)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var legacyBody: some View {
         ZStack {
             ProfileHubBackground()
 

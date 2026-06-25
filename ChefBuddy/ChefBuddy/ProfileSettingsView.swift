@@ -49,6 +49,26 @@ class ProfileFormState: ObservableObject {
         Int(dailyCalorieTarget.rounded())
     }
 
+    var changeFingerprint: String {
+        [
+            chefLevel,
+            dietTags.sorted().joined(separator: "|"),
+            allergies.sorted().joined(separator: "|"),
+            macroTags.sorted().joined(separator: "|"),
+            "\(Int(age))", "\(Int(heightInches))", "\(Int(weight))", sex,
+            targetGoal, activityLevel,
+            appliances.sorted().joined(separator: "|"),
+            cookTime,
+            cuisines.sorted().joined(separator: "|"),
+            spiceTolerance,
+            dislikesList.sorted().joined(separator: "|"),
+            servingSize,
+            budget,
+            "\(resolvedDailyCalorieTarget)",
+            notificationPreferences.map { "\($0.slotId)-\($0.hour)-\($0.minute)-\($0.isEnabled)" }.joined(separator: "|")
+        ].joined(separator: "•")
+    }
+
     func load(from profile: DBUser?) {
         guard let profile = profile else { return }
         chefLevel = profile.chefLevel
@@ -83,6 +103,34 @@ class ProfileFormState: ObservableObject {
         notificationPreferences = profile.notificationPreferences?.isEmpty == false
             ? profile.notificationPreferences!
             : NotificationSlotPreference.defaults
+    }
+}
+
+private enum SettingsPanel: String, CaseIterable, Identifiable {
+    case preferences = "Preferences"
+    case logOut = "Log Out"
+    var id: String { rawValue }
+}
+
+private enum ProfilePreferenceCategory: String, CaseIterable, Identifiable {
+    case basics = "Basics"
+    case bodyGoals = "Body & Goals"
+    case kitchen = "Kitchen"
+    case taste = "Taste"
+    case notifications = "Notifications"
+    case chefBuddyAI = "ChefBuddy AI"
+
+    var id: String { rawValue }
+
+    var icon: String {
+        switch self {
+        case .basics: return "person.text.rectangle"
+        case .bodyGoals: return "figure.walk"
+        case .kitchen: return "oven.fill"
+        case .taste: return "fork.knife"
+        case .notifications: return "bell.badge.fill"
+        case .chefBuddyAI: return "sparkles"
+        }
     }
 }
 
@@ -178,85 +226,201 @@ struct ProfileSettingsView: View {
     @StateObject private var formState = ProfileFormState()
     @State private var isSaving = false
     @State private var isResettingDiscovery = false
+    @State private var selectedPanel: SettingsPanel = .preferences
+    @State private var selectedCategory: ProfilePreferenceCategory = .basics
+    @State private var initialFingerprint = ""
+    @State private var saveSucceeded = false
+    @State private var showLogOutConfirmation = false
+
+    private var hasUnsavedChanges: Bool {
+        !initialFingerprint.isEmpty && formState.changeFingerprint != initialFingerprint
+    }
 
     var body: some View {
         ZStack {
             ProfileBackground()
-            PreferencesFormContent(
-                formState: formState,
-                title: "Your Kitchen Profile",
-                subtitle: "Tweak your preferences for better AI suggestions.",
-                isResettingDiscovery: isResettingDiscovery,
-                onResetDiscovery: resetDiscoveryPreferences
-            )
+
+            VStack(spacing: 0) {
+                Picker("Settings section", selection: $selectedPanel) {
+                    ForEach(SettingsPanel.allCases) { panel in
+                        Text(panel.rawValue).tag(panel)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+
+                if selectedPanel == .preferences {
+                    preferenceCategoryStrip
+
+                    PreferencesFormContent(
+                        formState: formState,
+                        title: selectedCategory.rawValue,
+                        subtitle: categorySubtitle,
+                        selectedCategory: selectedCategory,
+                        isResettingDiscovery: isResettingDiscovery,
+                        onResetDiscovery: resetDiscoveryPreferences
+                    )
+                } else {
+                    logOutPanel
+                }
+            }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             HStack {
-                HStack(spacing: 12) {
-                    if showsDismissButton {
-                        Button(action: { dismiss() }) {
-                            Image(systemName: "arrow.left.circle.fill")
-                                .font(.system(size: 28))
-                                .foregroundStyle(Color.primary.opacity(0.8), .ultraThinMaterial)
-                        }
-                    }
-
-                    Button(action: saveChanges) {
-                        HStack(spacing: 8) {
-                            if isSaving {
-                                ProgressView()
-                                    .tint(.white)
-                                    .controlSize(.small)
-                            } else {
-                                Image(systemName: "checkmark")
-                                    .font(.system(size: 12, weight: .bold))
-                            }
-
-                            Text(isSaving ? "Saving..." : "Save Changes")
-                                .font(.system(size: 14, weight: .bold, design: .rounded))
-                        }
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 11)
-                        .background(
-                            LinearGradient(
-                                colors: [.orange, .green.opacity(0.9)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
-                        .clipShape(Capsule())
-                        .shadow(color: .orange.opacity(0.22), radius: 10, y: 5)
+                if showsDismissButton {
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 40, height: 40)
+                            .background(.ultraThinMaterial, in: Circle())
                     }
                     .buttonStyle(.plain)
-                    .disabled(isSaving)
                 }
 
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Settings")
+                        .font(.system(size: 18, weight: .heavy, design: .rounded))
+                    Text("Your Kitchen Profile")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
                 Spacer()
-
-                if showsSignOutButton {
-                    Button("Log Out") {
-                        authVM.signOut()
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 4)
+            .padding(.bottom, 8)
+            .background(.regularMaterial)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if selectedPanel == .preferences {
+                Button(action: saveChanges) {
+                    HStack(spacing: 9) {
+                        if isSaving {
+                            ProgressView().tint(.white)
+                        } else {
+                            Image(systemName: saveSucceeded ? "checkmark.circle.fill" : "checkmark")
+                        }
+                        Text(isSaving ? "Saving Changes..." : saveSucceeded && !hasUnsavedChanges ? "Changes Saved" : hasUnsavedChanges ? "Save Changes" : "Everything Is Up to Date")
+                            .font(.system(size: 15, weight: .bold, design: .rounded))
                     }
-                    .font(.system(size: 14, weight: .bold, design: .rounded))
-                    .foregroundStyle(.red)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(
-                        Capsule()
-                            .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 15)
+                    .background(
+                        hasUnsavedChanges || isSaving
+                        ? AnyShapeStyle(LinearGradient(colors: [.orange, .green.opacity(0.88)], startPoint: .leading, endPoint: .trailing))
+                        : AnyShapeStyle(Color.green.opacity(0.78)),
+                        in: RoundedRectangle(cornerRadius: 17, style: .continuous)
                     )
                 }
+                .buttonStyle(.plain)
+                .disabled(isSaving || !hasUnsavedChanges)
+                .padding(.horizontal, 20)
+                .padding(.vertical, 12)
+                .background(.regularMaterial)
             }
-            .padding(.horizontal, 24)
-            .padding(.top, 4)
-            .padding(.bottom, 10)
-            .background(Color.clear)
         }
         .navigationBarBackButtonHidden(true)
         .onAppear {
             formState.load(from: authVM.currentUserProfile)
+            DispatchQueue.main.async {
+                initialFingerprint = formState.changeFingerprint
+            }
+        }
+        .confirmationDialog("Log out of ChefBuddy?", isPresented: $showLogOutConfirmation, titleVisibility: .visible) {
+            Button("Log Out", role: .destructive) {
+                authVM.signOut()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Your recipes and preferences stay saved to your account.")
+        }
+    }
+
+    private var preferenceCategoryStrip: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 9) {
+                ForEach(ProfilePreferenceCategory.allCases) { category in
+                    Button {
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
+                            selectedCategory = category
+                        }
+                    } label: {
+                        HStack(spacing: 7) {
+                            Image(systemName: category.icon)
+                            Text(category.rawValue)
+                        }
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(selectedCategory == category ? .white : .primary)
+                        .padding(.horizontal, 13)
+                        .padding(.vertical, 10)
+                        .background(
+                            selectedCategory == category ? Color.orange : Color.primary.opacity(0.06),
+                            in: Capsule()
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 8)
+        }
+    }
+
+    private var categorySubtitle: String {
+        switch selectedCategory {
+        case .basics: return "Cooking experience, dietary preferences, allergies, and macro priorities."
+        case .bodyGoals: return "Body details, activity, goals, and ChefBuddy’s calorie planning target."
+        case .kitchen: return "Your appliances and the amount of time you usually have to cook."
+        case .taste: return "Favorite cuisines, spice, dislikes, household size, and budget."
+        case .notifications: return "Choose which helpful ChefBuddy nudges you want and when they arrive."
+        case .chefBuddyAI: return "Control and reset the taste signals used by recipe discovery."
+        }
+    }
+
+    private var logOutPanel: some View {
+        ScrollView {
+            VStack(spacing: 20) {
+                Image(systemName: "person.crop.circle.badge.xmark")
+                    .font(.system(size: 52, weight: .semibold))
+                    .foregroundStyle(.red)
+                    .frame(width: 110, height: 110)
+                    .background(Color.red.opacity(0.10), in: Circle())
+
+                VStack(spacing: 7) {
+                    Text("Account & Session")
+                        .font(.system(size: 28, weight: .heavy, design: .rounded))
+                    Text(authVM.userSession?.email ?? "ChefBuddy account")
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Label("Your saved recipes remain in your account", systemImage: "checkmark.circle.fill")
+                    Label("Meal plans and pantry items stay synced", systemImage: "checkmark.circle.fill")
+                    Label("You can sign back in at any time", systemImage: "checkmark.circle.fill")
+                }
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(18)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+
+                Button {
+                    showLogOutConfirmation = true
+                } label: {
+                    Label("Log Out of ChefBuddy", systemImage: "rectangle.portrait.and.arrow.right")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 15)
+                        .background(Color.red, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(24)
         }
     }
 
@@ -309,9 +473,9 @@ struct ProfileSettingsView: View {
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
             isSaving = false
-            if showsDismissButton {
-                dismiss()
-            }
+            initialFingerprint = formState.changeFingerprint
+            saveSucceeded = true
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
         }
     }
 
@@ -361,6 +525,7 @@ private struct PreferencesFormContent: View {
     @ObservedObject var formState: ProfileFormState
     let title: String
     let subtitle: String
+    var selectedCategory: ProfilePreferenceCategory? = nil
     var isResettingDiscovery: Bool = false
     var onResetDiscovery: (() -> Void)? = nil
 
@@ -459,7 +624,8 @@ private struct PreferencesFormContent: View {
                 .padding(.top, 20)
 
 
-                AnimatedSection(isVisible: showSections[0]) {
+                if selectedCategory == nil || selectedCategory == .basics {
+                    AnimatedSection(isVisible: showSections[0]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "The Basics", icon: "person.text.rectangle")
 
@@ -552,10 +718,12 @@ private struct PreferencesFormContent: View {
                             activeSheet = .macro
                         }
                     }
+                    }
                 }
 
 
-                AnimatedSection(isVisible: showSections[1]) {
+                if selectedCategory == nil || selectedCategory == .bodyGoals {
+                    AnimatedSection(isVisible: showSections[1]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "Body & Goals", icon: "figure.walk")
 
@@ -736,10 +904,12 @@ private struct PreferencesFormContent: View {
                         )
                         .padding(.horizontal, 24)
                     }
+                    }
                 }
 
 
-                AnimatedSection(isVisible: showSections[2]) {
+                if selectedCategory == nil || selectedCategory == .kitchen {
+                    AnimatedSection(isVisible: showSections[2]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "Kitchen & Time", icon: "timer")
 
@@ -799,10 +969,12 @@ private struct PreferencesFormContent: View {
                             activeSheet = .cookTime
                         }
                     }
+                    }
                 }
 
 
-                AnimatedSection(isVisible: showSections[3]) {
+                if selectedCategory == nil || selectedCategory == .taste {
+                    AnimatedSection(isVisible: showSections[3]) {
                     VStack(alignment: .leading, spacing: 28) {
                         ProfileSectionHeader(title: "Taste & Household", icon: "fork.knife")
 
@@ -943,9 +1115,11 @@ private struct PreferencesFormContent: View {
                             activeSheet = .budget
                         }
                     }
+                    }
                 }
 
-                AnimatedSection(isVisible: showSections[4]) {
+                if selectedCategory == nil || selectedCategory == .notifications {
+                    AnimatedSection(isVisible: showSections[4]) {
                     VStack(alignment: .leading, spacing: 22) {
                         ProfileSectionHeader(title: "Notifications", icon: "bell.badge")
 
@@ -982,9 +1156,10 @@ private struct PreferencesFormContent: View {
                         )
                         .padding(.horizontal, 24)
                     }
+                    }
                 }
 
-                if let onResetDiscovery {
+                if (selectedCategory == nil || selectedCategory == .chefBuddyAI), let onResetDiscovery {
                     AnimatedSection(isVisible: showSections[5]) {
                         VStack(alignment: .leading, spacing: 22) {
                             ProfileSectionHeader(title: "AI Discovery", icon: "sparkles")

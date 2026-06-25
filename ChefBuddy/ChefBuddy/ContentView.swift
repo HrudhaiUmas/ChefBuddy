@@ -12,6 +12,7 @@ struct ContentView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var authVM = AuthViewModel()
     @StateObject private var notificationManager = NotificationManager.shared
+    @StateObject private var deepLinkRouter = ChefBuddyDeepLinkRouter.shared
     @State private var showHallucinationWarning = true
 
     var body: some View {
@@ -51,6 +52,7 @@ struct ContentView: View {
                     .environmentObject(notificationManager)
             }
         }
+        .environmentObject(deepLinkRouter)
 
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: authVM.userSession != nil)
         .animation(.spring(response: 0.6, dampingFraction: 0.8), value: authVM.isFetchingProfile)

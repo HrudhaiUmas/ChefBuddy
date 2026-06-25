@@ -107,6 +107,7 @@ enum GroceryStore: String, CaseIterable, Codable, Identifiable {
     case walmart = "Walmart"
     case costco = "Costco"
     case traderJoes = "Trader Joe's"
+    case amazon = "Amazon"
 
     var id: String { rawValue }
 
@@ -116,7 +117,34 @@ enum GroceryStore: String, CaseIterable, Codable, Identifiable {
         case .walmart: return "🏬"
         case .costco: return "📦"
         case .traderJoes: return "🥕"
+        case .amazon: return "📦"
         }
+    }
+
+    func searchURL(for product: GroceryStoreProduct) -> URL? {
+        let query = [product.brand, product.name]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: " ")
+
+        var components: URLComponents
+        switch self {
+        case .safeway:
+            components = URLComponents(string: "https://www.safeway.com/shop/search-results.html")!
+            components.queryItems = [URLQueryItem(name: "q", value: query)]
+        case .walmart:
+            components = URLComponents(string: "https://www.walmart.com/search")!
+            components.queryItems = [URLQueryItem(name: "q", value: query)]
+        case .costco:
+            components = URLComponents(string: "https://www.costco.com/s")!
+            components.queryItems = [URLQueryItem(name: "keyword", value: query)]
+        case .traderJoes:
+            components = URLComponents(string: "https://www.traderjoes.com/home/search")!
+            components.queryItems = [URLQueryItem(name: "q", value: query)]
+        case .amazon:
+            components = URLComponents(string: "https://www.amazon.com/s")!
+            components.queryItems = [URLQueryItem(name: "k", value: query)]
+        }
+        return components.url
     }
 }
 
@@ -405,42 +433,57 @@ extension CookingAssistant {
 // Central controller for all recipe operations: Firestore CRUD, AI generation,
 // suggestion loading, review saving, and nutrition backfill.
 // Owned by RecipesView and kept alive as long as that view is on screen.
+enum RecipeGenerationState: Equatable {
+    case idle
+    case generating
+    case succeeded
+    case failed(String)
+}
+
 class RecipesViewModel: ObservableObject {
     @Published var recipes: [Recipe] = []
     @Published var isGenerating = false
     @Published var errorMessage: String? = nil
     @Published var selectedFilter = "All"
+    @Published var selectedCuisineFilter = "All Cuisines"
     @Published var justGeneratedRecipe: Recipe? = nil
     @Published var elapsedSeconds: Int = 0
+    @Published var generationState: RecipeGenerationState = .idle
 
     private let db = Firestore.firestore()
     private var listener: ListenerRegistration?
     private var timerTask: Task<Void, Never>? = nil
 
-    let filters = ["All", "❤️ Saved", "✅ Cooked", "⚡ Quick", "💪 Protein", "🥗 Healthy"]
+    let filters = ["All", "❤️ Saved", "✅ Cooked"]
 
     var filteredRecipes: [Recipe] {
+        let focused: [Recipe]
         switch selectedFilter {
         case "❤️ Saved":
-            return recipes.filter { $0.isFavorite }
+            focused = recipes.filter { $0.isFavorite }
         case "✅ Cooked":
-            return recipes.filter { $0.hasBeenCooked }
+            focused = recipes.filter { $0.hasBeenCooked }
         case "⚡ Quick":
-            return recipes.filter {
-                $0.cookTime.contains("15") || $0.cookTime.lowercased().contains("quick")
+            focused = recipes.filter {
+                (prepMinutes(from: $0.cookTime) ?? 999) <= 30
             }
         case "💪 Protein":
-            return recipes.filter {
+            focused = recipes.filter {
                 $0.tags.contains(where: { $0.lowercased().contains("protein") })
             }
         case "🥗 Healthy":
-            return recipes.filter {
+            focused = recipes.filter {
                 $0.tags.contains(where: {
                     $0.lowercased().contains("healthy") || $0.lowercased().contains("low cal")
                 })
             }
         default:
-            return recipes
+            focused = recipes
+        }
+
+        guard selectedCuisineFilter != "All Cuisines" else { return focused }
+        return focused.filter {
+            detectedCuisineTag(title: $0.title, description: $0.description, tags: $0.tags) == selectedCuisineFilter
         }
     }
 
@@ -639,9 +682,10 @@ class RecipesViewModel: ObservableObject {
     }
 
     func generateAndSave(prompt: String, assistant: CookingAssistant, userId: String) {
-        guard !userId.isEmpty else { return }
+        guard !userId.isEmpty, !isGenerating else { return }
 
         isGenerating = true
+        generationState = .generating
         elapsedSeconds = 0
         errorMessage = nil
         justGeneratedRecipe = nil
@@ -672,6 +716,7 @@ class RecipesViewModel: ObservableObject {
                 await MainActor.run {
                     self.timerTask?.cancel()
                     self.isGenerating = false
+                    self.generationState = .succeeded
                     self.justGeneratedRecipe = recipe
                 }
             } catch {
@@ -679,10 +724,17 @@ class RecipesViewModel: ObservableObject {
                     self.timerTask?.cancel()
                     self.isGenerating = false
                     self.errorMessage = error.localizedDescription
+                    self.generationState = .failed(error.localizedDescription)
                     print("Generation error: \(error)")
                 }
             }
         }
+    }
+
+    func resetGenerationPresentation() {
+        guard !isGenerating else { return }
+        generationState = .idle
+        errorMessage = nil
     }
 
     static func parseRecipe(from text: String) -> Recipe {
@@ -899,6 +951,7 @@ struct RecipesView: View {
     @State private var selectedPantrySuggestionRecipe: Recipe? = nil
     @State private var infoSheet: RecipesInfoSheet? = nil
     @State private var showSwipeDiscovery = false
+    @State private var swipeDiscoveryError: String? = nil
 
     private var userId: String { authVM.userSession?.uid ?? "" }
     private var budgetPreference: String {
@@ -1015,6 +1068,18 @@ struct RecipesView: View {
 
     private var currentPantrySuggestions: [RecipeSuggestion] {
         pantrySuggestionsById[selectedPantryId ?? ""] ?? []
+    }
+
+    private var recipeLibraryCuisines: [String] {
+        let cuisines = vm.recipes.map {
+            detectedCuisineTag(title: $0.title, description: $0.description, tags: $0.tags)
+        }
+        return ["All Cuisines"] + Array(Set(cuisines)).sorted()
+    }
+
+    private var recipeFilterCount: Int {
+        (vm.selectedFilter == "All" ? 0 : 1)
+        + (vm.selectedCuisineFilter == "All Cuisines" ? 0 : 1)
     }
 
     private func startPantryListener() {
@@ -1355,6 +1420,7 @@ struct RecipesView: View {
 
         await MainActor.run {
             isLoadingSwipeDiscoveryDeck = true
+            swipeDiscoveryError = nil
             if force {
                 swipeDiscoveryDeck = []
                 discoveryStore.swipeDiscoverySeenTitles = []
@@ -1379,6 +1445,9 @@ struct RecipesView: View {
             }
             markSwipeDiscoveryTitlesSeen(swipeDiscoveryDeck)
             isLoadingSwipeDiscoveryDeck = false
+            if swipeDiscoveryDeck.isEmpty {
+                swipeDiscoveryError = "ChefBuddy couldn’t build a fresh deck right now."
+            }
         }
     }
 
@@ -1749,10 +1818,8 @@ struct RecipesView: View {
         showSwipeDiscovery = true
 
         Task {
-            if swipeDiscoveryDeck.isEmpty {
-                await loadSwipeDiscoveryDeck(force: true)
-            } else {
-                await refreshDiscoverySnapshot()
+            await refreshDiscoverySnapshot()
+            if !swipeDiscoveryDeck.isEmpty {
                 await topUpSwipeDiscoveryDeckIfNeeded()
             }
         }
@@ -1798,13 +1865,8 @@ struct RecipesView: View {
                 stopPantryListener()
             }
             .task {
-                await withTaskGroup(of: Void.self) { group in
-                    if chefBuddyPickSuggestions.isEmpty {
-                        group.addTask { await loadChefBuddyPicks(force: true) }
-                    }
-                    if swipeDiscoveryDeck.isEmpty {
-                        group.addTask { await loadSwipeDiscoveryDeck(force: true) }
-                    }
+                if chefBuddyPickSuggestions.isEmpty {
+                    await loadChefBuddyPicks(force: true)
                 }
             }
         .onChange(of: vm.justGeneratedRecipe) { recipe in
@@ -1865,7 +1927,7 @@ struct RecipesView: View {
                 .presentationDragIndicator(.visible)
         }
         .sheet(isPresented: $showCustomRecipeSheet) {
-            RecipesCustomRecipeSheet(
+            SimplifiedCustomRecipeSheet(
                 assistant: assistant,
                 onSave: { recipe in
                     vm.saveSuggestedRecipe(recipe, userId: userId, openAfterSave: false)
@@ -2019,6 +2081,7 @@ struct RecipesView: View {
                 behaviorSnapshot: discoverySnapshot,
                 isLoadingInitial: isLoadingSwipeDiscoveryDeck && swipeDiscoveryDeck.isEmpty,
                 isLoadingMore: isToppingUpSwipeDiscoveryDeck,
+                errorMessage: swipeDiscoveryError,
                 onDismiss: { showSwipeDiscovery = false },
                 onRefresh: {
                     Task { await loadSwipeDiscoveryDeck(force: true) }
@@ -2121,43 +2184,96 @@ struct RecipesView: View {
         }
     }
     private var filterBar: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 10) {
-                    ForEach(vm.filters, id: \.self) { filter in
-                        Button {
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                ForEach(vm.filters, id: \.self) { filter in
+                    Button {
+                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                        withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
+                            vm.selectedFilter = filter
+                        }
+                    } label: {
+                        Text(filter.replacingOccurrences(of: "❤️ ", with: "").replacingOccurrences(of: "✅ ", with: ""))
+                            .font(.system(size: 13, weight: .bold, design: .rounded))
+                            .foregroundStyle(vm.selectedFilter == filter ? .white : .primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 10)
+                            .background(
+                                vm.selectedFilter == filter ? Color.orange : Color.primary.opacity(0.06),
+                                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
 
-                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
-                                vm.selectedFilter = filter
-                            }
-                        } label: {
-                            Text(filter)
-                                .font(.system(size: 14, weight: .semibold, design: .rounded))
-                                .foregroundStyle(vm.selectedFilter == filter ? .white : .primary)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .background(
-                                    vm.selectedFilter == filter
-                                    ? AnyView(
-                                        LinearGradient(
-                                            colors: [.orange, .green.opacity(0.85)],
-                                            startPoint: .leading,
-                                            endPoint: .trailing
-                                        )
-                                    )
-                                    : AnyView(Color.primary.opacity(0.07))
-                                )
-                                .clipShape(Capsule())
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(vm.filteredRecipes.count) recipe\(vm.filteredRecipes.count == 1 ? "" : "s")")
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                    Text(vm.selectedCuisineFilter == "All Cuisines" ? "Your cookbook" : vm.selectedCuisineFilter)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer()
+
+                if recipeFilterCount > 0 {
+                    Button("Reset") {
+                        withAnimation {
+                            vm.selectedFilter = "All"
+                            vm.selectedCuisineFilter = "All Cuisines"
                         }
                     }
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                }
+
+                Menu {
+                    Section("Recipe quality") {
+                        ForEach(["⚡ Quick", "💪 Protein", "🥗 Healthy"], id: \.self) { quality in
+                            Button {
+                                vm.selectedFilter = vm.selectedFilter == quality ? "All" : quality
+                            } label: {
+                                if vm.selectedFilter == quality {
+                                    Label(quality, systemImage: "checkmark")
+                                } else {
+                                    Text(quality)
+                                }
+                            }
+                        }
+                    }
+
+                    Section("Cuisine") {
+                        ForEach(recipeLibraryCuisines, id: \.self) { cuisine in
+                            Button {
+                                vm.selectedCuisineFilter = cuisine
+                            } label: {
+                                if vm.selectedCuisineFilter == cuisine {
+                                    Label(cuisine, systemImage: "checkmark")
+                                } else {
+                                    Text(cuisine)
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "line.3.horizontal.decrease")
+                        Text(recipeFilterCount == 0 ? "Filter" : "Filter \(recipeFilterCount)")
+                    }
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .background(Color.orange.opacity(0.10), in: Capsule())
                 }
             }
         }
-        .padding(14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .padding(12)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .stroke(Color.primary.opacity(0.05), lineWidth: 1)
         )
         .padding(.horizontal, 16)
@@ -3270,54 +3386,80 @@ private struct SwipeDiscoveryLoadingSection: View {
     @State private var timer: Timer?
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            HStack(spacing: 14) {
+        VStack(spacing: 20) {
+            ZStack {
+                Circle()
+                    .stroke(Color.orange.opacity(0.12), lineWidth: 12)
+                    .frame(width: 92, height: 92)
+
+                Circle()
+                    .trim(from: 0.08, to: 0.72)
+                    .stroke(
+                        LinearGradient(colors: [.orange, .green], startPoint: .topLeading, endPoint: .bottomTrailing),
+                        style: StrokeStyle(lineWidth: 8, lineCap: .round)
+                    )
+                    .frame(width: 92, height: 92)
+                    .rotationEffect(.degrees(Double(animationStep * 38)))
+                    .animation(.linear(duration: 0.45), value: animationStep)
+
                 ZStack {
                     Circle()
-                        .fill(
-                            LinearGradient(
-                                colors: [Color.orange.opacity(0.24), Color.green.opacity(0.22)],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 62, height: 62)
-
-                    Circle()
-                        .stroke(Color.white.opacity(0.16), lineWidth: 1.2)
-                        .frame(width: 74, height: 74)
-                        .scaleEffect(animationStep.isMultiple(of: 2) ? 0.98 : 1.04)
+                        .fill(Color.orange.opacity(0.12))
+                        .frame(width: 66, height: 66)
 
                     Image(systemName: "sparkles")
                         .font(.system(size: 22, weight: .bold))
-                        .foregroundStyle(.white)
-                }
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Building your discovery deck")
-                        .font(.system(size: 18, weight: .heavy, design: .rounded))
-
-                    Text("ChefBuddy is mixing comfort picks with a few fresh cuisines so the stack feels personal without getting repetitive.")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(spacing: 8) {
-                        loadingStatusPill(text: "Fresh mix", color: .orange)
-                        loadingStatusPill(text: "Taste-aware", color: .green)
-                        loadingStatusPill(text: "Fast refill", color: .blue)
-                    }
+                        .foregroundStyle(.orange)
+                        .symbolEffect(.pulse, value: animationStep)
                 }
             }
 
-            VStack(spacing: 12) {
-                loadingPreviewCard(height: 74, widthInset: 88, tilt: -7, opacity: 0.08)
-                loadingPreviewCard(height: 90, widthInset: 46, tilt: 5, opacity: 0.10)
-                loadingPrimaryPreview(step: animationStep)
+            VStack(spacing: 7) {
+                Text("Building your discovery deck")
+                    .font(.system(size: 21, weight: .heavy, design: .rounded))
+
+                Text("ChefBuddy is balancing familiar favorites with a few fresh ideas. Your first cards will be ready in a moment.")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
             }
-            .padding(.top, 8)
+
+            HStack(spacing: 8) {
+                loadingStatusPill(text: "Taste-aware", color: .green)
+                loadingStatusPill(text: "Fresh mix", color: .orange)
+                loadingStatusPill(text: "No repeats", color: .blue)
+            }
+
+            HStack(spacing: 12) {
+                Text(["🍜", "🥗", "🌮"][animationStep % 3])
+                    .font(.system(size: 32))
+                    .frame(width: 58, height: 58)
+                    .background(Color.white.opacity(0.07), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                VStack(alignment: .leading, spacing: 7) {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.primary.opacity(0.12))
+                        .frame(width: 150, height: 12)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 9)
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.primary.opacity(0.08))
+                        .frame(width: 110, height: 9)
+                }
+            }
+            .padding(14)
+            .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
-        .padding(.horizontal, 6)
+        .padding(22)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+        )
         .onAppear {
             timer = Timer.scheduledTimer(withTimeInterval: 0.45, repeats: true) { _ in
                 animationStep += 1
@@ -3441,6 +3583,7 @@ private struct SwipeDiscoveryScreen: View {
     let behaviorSnapshot: DiscoveryBehaviorSnapshot
     let isLoadingInitial: Bool
     let isLoadingMore: Bool
+    let errorMessage: String?
     let onDismiss: () -> Void
     let onRefresh: () -> Void
     let onSave: (RecipeSuggestion) -> Void
@@ -3454,7 +3597,7 @@ private struct SwipeDiscoveryScreen: View {
             ZStack {
                 ChefBuddyBackground()
 
-                VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 16) {
                     HStack {
                         Button(action: onDismiss) {
                             Image(systemName: "xmark")
@@ -3477,8 +3620,8 @@ private struct SwipeDiscoveryScreen: View {
 
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 10) {
-                        Text("Swipe Discovery")
-                                .font(.system(size: 34, weight: .heavy, design: .rounded))
+                            Text("Swipe Discovery")
+                                .font(.system(size: 30, weight: .heavy, design: .rounded))
                                 .foregroundStyle(.primary)
 
                             Image(systemName: "sparkles")
@@ -3487,51 +3630,41 @@ private struct SwipeDiscoveryScreen: View {
                                 .offset(y: animateHeader ? -2 : 2)
                         }
 
-                        Text("Save what feels worth cooking, skip what doesn’t, and let ChefBuddy keep discovery fresh without becoming repetitive.")
+                        Text("One recipe at a time. Save what sounds good and skip what doesn’t.")
                             .font(.system(size: 14, weight: .medium, design: .rounded))
                             .foregroundStyle(.secondary)
-                            .lineSpacing(4)
-                            .fixedSize(horizontal: false, vertical: true)
-
-                        HStack(spacing: 8) {
-                            ForEach(Array(behaviorSnapshot.highlightPills.prefix(4)), id: \.self) { pill in
-                                Text(pill)
-                                    .font(.system(size: 11, weight: .bold, design: .rounded))
-                                    .foregroundStyle(.primary)
-                                    .padding(.horizontal, 10)
-                                    .padding(.vertical, 7)
-                                    .background(Color.primary.opacity(0.07), in: Capsule())
-                            }
-                        }
                     }
 
                     if suggestions.isEmpty {
                         if isLoadingInitial || isLoadingMore {
                             SwipeDiscoveryLoadingSection()
-                                .padding(.top, 38)
+                                .frame(maxHeight: .infinity, alignment: .center)
+                        } else if let errorMessage {
+                            discoveryStateCard(
+                                icon: "wifi.exclamationmark",
+                                title: "Discovery needs another try",
+                                subtitle: errorMessage,
+                                actionTitle: "Try Again",
+                                action: onRefresh
+                            )
+                        } else if behaviorSnapshot.savedCount == 0 && behaviorSnapshot.cookedCount == 0 {
+                            discoveryStateCard(
+                                icon: "sparkles.rectangle.stack",
+                                title: "Build your first deck",
+                                subtitle: "ChefBuddy will mix familiar ideas with a few approachable new cuisines based on your kitchen profile.",
+                                actionTitle: "Build My Deck",
+                                action: onRefresh
+                            )
                         } else {
-                            VStack(alignment: .leading, spacing: 16) {
-                                DiscoveryMessageCard(
-                                    title: "The deck is catching its breath",
-                                    subtitle: "ChefBuddy can line up a fresh swipe stack right away, with a mix of familiar favorites and a few new cuisines.",
-                                    icon: "wand.and.stars"
-                                )
-
-                                Button(action: onRefresh) {
-                                    Label("Keep Swiping", systemImage: "arrow.clockwise")
-                                        .font(.system(size: 15, weight: .bold, design: .rounded))
-                                        .foregroundStyle(.white)
-                                        .frame(maxWidth: .infinity)
-                                        .padding(.vertical, 15)
-                                        .background(
-                                            LinearGradient(colors: [.orange, .green.opacity(0.85)], startPoint: .leading, endPoint: .trailing)
-                                        )
-                                        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-                                }
-                                .buttonStyle(.plain)
-                            }
-                            .padding(.horizontal, 4)
-                            .padding(.top, 28)
+                            discoveryStateCard(
+                                icon: "checkmark.circle.fill",
+                                title: "You’re caught up",
+                                subtitle: "You’ve worked through this deck. Refresh for another set or head back to your saved recipes.",
+                                actionTitle: "Find More Recipes",
+                                action: onRefresh,
+                                secondaryTitle: "Back to Recipes",
+                                secondaryAction: onDismiss
+                            )
                         }
                     } else {
                         if isLoadingMore {
@@ -3551,11 +3684,11 @@ private struct SwipeDiscoveryScreen: View {
                             suggestions: suggestions,
                             behaviorSnapshot: behaviorSnapshot,
                             isLoadingMore: isLoadingMore,
-                            cardHeight: min(max(geometry.size.height * 0.34, 286), 352),
+                            cardHeight: min(max(geometry.size.height * 0.52, 390), 520),
                             onSave: onSave,
                             onSkip: onSkip
                         )
-                        .padding(.top, max(160, geometry.size.height * 0.18))
+                        .frame(maxHeight: .infinity, alignment: .center)
                     }
 
                     Spacer(minLength: 0)
@@ -3572,13 +3705,58 @@ private struct SwipeDiscoveryScreen: View {
             )
         }
         .onAppear {
-            if suggestions.isEmpty {
-                onRefresh()
-            }
             withAnimation(.easeInOut(duration: 2).repeatForever(autoreverses: true)) {
                 animateHeader = true
             }
         }
+    }
+
+    private func discoveryStateCard(
+        icon: String,
+        title: String,
+        subtitle: String,
+        actionTitle: String,
+        action: @escaping () -> Void,
+        secondaryTitle: String? = nil,
+        secondaryAction: (() -> Void)? = nil
+    ) -> some View {
+        VStack(spacing: 18) {
+            Image(systemName: icon)
+                .font(.system(size: 34, weight: .bold))
+                .foregroundStyle(.orange)
+                .frame(width: 76, height: 76)
+                .background(Color.orange.opacity(0.12), in: Circle())
+
+            VStack(spacing: 7) {
+                Text(title)
+                    .font(.system(size: 22, weight: .heavy, design: .rounded))
+                Text(subtitle)
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
+            }
+
+            Button(action: action) {
+                Text(actionTitle)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(Color.orange, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .buttonStyle(.plain)
+
+            if let secondaryTitle, let secondaryAction {
+                Button(secondaryTitle, action: secondaryAction)
+                    .font(.system(size: 14, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
+        .padding(.top, 24)
     }
 }
 
@@ -3594,6 +3772,7 @@ private struct SwipeDiscoveryDeckView: View {
     @State private var exitOffset: CGSize = .zero
     @State private var flippedCardTitle: String? = nil
     @State private var feedbackKind: SwipeDeckFeedbackKind? = nil
+    @State private var isCommittingSwipe = false
 
     private var topSuggestions: [RecipeSuggestion] {
         Array(suggestions.prefix(3))
@@ -3668,6 +3847,7 @@ private struct SwipeDiscoveryDeckView: View {
         .onChange(of: suggestions.first?.title) { _ in
             exitOffset = .zero
             dragOffset = .zero
+            isCommittingSwipe = false
         }
     }
 
@@ -3690,6 +3870,7 @@ private struct SwipeDiscoveryDeckView: View {
     private func dragGesture(for suggestion: RecipeSuggestion) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
+                guard !isCommittingSwipe else { return }
                 guard abs(value.translation.width) > abs(value.translation.height) else { return }
                 dragOffset = value.translation
             }
@@ -3710,6 +3891,8 @@ private struct SwipeDiscoveryDeckView: View {
     }
 
     private func completeSwipe(for suggestion: RecipeSuggestion, direction: SwipeDirection) {
+        guard !isCommittingSwipe else { return }
+        isCommittingSwipe = true
         let targetX = direction == .right ? UIScreen.main.bounds.width : -UIScreen.main.bounds.width
 
         withAnimation(.interactiveSpring(response: 0.24, dampingFraction: 0.84, blendDuration: 0.12)) {
@@ -3832,6 +4015,22 @@ private struct DiscoverySwipeCard: View {
         }
 
         return raw
+    }
+
+    private var shareRecipe: Recipe {
+        Recipe(
+            title: suggestion.title,
+            emoji: suggestion.emoji,
+            description: suggestion.description,
+            ingredients: suggestion.ingredients,
+            steps: suggestion.steps,
+            cookTime: suggestion.prepTime,
+            servings: suggestion.servings,
+            difficulty: suggestion.difficulty,
+            tags: suggestion.tags,
+            calories: suggestion.calories,
+            nutrition: suggestion.nutrition
+        )
     }
 
     private var flavorNotes: [(icon: String, label: String)] {
@@ -4061,13 +4260,17 @@ private struct DiscoverySwipeCard: View {
                             DiscoveryStatPill(icon: "person.2.fill", label: compactServings)
                         }
 
-                        ZStack {
-                            Circle()
-                                .fill(Color.white.opacity(0.10))
-                                .frame(width: 58, height: 58)
+                        HStack(spacing: 8) {
+                            RecipeShareButton(recipe: shareRecipe)
 
-                            Text(suggestion.emoji)
-                                .font(.system(size: 30))
+                            ZStack {
+                                Circle()
+                                    .fill(Color.white.opacity(0.10))
+                                    .frame(width: 58, height: 58)
+
+                                Text(suggestion.emoji)
+                                    .font(.system(size: 30))
+                            }
                         }
                     }
                 }
@@ -4489,19 +4692,20 @@ struct AllRecipesView: View {
     @State private var searchText = ""
     @State private var selectedCuisine = "All Cuisines"
     @State private var selectedFocusFilter = "All"
-    @State private var showFilters = true
+    @State private var selectedAttributes: Set<String> = []
+    @State private var showFilterSheet = false
     @State private var hasAppeared = false
     private let focusFilters = ["All", "Favorites", "Cooked"]
 
     private var availableCuisines: [String] {
-        let values = vm.filteredRecipes.map {
+        let values = vm.recipes.map {
             detectedCuisineTag(title: $0.title, description: $0.description, tags: $0.tags)
         }
         return ["All Cuisines"] + Array(Set(values)).sorted()
     }
 
     private var displayedRecipes: [Recipe] {
-        vm.filteredRecipes.filter { recipe in
+        vm.recipes.filter { recipe in
             let matchesSearch: Bool = {
                 let q = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
                 if q.isEmpty { return true }
@@ -4525,14 +4729,35 @@ struct AllRecipesView: View {
                 }
             }()
 
-            return matchesSearch && matchesCuisine && matchesFocus
+            let matchesAttributes = selectedAttributes.allSatisfy { attribute in
+                switch attribute {
+                case "Quick":
+                    return (prepMinutes(from: recipe.cookTime) ?? 999) <= 30
+                case "High Protein":
+                    return recipe.tags.contains { $0.localizedCaseInsensitiveContains("protein") }
+                case "Healthy":
+                    return recipe.tags.contains {
+                        $0.localizedCaseInsensitiveContains("healthy") ||
+                        $0.localizedCaseInsensitiveContains("low calorie")
+                    }
+                default:
+                    return true
+                }
+            }
+
+            return matchesSearch && matchesCuisine && matchesFocus && matchesAttributes
         }
     }
 
     private var hasActiveFilters: Bool {
         !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ||
         selectedCuisine != "All Cuisines" ||
-        selectedFocusFilter != "All"
+        selectedFocusFilter != "All" ||
+        !selectedAttributes.isEmpty
+    }
+
+    private var advancedFilterCount: Int {
+        (selectedCuisine == "All Cuisines" ? 0 : 1) + selectedAttributes.count
     }
 
     var body: some View {
@@ -4548,7 +4773,7 @@ struct AllRecipesView: View {
                                     Text("All Recipes")
                                         .font(.system(size: 30, weight: .heavy, design: .rounded))
 
-                                    Text("\(displayedRecipes.count) shown • \(vm.filteredRecipes.count) total")
+                                    Text("\(displayedRecipes.count) of \(vm.recipes.count) recipes")
                                         .font(.system(size: 13, weight: .medium, design: .rounded))
                                         .foregroundStyle(.secondary)
                                 }
@@ -4557,15 +4782,17 @@ struct AllRecipesView: View {
 
                                 Button(action: {
                                     UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                                    withAnimation(.spring(response: 0.32, dampingFraction: 0.84)) {
-                                        showFilters.toggle()
-                                    }
+                                    showFilterSheet = true
                                 }) {
-                                    Image(systemName: "line.3.horizontal.decrease.circle.fill")
-                                        .font(.system(size: 20, weight: .semibold))
-                                        .foregroundStyle(.orange, .green)
-                                        .padding(6)
-                                        .background(.ultraThinMaterial, in: Circle())
+                                    HStack(spacing: 6) {
+                                        Image(systemName: "line.3.horizontal.decrease")
+                                        Text(advancedFilterCount == 0 ? "Filter" : "Filter \(advancedFilterCount)")
+                                    }
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 9)
+                                    .background(Color.orange.opacity(0.10), in: Capsule())
                                 }
                                 .buttonStyle(.plain)
                             }
@@ -4594,113 +4821,30 @@ struct AllRecipesView: View {
                                 RoundedRectangle(cornerRadius: 14, style: .continuous)
                                     .stroke(Color.primary.opacity(0.06), lineWidth: 1)
                             )
+
+                            Picker("Recipe focus", selection: $selectedFocusFilter) {
+                                ForEach(focusFilters, id: \.self) { filter in
+                                    Text(filter).tag(filter)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+
+                            if hasActiveFilters {
+                                Button("Clear filters") {
+                                    searchText = ""
+                                    selectedCuisine = "All Cuisines"
+                                    selectedFocusFilter = "All"
+                                    selectedAttributes.removeAll()
+                                }
+                                .font(.system(size: 12, weight: .bold, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .frame(maxWidth: .infinity, alignment: .trailing)
+                            }
                         }
                         .padding(.horizontal, 16)
                         .padding(.top, 10)
                         .opacity(hasAppeared ? 1 : 0)
                         .offset(y: hasAppeared ? 0 : -10)
-
-                        if showFilters {
-                            VStack(alignment: .leading, spacing: 10) {
-                                HStack {
-                                    Text("Focus")
-                                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                    if hasActiveFilters {
-                                        Button("Reset All") {
-                                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                            searchText = ""
-                                            selectedCuisine = "All Cuisines"
-                                            selectedFocusFilter = "All"
-                                        }
-                                        .font(.system(size: 12, weight: .bold, design: .rounded))
-                                        .foregroundStyle(.orange)
-                                        .buttonStyle(.plain)
-                                    }
-                                }
-
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 8) {
-                                        ForEach(focusFilters, id: \.self) { filter in
-                                            Button(action: {
-                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                                                    selectedFocusFilter = filter
-                                                }
-                                            }) {
-                                                Text(filter)
-                                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                                    .foregroundStyle(selectedFocusFilter == filter ? .white : .primary)
-                                                    .padding(.horizontal, 12)
-                                                    .padding(.vertical, 8)
-                                                    .background(
-                                                        selectedFocusFilter == filter
-                                                        ? AnyView(
-                                                            LinearGradient(
-                                                                colors: [.orange, .green.opacity(0.85)],
-                                                                startPoint: .leading,
-                                                                endPoint: .trailing
-                                                            )
-                                                        )
-                                                        : AnyView(Color.primary.opacity(0.08))
-                                                    )
-                                                    .clipShape(Capsule())
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                }
-
-                                HStack {
-                                    Text("Cuisine")
-                                        .font(.system(size: 13, weight: .bold, design: .rounded))
-                                        .foregroundStyle(.secondary)
-                                    Spacer()
-                                }
-
-                                ScrollView(.horizontal, showsIndicators: false) {
-                                    HStack(spacing: 8) {
-                                        ForEach(availableCuisines, id: \.self) { cuisine in
-                                            Button(action: {
-                                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                                                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                                                    selectedCuisine = cuisine
-                                                }
-                                            }) {
-                                                Text(cuisine)
-                                                    .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                                    .foregroundStyle(selectedCuisine == cuisine ? .white : .primary)
-                                                    .lineLimit(1)
-                                                    .padding(.horizontal, 12)
-                                                    .padding(.vertical, 8)
-                                                    .background(
-                                                        selectedCuisine == cuisine
-                                                        ? AnyView(
-                                                            LinearGradient(
-                                                                colors: [.blue.opacity(0.85), .cyan.opacity(0.85)],
-                                                                startPoint: .leading,
-                                                                endPoint: .trailing
-                                                            )
-                                                        )
-                                                        : AnyView(Color.primary.opacity(0.08))
-                                                    )
-                                                    .clipShape(Capsule())
-                                            }
-                                            .buttonStyle(.plain)
-                                        }
-                                    }
-                                }
-                            }
-                            .padding(12)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
-                            )
-                            .padding(.horizontal, 16)
-                            .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
-                        }
 
                         if displayedRecipes.isEmpty {
                             VStack(spacing: 10) {
@@ -4714,7 +4858,7 @@ struct AllRecipesView: View {
                             .padding(.top, 24)
                         } else {
                             LazyVGrid(
-                                columns: [GridItem(.flexible()), GridItem(.flexible())],
+                                columns: [GridItem(.adaptive(minimum: 158), spacing: 14)],
                                 spacing: 14
                             ) {
                                 ForEach(displayedRecipes) { recipe in
@@ -4746,6 +4890,15 @@ struct AllRecipesView: View {
                 withAnimation(.spring(response: 0.45, dampingFraction: 0.85).delay(0.04)) {
                     hasAppeared = true
                 }
+            }
+            .sheet(isPresented: $showFilterSheet) {
+                RecipeLibraryFilterSheet(
+                    cuisines: availableCuisines,
+                    selectedCuisine: $selectedCuisine,
+                    selectedAttributes: $selectedAttributes
+                )
+                .presentationDetents([.medium])
+                .presentationDragIndicator(.visible)
             }
             .sheet(item: $selectedRecipe) { recipe in
                 RecipeDetailView(
@@ -4816,6 +4969,58 @@ struct AllRecipesView: View {
     }
 }
 
+private struct RecipeLibraryFilterSheet: View {
+    let cuisines: [String]
+    @Binding var selectedCuisine: String
+    @Binding var selectedAttributes: Set<String>
+    @Environment(\.dismiss) private var dismiss
+    private let attributes = ["Quick", "High Protein", "Healthy"]
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Cuisine") {
+                    Picker("Cuisine", selection: $selectedCuisine) {
+                        ForEach(cuisines, id: \.self) { cuisine in
+                            Text(cuisine).tag(cuisine)
+                        }
+                    }
+                }
+
+                Section("Recipe qualities") {
+                    ForEach(attributes, id: \.self) { attribute in
+                        Toggle(
+                            attribute,
+                            isOn: Binding(
+                                get: { selectedAttributes.contains(attribute) },
+                                set: { enabled in
+                                    if enabled {
+                                        selectedAttributes.insert(attribute)
+                                    } else {
+                                        selectedAttributes.remove(attribute)
+                                    }
+                                }
+                            )
+                        )
+                    }
+                }
+
+                Button("Reset advanced filters", role: .destructive) {
+                    selectedCuisine = "All Cuisines"
+                    selectedAttributes.removeAll()
+                }
+            }
+            .navigationTitle("Filter Recipes")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+    }
+}
+
 
 private struct LibraryCustomRecipeDraft {
     var title: String = ""
@@ -4833,6 +5038,442 @@ private struct LibraryCustomRecipeDraft {
     var ingredients: [String] = [""]
     var steps: [String] = [""]
     var autoPolishWithAI: Bool = true
+}
+
+private struct SimplifiedCustomRecipeSheet: View {
+    @ObservedObject var assistant: CookingAssistant
+    let onSave: (Recipe) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var draft = LibraryCustomRecipeDraft()
+    @State private var selectedPhotoItem: PhotosPickerItem?
+    @State private var selectedPhotoImage: UIImage?
+    @State private var isGenerating = false
+    @State private var isSaving = false
+    @State private var errorMessage: String?
+    @State private var isReviewing = false
+
+    private var canGenerate: Bool {
+        (!draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || selectedPhotoImage != nil) && !isGenerating
+    }
+
+    private var canSave: Bool {
+        !draft.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        draft.ingredients.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } &&
+        draft.steps.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ChefBuddyBackground()
+                ScrollView(showsIndicators: false) {
+                    if isReviewing {
+                        reviewStep
+                    } else {
+                        startingStep
+                    }
+                }
+            }
+            .navigationTitle(isReviewing ? "Review Recipe" : "New Recipe")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button(isReviewing ? "Back" : "Close") {
+                        if isReviewing {
+                            isReviewing = false
+                        } else {
+                            dismiss()
+                        }
+                    }
+                }
+            }
+            .onChange(of: selectedPhotoItem) { _ in
+                Task { await loadSelectedPhoto() }
+            }
+        }
+    }
+
+    private var startingStep: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text("Give ChefBuddy a starting point")
+                    .font(.system(size: 28, weight: .heavy, design: .rounded))
+                Text("Add a title, description, or photo. ChefBuddy Fill will build a complete recipe with measured ingredients and cookable instructions.")
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .lineSpacing(3)
+            }
+
+            PhotosPicker(selection: $selectedPhotoItem, matching: .images) {
+                Group {
+                    if let selectedPhotoImage {
+                        Image(uiImage: selectedPhotoImage)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(height: 220)
+                            .clipped()
+                    } else {
+                        VStack(spacing: 10) {
+                            Image(systemName: "photo.badge.plus")
+                                .font(.system(size: 30, weight: .semibold))
+                                .foregroundStyle(.orange)
+                            Text("Add an optional photo")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                            Text("A plated dish, ingredients, or a handwritten recipe all work.")
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 190)
+                    }
+                }
+                .background(Color.primary.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(Color.primary.opacity(0.07), lineWidth: 1)
+                )
+            }
+            .buttonStyle(.plain)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Recipe title")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                TextField("Example: Spicy tofu rice bowl", text: $draft.title)
+                    .textInputAutocapitalization(.words)
+                    .padding(14)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Description")
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                TextField("What should this dish feel or taste like?", text: $draft.description, axis: .vertical)
+                    .lineLimit(2...4)
+                    .padding(14)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            if let errorMessage {
+                Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.red)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            Button(action: fillWithAI) {
+                HStack(spacing: 10) {
+                    if isGenerating {
+                        ProgressView().tint(.white)
+                    } else {
+                        Image(systemName: "sparkles")
+                    }
+                    Text(isGenerating ? "ChefBuddy is filling your recipe..." : "ChefBuddy Fill")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 15)
+                .background(
+                    canGenerate ? Color.orange : Color.secondary.opacity(0.35),
+                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(!canGenerate)
+        }
+        .padding(20)
+        .padding(.bottom, 30)
+    }
+
+    private var reviewStep: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Make it yours")
+                    .font(.system(size: 28, weight: .heavy, design: .rounded))
+                Text("ChefBuddy filled the structure. Review anything you want before saving.")
+                    .font(.system(size: 14, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+            }
+
+            simpleTextField("Title", text: $draft.title)
+            simpleTextField("Description", text: $draft.description, multiline: true)
+            simpleTextField("Emoji", text: $draft.emoji)
+            simpleTextField("Cuisine & tags", text: $draft.tagsText)
+
+            HStack(spacing: 12) {
+                compactStepper(title: "Minutes", value: $draft.prepMinutes, range: 5...240, step: 5)
+                compactStepper(title: "Servings", value: $draft.servings, range: 1...12, step: 1)
+            }
+
+            Picker("Difficulty", selection: $draft.difficulty) {
+                Text("Easy").tag("Easy")
+                Text("Medium").tag("Medium")
+                Text("Hard").tag("Hard")
+            }
+            .pickerStyle(.segmented)
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Nutrition per serving")
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                HStack {
+                    compactNumberField("kcal", value: $draft.calories)
+                    compactNumberField("Carbs", value: $draft.carbs)
+                    compactNumberField("Protein", value: $draft.protein)
+                }
+                HStack {
+                    compactNumberField("Fat", value: $draft.fat)
+                    compactNumberField("Sodium", value: $draft.sodium)
+                }
+            }
+            .padding(15)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            editableList(title: "Ingredients", rows: $draft.ingredients, placeholder: "1 cup diced onions")
+            editableList(title: "Steps", rows: $draft.steps, placeholder: "Cook over medium heat for 4 minutes.")
+
+            Button(action: saveRecipe) {
+                HStack {
+                    if isSaving { ProgressView().tint(.white) }
+                    Text(isSaving ? "Saving..." : "Save Recipe")
+                        .font(.system(size: 16, weight: .bold, design: .rounded))
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 15)
+                .background(Color.green, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .disabled(!canSave || isSaving)
+        }
+        .padding(20)
+        .padding(.bottom, 30)
+    }
+
+    private func simpleTextField(_ title: String, text: Binding<String>, multiline: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+            TextField(title, text: text, axis: multiline ? .vertical : .horizontal)
+                .lineLimit(multiline ? 2...5 : 1...1)
+                .padding(13)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 13, style: .continuous))
+        }
+    }
+
+    private func compactStepper(title: String, value: Binding<Int>, range: ClosedRange<Int>, step: Int) -> some View {
+        Stepper(value: value, in: range, step: step) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(.secondary)
+                Text("\(value.wrappedValue)")
+                    .font(.system(size: 17, weight: .heavy, design: .rounded))
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func compactNumberField(_ title: String, value: Binding<Int>) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+            TextField("0", value: value, format: .number)
+                .keyboardType(.numberPad)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity)
+        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func editableList(title: String, rows: Binding<[String]>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+                Spacer()
+                Button {
+                    rows.wrappedValue.append("")
+                } label: {
+                    Label("Add", systemImage: "plus")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                }
+            }
+
+            ForEach(rows.wrappedValue.indices, id: \.self) { index in
+                HStack(alignment: .top, spacing: 8) {
+                    TextField(
+                        placeholder,
+                        text: Binding(
+                            get: { rows.wrappedValue[index] },
+                            set: { rows.wrappedValue[index] = $0 }
+                        ),
+                        axis: .vertical
+                    )
+                    .lineLimit(1...4)
+                    .padding(12)
+                    .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+                    Button {
+                        guard rows.wrappedValue.count > 1 else { return }
+                        rows.wrappedValue.remove(at: index)
+                    } label: {
+                        Image(systemName: "minus.circle.fill")
+                            .foregroundStyle(.red)
+                            .padding(.top, 10)
+                    }
+                    .disabled(rows.wrappedValue.count <= 1)
+                }
+            }
+        }
+        .padding(15)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private func fillWithAI() {
+        guard canGenerate else { return }
+        errorMessage = nil
+        isGenerating = true
+
+        Task {
+            do {
+                let suggestion = try await generateSuggestion(attempt: 0)
+                await MainActor.run {
+                    apply(suggestion)
+                    isGenerating = false
+                    isReviewing = true
+                }
+            } catch {
+                do {
+                    let suggestion = try await generateSuggestion(attempt: 1)
+                    await MainActor.run {
+                        apply(suggestion)
+                        isGenerating = false
+                        isReviewing = true
+                    }
+                } catch {
+                    await MainActor.run {
+                        isGenerating = false
+                        errorMessage = "ChefBuddy couldn’t build a complete draft. Check the title or photo and try again."
+                    }
+                }
+            }
+        }
+    }
+
+    private func generateSuggestion(attempt: Int) async throws -> RecipeSuggestion {
+        let originalTitle = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalDescription = draft.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prompt = """
+        Create one complete, realistic, home-cook-ready recipe from the user's title, description, and optional reference photo.
+        Title: \(originalTitle.isEmpty ? "Infer a concise menu-style title from the photo." : originalTitle)
+        Description: \(originalDescription.isEmpty ? "No description provided." : originalDescription)
+        \(attempt == 0 ? "" : "REPAIR ATTEMPT: the previous output was incomplete. Return every field, at least 4 measured ingredients, and exactly 5 to 9 detailed steps.")
+
+        Return ONLY a valid JSON object with:
+        title, emoji, description, prepTime, servings, difficulty, calories, carbs,
+        protein, fat, saturatedFat, sugar, fiber, sodium, tags, ingredients, steps, matchReason.
+
+        Requirements:
+        - If a photo is present, inspect visible ingredients, likely cuisine, cooking method, plating, and portion size.
+        - Every ingredient must have a realistic quantity and unit wherever possible.
+        - Return 5 to 9 chronological instructions.
+        - Each instruction must be specific enough to cook from and include relevant heat level or temperature, timing, technique, and doneness cues.
+        - Do not invent impossible techniques, missing ingredients, or conflicting cook times.
+        - Use realistic servings, preparation time, and per-serving nutrition.
+        - Keep the description to one appetizing sentence.
+        """
+
+        let raw: String
+        if let selectedPhotoImage {
+            raw = try await assistant.getLiveHelp(image: selectedPhotoImage, question: prompt)
+        } else {
+            raw = try await assistant.getHelp(question: prompt)
+        }
+
+        guard let json = CookingAssistant.extractJSONObject(from: raw),
+              let data = json.data(using: .utf8) else {
+            throw CookingAssistantError.invalidRecipeResponse
+        }
+
+        let suggestion = try JSONDecoder().decode(RecipeSuggestion.self, from: data)
+        let validIngredients = suggestion.ingredients.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let validSteps = suggestion.steps.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        guard validIngredients.count >= 4,
+              (5...9).contains(validSteps.count),
+              validSteps.allSatisfy({ $0.count >= 24 }) else {
+            throw CookingAssistantError.invalidRecipeResponse
+        }
+        return suggestion
+    }
+
+    private func apply(_ suggestion: RecipeSuggestion) {
+        let originalTitle = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalDescription = draft.description.trimmingCharacters(in: .whitespacesAndNewlines)
+        draft.title = originalTitle.isEmpty ? suggestion.title : originalTitle
+        draft.description = originalDescription.isEmpty ? suggestion.description : originalDescription
+        draft.emoji = suggestion.emoji.isEmpty ? "🍽️" : suggestion.emoji
+        draft.tagsText = suggestion.tags.joined(separator: ", ")
+        draft.prepMinutes = prepMinutes(from: suggestion.prepTime) ?? 25
+        draft.servings = max(1, suggestion.servings.components(separatedBy: CharacterSet.decimalDigits.inverted).compactMap(Int.init).first ?? 2)
+        draft.difficulty = ["Easy", "Medium", "Hard"].contains(suggestion.difficulty) ? suggestion.difficulty : "Easy"
+        draft.calories = calorieNumber(from: suggestion.calories) ?? 0
+        draft.carbs = calorieNumber(from: suggestion.carbs) ?? 0
+        draft.protein = calorieNumber(from: suggestion.protein) ?? 0
+        draft.fat = calorieNumber(from: suggestion.fat) ?? 0
+        draft.sodium = calorieNumber(from: suggestion.sodium) ?? 0
+        draft.ingredients = suggestion.ingredients
+        draft.steps = suggestion.steps
+    }
+
+    private func saveRecipe() {
+        guard canSave, !isSaving else { return }
+        isSaving = true
+        let tags = draft.tagsText.split(separator: ",").map {
+            $0.trimmingCharacters(in: .whitespacesAndNewlines)
+        }.filter { !$0.isEmpty }
+
+        let recipe = Recipe(
+            title: draft.title.trimmingCharacters(in: .whitespacesAndNewlines),
+            emoji: draft.emoji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "🍽️" : draft.emoji,
+            description: draft.description.trimmingCharacters(in: .whitespacesAndNewlines),
+            ingredients: draft.ingredients.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            steps: draft.steps.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty },
+            cookTime: "\(draft.prepMinutes) mins",
+            servings: "\(draft.servings) people",
+            difficulty: draft.difficulty,
+            tags: tags.isEmpty ? ["Custom"] : tags,
+            calories: "\(draft.calories) kcal",
+            nutrition: NutritionInfo(
+                calories: "\(draft.calories) kcal",
+                carbs: "\(draft.carbs)g",
+                protein: "\(draft.protein)g",
+                fat: "\(draft.fat)g",
+                saturatedFat: "",
+                sugar: "",
+                fiber: "",
+                sodium: "\(draft.sodium)mg"
+            )
+        )
+        onSave(recipe)
+        dismiss()
+    }
+
+    private func loadSelectedPhoto() async {
+        guard let selectedPhotoItem,
+              let data = try? await selectedPhotoItem.loadTransferable(type: Data.self),
+              let image = UIImage(data: data) else { return }
+        await MainActor.run {
+            selectedPhotoImage = image
+        }
+    }
 }
 
 struct RecipesCustomRecipeSheet: View {
@@ -4961,7 +5602,7 @@ struct RecipesCustomRecipeSheet: View {
                                             } else {
                                                 Image(systemName: "sparkles.rectangle.stack.fill")
                                             }
-                                            Text(isGeneratingWithAI ? "Filling..." : "AI Fill")
+                                            Text(isGeneratingWithAI ? "ChefBuddy is filling..." : "ChefBuddy Fill")
                                         }
                                         .font(.system(size: 13, weight: .bold, design: .rounded))
                                         .foregroundStyle(.white)
@@ -4979,7 +5620,7 @@ struct RecipesCustomRecipeSheet: View {
 
                                 Text(canAIFill
                                      ? "ChefBuddy can infer the title, fill ingredients, tighten the cooking steps, and estimate nutrition from your current draft plus the image."
-                                     : "Type a recipe title or upload a reference photo to unlock AI Fill.")
+                                     : "Type a recipe title or upload a reference photo to unlock ChefBuddy Fill.")
                                     .font(.system(size: 12, weight: .medium, design: .rounded))
                                     .foregroundStyle(.secondary)
                             }
@@ -5062,7 +5703,7 @@ struct RecipesCustomRecipeSheet: View {
 
                         customRecipeSectionCard(
                             title: "Nutrition Per Serving",
-                            subtitle: "Enter the numbers you want saved on the recipe card. ChefBuddy can overwrite these when AI Fill is used."
+                            subtitle: "Enter the numbers you want saved on the recipe card. ChefBuddy can overwrite these when ChefBuddy Fill is used."
                         ) {
                             VStack(spacing: 14) {
                                 HStack(alignment: .top, spacing: 14) {
@@ -5721,123 +6362,273 @@ struct GenerateRecipeSheet: View {
     @ObservedObject var vm: RecipesViewModel
     let assistant: CookingAssistant
     let userId: String
+    var title: String = "Generate a Recipe"
+    var subtitle: String = "Describe the meal in your head and ChefBuddy will turn it into a complete recipe."
 
     @State private var prompt = ""
-    @State private var selectedQuick: String? = nil
     @FocusState private var focused: Bool
     @Environment(\.dismiss) private var dismiss
 
     let quickPrompts = [
-        "Something quick & healthy",
-        "High protein dinner",
-        "Use chicken & rice",
-        "Vegetarian pasta",
-        "30-min meal prep"
+        "Quick & healthy",
+        "High-protein dinner",
+        "Chicken and rice",
+        "Cozy vegetarian pasta",
+        "30-minute meal prep",
+        "Use what I have"
     ]
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            HStack {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Generate a Recipe")
-                        .font(.system(size: 22, weight: .heavy, design: .rounded))
+    private var trimmedPrompt: String {
+        prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-                    Text("Tell ChefBuddy what you're craving")
-                        .font(.system(size: 14))
-                        .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                Image(systemName: "sparkles")
-                    .font(.system(size: 24))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.orange, .green],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-            }
-            .padding(.top, 8)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(quickPrompts, id: \.self) { quick in
-                        Button(action: {
-                            UIImpactFeedbackGenerator(style: .soft).impactOccurred()
-                            prompt = quick
-                            selectedQuick = quick
-                        }) {
-                            Text(quick)
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                .foregroundStyle(selectedQuick == quick ? .white : .primary)
-                                .padding(.horizontal, 14)
-                                .padding(.vertical, 8)
-                                .background(
-                                    selectedQuick == quick
-                                    ? AnyView(
-                                        LinearGradient(
-                                            colors: [.orange, .green.opacity(0.85)],
-                                            startPoint: .leading,
-                                            endPoint: .trailing
-                                        )
-                                    )
-                                    : AnyView(Color(.systemGray6))
-                                )
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-            }
-
-            TextField("Or describe your own idea...", text: $prompt)
-                .font(.system(size: 16, design: .rounded))
-                .padding()
-                .background(Color(.systemGray6))
-                .clipShape(RoundedRectangle(cornerRadius: 14))
-                .focused($focused)
-                .onChange(of: prompt) { _ in
-                    selectedQuick = nil
-                }
-
-            Button(action: {
-                guard !prompt.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-
-                UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                focused = false
-                vm.generateAndSave(prompt: prompt, assistant: assistant, userId: userId)
-                dismiss()
-            }) {
-                HStack(spacing: 10) {
-                    Image(systemName: "sparkles")
-                    Text("Generate Recipe")
-                        .font(.system(size: 17, weight: .bold, design: .rounded))
-                }
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 56)
-                .background(
-                    prompt.trimmingCharacters(in: .whitespaces).isEmpty
-                    ? AnyView(Color.gray.opacity(0.35))
-                    : AnyView(
-                        LinearGradient(
-                            colors: [.orange, .green.opacity(0.85)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                )
-                .clipShape(Capsule())
-                .shadow(color: .orange.opacity(0.3), radius: 10, y: 4)
-            }
-            .disabled(prompt.trimmingCharacters(in: .whitespaces).isEmpty)
-
-            Spacer()
+    private var generationPhase: (icon: String, title: String, subtitle: String) {
+        switch vm.elapsedSeconds {
+        case 0...3:
+            return ("lightbulb.fill", "Understanding your craving", "Reading the flavors, ingredients, and constraints you gave ChefBuddy.")
+        case 4...8:
+            return ("carrot.fill", "Building the ingredient list", "Choosing realistic quantities and a balanced combination of ingredients.")
+        case 9...14:
+            return ("list.number", "Writing clear cooking steps", "Adding temperatures, timing, technique, and doneness cues.")
+        default:
+            return ("checkmark.seal.fill", "Finishing your recipe card", "Checking nutrition, servings, and the final details before saving.")
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 20)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ZStack {
+                ChefBuddyBackground()
+
+                ScrollView(showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 22) {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                        .fill(
+                                            LinearGradient(
+                                                colors: [.orange.opacity(0.20), .green.opacity(0.14)],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            )
+                                        )
+                                        .frame(width: 64, height: 64)
+                                    Image(systemName: "wand.and.stars")
+                                        .font(.system(size: 25, weight: .bold))
+                                        .foregroundStyle(.orange)
+                                }
+                                Spacer()
+                                Text("CHEFBUDDY CREATOR")
+                                    .font(.system(size: 11, weight: .black, design: .rounded))
+                                    .foregroundStyle(.orange)
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 7)
+                                    .background(Color.orange.opacity(0.10), in: Capsule())
+                            }
+
+                            Text(title)
+                                .font(.system(size: 32, weight: .heavy, design: .rounded))
+
+                            Text(subtitle)
+                                .font(.system(size: 15, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                                .lineSpacing(4)
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Start with a vibe")
+                                .font(.system(size: 14, weight: .bold, design: .rounded))
+
+                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 9)], spacing: 9) {
+                                ForEach(quickPrompts, id: \.self) { quick in
+                                    Button {
+                                        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+                                        prompt = quick
+                                        focused = false
+                                    } label: {
+                                        HStack(spacing: 7) {
+                                            Image(systemName: prompt == quick ? "checkmark.circle.fill" : "sparkles")
+                                            Text(quick)
+                                                .lineLimit(1)
+                                                .minimumScaleFactor(0.85)
+                                        }
+                                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                                        .foregroundStyle(prompt == quick ? .white : .primary)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 11)
+                                        .background(
+                                            prompt == quick ? Color.orange : Color.primary.opacity(0.06),
+                                            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+                                    .disabled(vm.isGenerating)
+                                }
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            HStack {
+                                Text("What are you craving?")
+                                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                                Spacer()
+                                Text("\(prompt.count)/500")
+                                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            ZStack(alignment: .topLeading) {
+                                if prompt.isEmpty {
+                                    Text("Example: A spicy, high-protein rice bowl with crispy chicken, lots of vegetables, and a creamy sauce. Keep it under 35 minutes.")
+                                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.secondary.opacity(0.8))
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 17)
+                                        .allowsHitTesting(false)
+                                }
+
+                                TextEditor(text: $prompt)
+                                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                                    .scrollContentBackground(.hidden)
+                                    .focused($focused)
+                                    .frame(minHeight: 150)
+                                    .padding(10)
+                                    .disabled(vm.isGenerating)
+                                    .onChange(of: prompt) { _, newValue in
+                                        if newValue.count > 500 {
+                                            prompt = String(newValue.prefix(500))
+                                        }
+                                    }
+                            }
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                                    .stroke(focused ? Color.orange.opacity(0.65) : Color.primary.opacity(0.07), lineWidth: focused ? 2 : 1)
+                            )
+
+                            Text("Useful details: ingredients, cuisine, time, servings, dietary needs, and the mood you want.")
+                                .font(.system(size: 12, weight: .medium, design: .rounded))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        if vm.isGenerating {
+                            generationProgressCard
+                        } else if case .failed(let message) = vm.generationState {
+                            generationErrorCard(message)
+                        }
+
+                        Spacer(minLength: 110)
+                    }
+                    .padding(.horizontal, 20)
+                    .padding(.top, 12)
+                }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Close") { dismiss() }
+                        .disabled(vm.isGenerating)
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                VStack(spacing: 0) {
+                    Divider().opacity(0.5)
+                    Button(action: generate) {
+                        HStack(spacing: 10) {
+                            if vm.isGenerating {
+                                ProgressView().tint(.white)
+                            } else {
+                                Image(systemName: "sparkles")
+                            }
+                            Text(vm.isGenerating ? "Creating your recipe • \(vm.elapsedSeconds)s" : "Create My Recipe")
+                                .font(.system(size: 17, weight: .bold, design: .rounded))
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 56)
+                        .background(
+                            trimmedPrompt.isEmpty ? Color.secondary.opacity(0.35) : Color.orange,
+                            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        )
+                        .shadow(color: trimmedPrompt.isEmpty ? .clear : .orange.opacity(0.24), radius: 12, y: 6)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(trimmedPrompt.isEmpty || vm.isGenerating)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 14)
+                }
+                .background(.regularMaterial)
+            }
+            .interactiveDismissDisabled(vm.isGenerating)
+            .onAppear {
+                if !vm.isGenerating { vm.resetGenerationPresentation() }
+            }
+            .onChange(of: vm.justGeneratedRecipe) { _, recipe in
+                guard recipe != nil else { return }
+                UINotificationFeedbackGenerator().notificationOccurred(.success)
+                dismiss()
+            }
+        }
+    }
+
+    private var generationProgressCard: some View {
+        HStack(spacing: 15) {
+            ZStack {
+                Circle()
+                    .fill(Color.orange.opacity(0.14))
+                    .frame(width: 58, height: 58)
+                ProgressView()
+                    .tint(.orange)
+                    .scaleEffect(1.15)
+            }
+            VStack(alignment: .leading, spacing: 5) {
+                Label(generationPhase.title, systemImage: generationPhase.icon)
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                Text(generationPhase.subtitle)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 4)
+            Text("\(vm.elapsedSeconds)s")
+                .font(.system(size: 13, weight: .black, design: .monospaced))
+                .foregroundStyle(.orange)
+        }
+        .padding(16)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color.orange.opacity(0.20), lineWidth: 1)
+        )
+    }
+
+    private func generationErrorCard(_ message: String) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label("ChefBuddy couldn’t finish that recipe", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(.red)
+            Text(message)
+                .font(.system(size: 12, weight: .medium, design: .rounded))
+                .foregroundStyle(.secondary)
+            Button("Try Again", action: generate)
+                .font(.system(size: 13, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.red, in: Capsule())
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private func generate() {
+        guard !trimmedPrompt.isEmpty, !vm.isGenerating else { return }
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        focused = false
+        vm.generateAndSave(prompt: trimmedPrompt, assistant: assistant, userId: userId)
     }
 }
 
@@ -5927,6 +6718,8 @@ struct RecipeDetailView: View {
                         }
 
                         Spacer()
+
+                        RecipeShareButton(recipe: recipe)
 
                         Button(action: {
                             UIImpactFeedbackGenerator(style: .light).impactOccurred()
@@ -6231,6 +7024,8 @@ struct SuggestedRecipeDetailView: View {
                         }
 
                         Spacer()
+
+                        RecipeShareButton(recipe: recipe)
 
                         Button(action: {
                             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -7207,16 +8002,15 @@ struct GroceryListView: View {
 
     private var scrollContent: some View {
         ScrollView(showsIndicators: false) {
-            VStack(alignment: .leading, spacing: 18) {
+            LazyVStack(alignment: .leading, spacing: 16, pinnedViews: [.sectionHeaders]) {
                 headerMetricsCard
-                searchBarCard
-                storeControlsCard
-
-                if isMatchingStoreProducts {
-                    matchingBanner
+                Section {
+                    groupedListContent
+                } header: {
+                    compactShoppingControls
+                        .padding(.vertical, 6)
+                        .background(.regularMaterial)
                 }
-
-                groupedListContent
             }
             .padding(.horizontal, 16)
             .padding(.top, 8)
@@ -7225,29 +8019,36 @@ struct GroceryListView: View {
     }
 
     private var headerMetricsCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Grocery List")
-                        .font(.system(size: 30, weight: .heavy, design: .rounded))
+                    HStack(spacing: 12) {
+                        Image(systemName: "cart.fill")
+                            .font(.system(size: 24, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 52, height: 52)
+                            .background(
+                                LinearGradient(
+                                    colors: [.orange, .green.opacity(0.86)],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                in: RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            )
 
-                    Text("Everything still missing from your recipes, organized into a cleaner shopping flow.")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Grocery List")
+                                .font(.system(size: 28, weight: .heavy, design: .rounded))
+                            Text("SHOPPING COMPANION")
+                                .font(.system(size: 10, weight: .black, design: .rounded))
+                                .foregroundStyle(.orange)
+                        }
+                    }
+
+                    Text(totalCount == 0 ? "Add missing ingredients from a recipe to start your list." : "\(totalCount - purchasedCount) items left across \(recipeGroupCount) recipe\(recipeGroupCount == 1 ? "" : "s").")
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-
-                    HStack(spacing: 8) {
-                        groceryHeroPill(
-                            title: selectedPantry.map { "\($0.emoji) \($0.name)" } ?? "Pantry syncing",
-                            systemImage: "basket.fill",
-                            tint: .green
-                        )
-                        groceryHeroPill(
-                            title: selectedStore.rawValue,
-                            systemImage: "cart.fill",
-                            tint: .orange
-                        )
-                    }
                 }
 
                 Spacer(minLength: 0)
@@ -7271,34 +8072,149 @@ struct GroceryListView: View {
                         .frame(width: 78, height: 78)
 
                     VStack(spacing: 2) {
-                        Text("\(purchasedCount)")
+                        Text("\(Int((completionRatio * 100).rounded()))%")
                             .font(.system(size: 20, weight: .heavy, design: .rounded))
-                        Text("picked up")
+                        Text("complete")
                             .font(.system(size: 10, weight: .bold, design: .rounded))
                             .foregroundStyle(.secondary)
                     }
                 }
             }
 
-            HStack(spacing: 12) {
-                GroceryStatTile(icon: "fork.knife", value: "\(recipeGroupCount)", label: "Recipes", color: .blue)
-                GroceryStatTile(icon: "cart.fill", value: "\(totalCount)", label: "Need", color: .orange)
-                GroceryStatTile(icon: "checkmark.circle.fill", value: "\(purchasedCount)", label: "Picked Up", color: .green)
+            if let selectedPantry {
+                Label("\(selectedPantry.emoji) Checking against \(selectedPantry.name)", systemImage: "basket.fill")
+                    .font(.system(size: 12, weight: .bold, design: .rounded))
+                    .foregroundStyle(.green)
             }
         }
         .padding(18)
-        .background(
-            LinearGradient(
-                colors: [Color.white.opacity(0.05), Color.green.opacity(0.08)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ),
-            in: RoundedRectangle(cornerRadius: 24, style: .continuous)
-        )
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 24, style: .continuous)
                 .stroke(Color.primary.opacity(0.06), lineWidth: 1)
         )
+    }
+
+    private var compactShoppingControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .font(.system(size: 15, weight: .bold))
+                    .foregroundStyle(.orange)
+                TextField("Search ingredients or recipes", text: $searchText)
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                if !searchText.isEmpty {
+                    Button {
+                        searchText = ""
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                Menu {
+                    Button("Match products") {
+                        Task { await matchStoreProducts(force: true) }
+                    }
+                    .disabled(isMatchingStoreProducts || filteredItems.isEmpty)
+
+                    Button("Remove purchased", role: .destructive) {
+                        removePurchasedItems()
+                    }
+                    .disabled(purchasedCount == 0)
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundStyle(.orange)
+                        .frame(width: 36, height: 36)
+                        .background(Color.orange.opacity(0.10), in: Circle())
+                }
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 17, style: .continuous)
+                    .stroke(Color.primary.opacity(0.06), lineWidth: 1)
+            )
+
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Where are you shopping?")
+                        .font(.system(size: 14, weight: .bold, design: .rounded))
+                    Text("ChefBuddy will match products for this store.")
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await matchStoreProducts(force: true) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 14, weight: .bold))
+                        .foregroundStyle(.orange)
+                        .frame(width: 34, height: 34)
+                        .background(Color.orange.opacity(0.10), in: Circle())
+                }
+                .buttonStyle(.plain)
+                .disabled(isMatchingStoreProducts || filteredItems.isEmpty)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 10) {
+                    ForEach(GroceryStore.allCases) { store in
+                        Button {
+                            guard selectedStore != store else { return }
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                            withAnimation(.spring(response: 0.32, dampingFraction: 0.82)) {
+                                selectedStore = store
+                            }
+                        } label: {
+                            VStack(alignment: .leading, spacing: 8) {
+                                HStack {
+                                    Text(store.emoji)
+                                        .font(.system(size: 22))
+                                    Spacer()
+                                    if selectedStore == store {
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundStyle(.white)
+                                    }
+                                }
+                                Text(store.rawValue)
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .lineLimit(1)
+                                Text(selectedStore == store ? "Selected" : "Tap to shop")
+                                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                    .opacity(0.75)
+                            }
+                            .foregroundStyle(selectedStore == store ? .white : .primary)
+                            .frame(width: 104, alignment: .leading)
+                            .padding(12)
+                            .background(
+                                selectedStore == store
+                                ? AnyShapeStyle(
+                                    LinearGradient(
+                                        colors: [.orange, .green.opacity(0.84)],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                : AnyShapeStyle(Color(.secondarySystemBackground)),
+                                in: RoundedRectangle(cornerRadius: 17, style: .continuous)
+                            )
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+
+            if isMatchingStoreProducts {
+                matchingBanner
+            }
+        }
+        .padding(12)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
     private var searchBarCard: some View {
@@ -7574,30 +8490,20 @@ struct GroceryListView: View {
                         .padding(.vertical, 6)
                         .background((group.remainingCount == 0 ? Color.green : Color.orange).opacity(0.14), in: Capsule())
 
-                    Button(action: { toggleGroupExpansion(group) }) {
-                        Image(systemName: expandedRecipeId == group.id ? "chevron.up" : "chevron.down")
-                            .font(.system(size: 12, weight: .bold))
+                    Menu {
+                        Button(role: .destructive) {
+                            removeRecipeGroup(group)
+                        } label: {
+                            Label("Remove recipe items", systemImage: "trash")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis")
+                            .font(.system(size: 14, weight: .bold))
                             .foregroundStyle(.secondary)
-                            .frame(width: 28, height: 28)
-                            .background(Color.primary.opacity(0.06), in: Circle())
+                            .frame(width: 30, height: 30)
                     }
                     .buttonStyle(.plain)
                 }
-            }
-
-            HStack {
-                Button(role: .destructive) {
-                    removeRecipeGroup(group)
-                } label: {
-                    Label("Remove Recipe", systemImage: "trash.fill")
-                        .font(.system(size: 11, weight: .bold, design: .rounded))
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(Color.red.opacity(0.12), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                Spacer()
             }
 
             if expandedRecipeId == group.id {
@@ -7618,6 +8524,20 @@ struct GroceryListView: View {
                 }
                 .transition(.opacity.combined(with: .move(edge: .top)))
             }
+
+            Button {
+                toggleGroupExpansion(group)
+            } label: {
+                Label(
+                    expandedRecipeId == group.id ? "Hide items" : "Show items",
+                    systemImage: expandedRecipeId == group.id ? "chevron.up" : "chevron.down"
+                )
+                .font(.system(size: 12, weight: .bold, design: .rounded))
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+            .buttonStyle(.plain)
         }
         .padding(14)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
@@ -7799,6 +8719,7 @@ private struct GroceryListItemRow: View {
     let isMatching: Bool
     let onTogglePurchased: () -> Void
     let onFindMatch: () -> Void
+    @State private var showProducts = false
 
     private var selectedStoreMatches: [GroceryStoreProduct] {
         item.matchesByStore[store.rawValue] ?? []
@@ -7865,37 +8786,61 @@ private struct GroceryListItemRow: View {
                 }
             }
 
-            if !item.isPurchased, let best = selectedStoreMatches.first {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(best.name)
-                            .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        Spacer(minLength: 0)
-                        Text(best.price)
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .foregroundStyle(.orange)
+            if !item.isPurchased, !selectedStoreMatches.isEmpty {
+                Button {
+                    withAnimation(.spring(response: 0.3, dampingFraction: 0.84)) {
+                        showProducts.toggle()
                     }
-                    Text("\(best.brand) • \(best.size) • \(best.section)")
-                        .font(.system(size: 11, weight: .medium, design: .rounded))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-
-                    if !best.note.isEmpty {
-                        Text(best.note)
-                            .font(.system(size: 10, weight: .medium, design: .rounded))
+                } label: {
+                    HStack {
+                        Text("\(selectedStoreMatches.count) product match\(selectedStoreMatches.count == 1 ? "" : "es")")
+                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                            .foregroundStyle(.blue)
+                        Spacer()
+                        Image(systemName: showProducts ? "chevron.up" : "chevron.down")
+                            .font(.system(size: 11, weight: .bold))
                             .foregroundStyle(.secondary)
-                            .lineLimit(1)
                     }
                 }
-                .padding(10)
-                .background(
-                    RoundedRectangle(cornerRadius: 10)
-                        .fill(Color.blue.opacity(0.09))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 10)
-                        .stroke(Color.blue.opacity(0.18), lineWidth: 1)
-                )
+                .buttonStyle(.plain)
+
+                if showProducts {
+                    VStack(spacing: 8) {
+                        ForEach(selectedStoreMatches) { product in
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(alignment: .firstTextBaseline) {
+                                    Text(product.name)
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    Spacer()
+                                    Text(product.price)
+                                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                                        .foregroundStyle(.orange)
+                                }
+
+                                Text("\(product.brand) • \(product.size) • \(product.section)")
+                                    .font(.system(size: 11, weight: .medium, design: .rounded))
+                                    .foregroundStyle(.secondary)
+
+                                if !product.note.isEmpty {
+                                    Text(product.note)
+                                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if let url = store.searchURL(for: product) {
+                                    Link(destination: url) {
+                                        Label("View at \(store.rawValue)", systemImage: "arrow.up.right.square")
+                                            .font(.system(size: 12, weight: .bold, design: .rounded))
+                                            .foregroundStyle(.blue)
+                                    }
+                                }
+                            }
+                            .padding(11)
+                            .background(Color.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        }
+                    }
+                    .transition(.opacity.combined(with: .move(edge: .top)))
+                }
             }
         }
         .padding(12)
